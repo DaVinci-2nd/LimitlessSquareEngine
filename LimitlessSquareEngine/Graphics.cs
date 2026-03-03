@@ -4,10 +4,160 @@ using Silk.NET.Windowing;
 using System.Numerics;
 namespace LimitlessSquareEngine
 {
+    [MoonSharpUserData]
     internal class Graphics
     {
         private GL _gl;
         private IWindow _window;
+
+        // 图形词典
+        private Dictionary<string, uint> _shaderPrograms = new Dictionary<string, uint>();
+        // 激活的着色器序列
+        private uint _currentProgram;
+
+        /// <summary>
+        /// 加载着色器
+        /// </summary>
+        /// <exception cref="DirectoryNotFoundException"></exception>
+        /// <exception cref="Exception"></exception>
+        private void LoadShaders()
+        {
+            string shadersPath = Path.Combine(AppContext.BaseDirectory, "Shaders");
+            if (!Directory.Exists(shadersPath))
+                throw new DirectoryNotFoundException("Shaders folder not found.");
+
+            // 获取所有着色器
+            string[] vertexFiles = Directory.GetFiles(shadersPath, "*.vert", SearchOption.AllDirectories);
+            foreach (string vertFile in vertexFiles)
+            {
+                string directory = Path.GetDirectoryName(vertFile);
+                string name = Path.GetFileNameWithoutExtension(vertFile);
+                string fragFile = Path.Combine(directory, name + ".frag");
+                if (!File.Exists(fragFile))
+                {
+                    Console.WriteLine($"找不到与 {vertFile} 对应的frag文件，已跳过。");
+                    continue;
+                }
+
+                string vertexSource = File.ReadAllText(vertFile);
+                string fragmentSource = File.ReadAllText(fragFile);
+
+                uint vertexShader = CompileShader(ShaderType.VertexShader, vertexSource);
+                uint fragmentShader = CompileShader(ShaderType.FragmentShader, fragmentSource);
+
+                uint program = _gl.CreateProgram();
+                _gl.AttachShader(program, vertexShader);
+                _gl.AttachShader(program, fragmentShader);
+                _gl.LinkProgram(program);
+
+                _gl.GetProgram(program, ProgramPropertyARB.LinkStatus, out int success);
+                if (success == 0)
+                {
+                    string infoLog = _gl.GetProgramInfoLog(program);
+                    throw new Exception($"着色器 '{name}' 链接失败：{infoLog}");
+                }
+
+                _gl.DetachShader(program, vertexShader);
+                _gl.DetachShader(program, fragmentShader);
+                _gl.DeleteShader(vertexShader);
+                _gl.DeleteShader(fragmentShader);
+
+                string relativePath = vertFile.Substring(shadersPath.Length + 1);
+                string key = relativePath.Replace(".vert", "").Replace('\\', '/');
+                _shaderPrograms[key] = program;
+                Console.WriteLine($"已加载着色器 {key}");
+            }
+
+            if (_shaderPrograms.Count == 0)
+                throw new Exception("未找到任何有效的着色器");
+
+            // 设置默认程序
+            _shaderProgram = _shaderPrograms.Values.First();
+            _currentProgram = _shaderProgram;
+            _gl.UseProgram(_currentProgram);
+        }
+
+        /// <summary>
+        /// 应用着色器
+        /// </summary>
+        /// <param name="name"></param>
+        /// <exception cref="ScriptRuntimeException"></exception>
+        public void UseShader(string name)
+        {
+            if (_shaderPrograms.TryGetValue(name, out uint program))
+            {
+                if (_currentProgram != program)
+                {
+                    _currentProgram = program;
+                    _gl.UseProgram(program);
+                }
+            }
+            else
+            {
+                // 未找到着色器时用备用着色器代替
+                Console.WriteLine($"Shader '{name}' not found.");
+                const string fallbackKey = "__internal_fallback_purple__";
+                if (!_shaderPrograms.TryGetValue(fallbackKey, out uint fallbackProgram))
+                {
+                    fallbackProgram = CreateFallbackShaderProgram();
+                    _shaderPrograms[fallbackKey] = fallbackProgram;
+                }
+                if (_currentProgram != fallbackProgram)
+                {
+                    _currentProgram = fallbackProgram;
+                    _gl.UseProgram(fallbackProgram);
+                }
+            }
+        }
+
+        /// <summary>
+        /// 备用着色器
+        /// </summary>
+        /// <returns></returns>
+        /// <exception cref="Exception"></exception>
+        private uint CreateFallbackShaderProgram()
+        {
+            string vertexSource = @"
+                #version 330 core
+                layout(location = 0) in vec3 aPos;
+                layout(location = 1) in vec4 aColor;
+                out vec4 vColor;
+                void main()
+                {
+                    gl_Position = vec4(aPos, 1.0);
+                    vColor = aColor;
+                }";
+
+            string fragmentSource = @"
+                #version 330 core
+                out vec4 FragColor;
+                void main()
+                {
+                    FragColor = vec4(1.0, 0.0, 1.0, 1.0);
+                }";
+
+            uint vertexShader = CompileShader(ShaderType.VertexShader, vertexSource);
+            uint fragmentShader = CompileShader(ShaderType.FragmentShader, fragmentSource);
+
+            uint program = _gl.CreateProgram();
+            _gl.AttachShader(program, vertexShader);
+            _gl.AttachShader(program, fragmentShader);
+            _gl.LinkProgram(program);
+
+            _gl.GetProgram(program, ProgramPropertyARB.LinkStatus, out int success);
+            if (success == 0)
+            {
+                string infoLog = _gl.GetProgramInfoLog(program);
+                throw new Exception($"后备紫色着色器链接失败：{infoLog}");
+            }
+
+            _gl.DetachShader(program, vertexShader);
+            _gl.DetachShader(program, fragmentShader);
+            _gl.DeleteShader(vertexShader);
+            _gl.DeleteShader(fragmentShader);
+
+            return program;
+        }
 
         //顶点数据缓存
         private List<float> _vertexBuffer = new List<float>();
@@ -20,7 +170,7 @@ namespace LimitlessSquareEngine
         private Vector4 _currentColor = new Vector4(1.0f, 1.0f, 1.0f, 1.0f);
 
         //背景色
-        private Vector4 _backgroundColor = new Vector4(0.2f, 0.2f, 0.2f, 1.0f);
+        private Vector4 _backgroundColor = new Vector4(0.0f, 0.0f, 0.0f, 1.0f);
 
 
         public Graphics(GL gl, IWindow window)
@@ -50,7 +200,8 @@ namespace LimitlessSquareEngine
             _gl.VertexAttribPointer(1, 4, VertexAttribPointerType.Float, false, 7 * sizeof(float), 3 * sizeof(float));
             _gl.EnableVertexAttribArray(1);
 
-            _shaderProgram = CreateShaderProgram();
+            // _shaderProgram = CreateShaderProgram();
+            LoadShaders();
 
             _gl.BindBuffer(BufferTargetARB.ArrayBuffer, 0);
             _gl.BindVertexArray(0);
@@ -77,11 +228,16 @@ namespace LimitlessSquareEngine
             return shader;
         }
 
+        /*
         /// <summary>
         /// 创建着色器程序
         /// </summary>
         private uint CreateShaderProgram()
         {
+            // 扫描着色器文件夹
+            string shadersPath = Path.Combine(AppContext.BaseDirectory, "Shaders");
+            if (!Directory.Exists(shadersPath))
+                throw new DirectoryNotFoundException("Shaders folder not found.");
             // 顶点着色器源码
             string vertexSource = @"
                 #version 330 core
@@ -128,7 +284,7 @@ namespace LimitlessSquareEngine
 
             return program;
         }
-
+        */
 
         /// <summary>
         /// 设置当前绘制颜色 (RGBA, 每个分量0-1)
@@ -155,7 +311,7 @@ namespace LimitlessSquareEngine
         }
 
         /// <summary>
-        /// 执行清屏（仅引擎调用，隐藏）
+        /// 执行清屏
         /// </summary>
         [MoonSharpHidden]
         public void ClearBackground()
@@ -320,18 +476,17 @@ namespace LimitlessSquareEngine
             _gl.BindBuffer(BufferTargetARB.ArrayBuffer, _vertexBufferObject);
             _gl.BufferData(BufferTargetARB.ArrayBuffer, (ReadOnlySpan<float>)vertices, BufferUsageARB.DynamicDraw);
 
-            // 重新设置顶点属性指针（确保状态正确）
+            // 重新设置顶点属性指针
             _gl.VertexAttribPointer(0, 3, VertexAttribPointerType.Float, false, 7 * sizeof(float), 0);
             _gl.EnableVertexAttribArray(0);
             _gl.VertexAttribPointer(1, 4, VertexAttribPointerType.Float, false, 7 * sizeof(float), 3 * sizeof(float));
             _gl.EnableVertexAttribArray(1);
 
             // 绑定着色器程序
-            _gl.UseProgram(_shaderProgram);
+            _gl.UseProgram(_currentProgram);
 
             _gl.DrawArrays(primitiveType, 0, (uint)(_vertexBuffer.Count / 7));
 
-            _gl.UseProgram(0);
             _gl.BindBuffer(BufferTargetARB.ArrayBuffer, 0);
             _gl.BindVertexArray(0);
         }
