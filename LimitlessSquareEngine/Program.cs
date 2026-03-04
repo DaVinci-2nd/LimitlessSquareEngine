@@ -1,6 +1,8 @@
 ﻿using MoonSharp.Interpreter;
+using Silk.NET.Core;
 using Silk.NET.OpenGL;
 using Silk.NET.Windowing;
+using SkiaSharp;
 using System.Collections.Concurrent;
 using System.Numerics;
 using System.Text.Json;
@@ -102,6 +104,57 @@ namespace LimitlessSquareEngine
             // 加载事件
             _window.Load += () =>
             {
+                // 图标设置
+                byte[] iconBytes = null;
+                // 搜索图标文件夹
+                string iconFolder = Path.Combine(AppContext.BaseDirectory, "Assets", "Textures", "Icon");
+                if (Directory.Exists(iconFolder))
+                {
+                    var iconFiles = Directory.GetFiles(iconFolder, "*.*", SearchOption.TopDirectoryOnly)
+                        .Where(f => f.EndsWith(".ico", StringComparison.OrdinalIgnoreCase) ||
+                                    f.EndsWith(".png", StringComparison.OrdinalIgnoreCase))
+                        .OrderBy(f => f)
+                        .ToList();
+                    if (iconFiles.Count > 0)
+                    {
+                        string firstIcon = iconFiles[0];
+                        try
+                        {
+                            iconBytes = File.ReadAllBytes(firstIcon);
+                            // 尝试解码验证有效性
+                            using var testCodec = SKCodec.Create(new SKMemoryStream(iconBytes));
+                            if (testCodec == null)
+                            {
+                                iconBytes = null;
+                            }
+                        }
+                        catch
+                        {
+                            iconBytes = null;
+                        }
+                    }
+                }
+
+                // 如果文件图标加载失败或未找到，使用默认图标
+                if (iconBytes == null)
+                {
+                    iconBytes = Properties.Resources.LimitlessSquareEngineIcon;
+                }
+
+                using var codec = SKCodec.Create(new SKMemoryStream(iconBytes));
+
+                var info = new SKImageInfo(codec.Info.Width, codec.Info.Height, SKColorType.Rgba8888, SKAlphaType.Unpremul);
+                byte[] rgba = new byte[info.Width * info.Height * 4];
+
+                var result = codec.GetPixels(info, rgba);
+
+                int w = info.Width;
+                int h = info.Height;
+
+                var iconImage = new RawImage(w, h, rgba);
+                _window.SetWindowIcon(new[] { iconImage });
+                _window.SetWindowIcon(new[] { iconImage });
+
                 // 初始化OpenGL
                 _gl = _window.CreateOpenGL();
                 _gl.ClearColor(0.2f, 0.2f, 0.2f, 1.0f);
