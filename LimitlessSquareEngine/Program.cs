@@ -1,7 +1,10 @@
-﻿using System.Collections.Concurrent;
-using MoonSharp.Interpreter;
+﻿using MoonSharp.Interpreter;
 using Silk.NET.OpenGL;
 using Silk.NET.Windowing;
+using System.Collections.Concurrent;
+using System.Numerics;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace LimitlessSquareEngine
 {
@@ -25,6 +28,37 @@ namespace LimitlessSquareEngine
         }
     }
 
+    public class Vector4JsonConverter : JsonConverter<Vector4>
+    {
+        public override Vector4 Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+        {
+            if (reader.TokenType != JsonTokenType.StartArray)
+                throw new JsonException("Expected start of array.");
+            var values = new float[4];
+            for (int i = 0; i < 4; i++)
+            {
+                reader.Read();
+                if (reader.TokenType == JsonTokenType.EndArray)
+                    throw new JsonException("Insufficient array elements.");
+                values[i] = reader.GetSingle();
+            }
+            reader.Read();
+            if (reader.TokenType != JsonTokenType.EndArray)
+                throw new JsonException("Expected end of array.");
+            return new Vector4(values[0], values[1], values[2], values[3]);
+        }
+
+        public override void Write(Utf8JsonWriter writer, Vector4 value, JsonSerializerOptions options)
+        {
+            writer.WriteStartArray();
+            writer.WriteNumberValue(value.X);
+            writer.WriteNumberValue(value.Y);
+            writer.WriteNumberValue(value.Z);
+            writer.WriteNumberValue(value.W);
+            writer.WriteEndArray();
+        }
+    }
+
     internal class Program
     {
         // Lua脚本定义
@@ -41,6 +75,12 @@ namespace LimitlessSquareEngine
         // 任务ID
         static int nextTaskId = 0;
         static Graphics _graphics;
+
+        // 定义布局集合
+        static Dictionary<string, List<UIElement>> _uiLayouts = new Dictionary<string, List<UIElement>>();
+
+        // 定义前一帧时间
+        private static double _lastFrameTime;
 
         /// <summary>
         /// 初始化方法
@@ -68,6 +108,9 @@ namespace LimitlessSquareEngine
                 var graphics = new Graphics(_gl, _window);
                 graphics.Initialize();
                 _graphics = graphics;
+
+                // 初始化帧时间
+                _lastFrameTime = _window.Time;
 
                 // 任务提交函数
                 Func<string, int> submitTaskFunc = (luaCode) =>
@@ -152,6 +195,54 @@ namespace LimitlessSquareEngine
                     }
                 }
 
+                // 扫描资源文件夹
+                string assetsPath = Path.Combine(AppContext.BaseDirectory, "Assets");
+                if (Directory.Exists(assetsPath))
+                {
+                    var options = new JsonSerializerOptions
+                    {
+                        Converters = { new Vector4JsonConverter() },
+                        PropertyNameCaseInsensitive = true
+                    };
+
+                    string uiBasePath = Path.Combine(assetsPath, "UI");
+                    string[] allFiles = Directory.GetFiles(assetsPath, "*.*", SearchOption.AllDirectories);
+                    foreach (string file in allFiles)
+                    {
+                        string directory = Path.GetDirectoryName(file);
+                        if (directory.StartsWith(uiBasePath, StringComparison.OrdinalIgnoreCase))
+                        {
+                            if (Path.GetExtension(file).Equals(".json", StringComparison.OrdinalIgnoreCase))
+                            {
+                                try
+                                {
+                                    string json = File.ReadAllText(file);
+                                    var elements = JsonSerializer.Deserialize<List<UIElement>>(json, options);
+                                    if (elements != null)
+                                    {
+                                        void SetParent(UIElement element, UIElement parent = null)
+                                        {
+                                            element.Parent = parent;
+                                            foreach (var child in element.Children)
+                                                SetParent(child, element);
+                                        }
+                                        foreach (var element in elements)
+                                            SetParent(element);
+
+                                        string key = Path.GetFileNameWithoutExtension(file);
+                                        _uiLayouts[key] = elements;
+                                        Console.WriteLine($"Loaded UI layout: {key}");
+                                    }
+                                }
+                                catch (Exception ex)
+                                {
+                                    Console.WriteLine($"Failed to load UI layout from {file}: {ex.Message}");
+                                }
+                            }
+                        }
+                    }
+                }
+
                 // 调用所有脚本的init函数
                 foreach (var instance in _luaScriptInstances)
                 {
@@ -185,6 +276,11 @@ namespace LimitlessSquareEngine
             if (_gl == null || _window.IsClosing)
                 return;
 
+            // 帧间隔
+            double currentTime = _window.Time;
+            float deltaTime = (float)(currentTime - _lastFrameTime);
+            _lastFrameTime = currentTime;
+
             // 清除颜色缓冲
             _graphics?.ClearBackground();
 
@@ -195,6 +291,7 @@ namespace LimitlessSquareEngine
                 {
                     try
                     {
+                        instance.LuaScript.Globals["deltaTime"] = deltaTime;
                         instance.LoopFunction.Function.Call();
                     }
                     catch (ScriptRuntimeException ex)

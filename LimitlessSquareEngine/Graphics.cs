@@ -1,7 +1,12 @@
 ﻿using MoonSharp.Interpreter;
 using Silk.NET.OpenGL;
 using Silk.NET.Windowing;
+using SixLabors.ImageSharp;
+using SixLabors.ImageSharp.PixelFormats;
+using SixLabors.ImageSharp.Processing;
 using System.Numerics;
+using System.Runtime.InteropServices;
+
 namespace LimitlessSquareEngine
 {
     [MoonSharpUserData]
@@ -10,8 +15,10 @@ namespace LimitlessSquareEngine
         private GL _gl;
         private IWindow _window;
 
-        // 图形词典
+        // 图形缓存
         private Dictionary<string, uint> _shaderPrograms = new Dictionary<string, uint>();
+        // 纹理缓存
+        private Dictionary<string, uint> _textures = new Dictionary<string, uint>();
         // 激活的着色器序列
         private uint _currentProgram;
 
@@ -210,6 +217,55 @@ namespace LimitlessSquareEngine
         }
 
         /// <summary>
+        /// 纹理着色器
+        /// </summary>
+        private uint CreateTexturedShaderProgram()
+        {
+            string vertexSource = @"
+                #version 330 core
+                layout(location = 0) in vec3 aPos;
+                layout(location = 1) in vec2 aTexCoord;
+                out vec2 vTexCoord;
+                void main()
+                {
+                    gl_Position = vec4(aPos, 1.0);
+                    vTexCoord = aTexCoord;
+                }";
+
+            string fragmentSource = @"
+                #version 330 core
+                uniform sampler2D uTexture;
+                in vec2 vTexCoord;
+                out vec4 FragColor;
+                void main()
+                {
+                    FragColor = texture(uTexture, vTexCoord);
+                }";
+
+            uint vertexShader = CompileShader(ShaderType.VertexShader, vertexSource);
+            uint fragmentShader = CompileShader(ShaderType.FragmentShader, fragmentSource);
+
+            uint program = _gl.CreateProgram();
+            _gl.AttachShader(program, vertexShader);
+            _gl.AttachShader(program, fragmentShader);
+            _gl.LinkProgram(program);
+
+            _gl.GetProgram(program, ProgramPropertyARB.LinkStatus, out int success);
+            if (success == 0)
+            {
+                string infoLog = _gl.GetProgramInfoLog(program);
+                throw new Exception($"纹理着色器链接失败：{infoLog}");
+            }
+
+            _gl.DetachShader(program, vertexShader);
+            _gl.DetachShader(program, fragmentShader);
+            _gl.DeleteShader(vertexShader);
+            _gl.DeleteShader(fragmentShader);
+
+            return program;
+        }
+
+        /// <summary>
         /// 编译着色器
         /// </summary>
         private uint CompileShader(ShaderType type, string source)
@@ -287,7 +343,7 @@ namespace LimitlessSquareEngine
         */
 
         /// <summary>
-        /// 设置当前绘制颜色 (RGBA, 每个分量0-1)
+        /// 设置当前绘制颜色 (每个分量0-1)
         /// </summary>
         public void SetColor(float r, float g, float b, float a = 1.0f)
         {
@@ -303,7 +359,7 @@ namespace LimitlessSquareEngine
         }
 
         /// <summary>
-        /// 设置背景色（供Lua调用）
+        /// 设置背景色
         /// </summary>
         public void SetBackgroundColor(float r, float g, float b, float a = 1.0f)
         {
@@ -446,6 +502,226 @@ namespace LimitlessSquareEngine
                     x + width, y, 0,
                     x + width, y + height, 0,
                     x, y + height, 0);
+        }
+
+
+        /// <summary>
+        /// 从文件加载纹理（使用SixLabors.ImageSharp）
+        /// </summary>
+        private uint LoadTexture(string path)
+        {
+            if (_textures.TryGetValue(path, out uint existingTex))
+                return existingTex;
+
+            if (!File.Exists(path))
+            {
+                Console.WriteLine($"纹理文件不存在: {path}");
+                return 0;
+            }
+
+            try
+            {
+                using (Image<Rgba32> image = Image.Load<Rgba32>(path))
+                {
+                    // 翻转图像，因为OpenGL原点在左下角
+                    image.Mutate(x => x.Flip(FlipMode.Vertical));
+
+                    uint texture = _gl.GenTexture();
+                    _gl.BindTexture(TextureTarget.Texture2D, texture);
+
+                    // 分配缓冲区并复制像素数据
+                    int pixelCount = image.Width * image.Height;
+                    Rgba32[] pixels = new Rgba32[pixelCount];
+                    image.CopyPixelDataTo(pixels);
+
+                    // 转换为字节数组
+                    byte[] pixelBytes = new byte[pixelCount * 4];
+                    for (int i = 0; i < pixelCount; i++)
+                    {
+                        pixelBytes[i * 4] = pixels[i].R;
+                        pixelBytes[i * 4 + 1] = pixels[i].G;
+                        pixelBytes[i * 4 + 2] = pixels[i].B;
+                        pixelBytes[i * 4 + 3] = pixels[i].A;
+                    }
+
+                    _gl.TexImage2D(TextureTarget.Texture2D,
+                            0,
+                            InternalFormat.Rgba,
+                            (uint)image.Width,
+                            (uint)image.Height,
+                            0,
+                            PixelFormat.Rgba,
+                            PixelType.UnsignedByte,
+                            (ReadOnlySpan<byte>)pixelBytes);
+
+                    _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.Linear);
+                    _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMagFilter, (int)TextureMagFilter.Linear);
+                    _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapS, (int)TextureWrapMode.ClampToEdge);
+                    _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapT, (int)TextureWrapMode.ClampToEdge);
+
+                    _textures[path] = texture;
+                    return texture;
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"加载纹理失败 {path}: {ex.Message}");
+                return 0;
+            }
+        }
+
+        /// <summary>
+        /// 绘制带纹理的四边形（使用纹理着色器）
+        /// </summary>
+        private void DrawTexturedQuad(float x1, float y1, float x2, float y2, uint textureId)
+        {
+            if (textureId == 0) return;
+
+            float[] vertices = new float[]
+            {
+                x1, y1, 0,   0, 0,
+                x2, y1, 0,   1, 0,
+                x2, y2, 0,   1, 1,
+                x1, y2, 0,   0, 1
+            };
+            uint[] indices = new uint[] { 0, 1, 2, 2, 3, 0 };
+
+            uint vao = _gl.GenVertexArray();
+            uint vbo = _gl.GenBuffer();
+            uint ebo = _gl.GenBuffer();
+
+            _gl.BindVertexArray(vao);
+
+            _gl.BindBuffer(BufferTargetARB.ArrayBuffer, vbo);
+            _gl.BufferData(BufferTargetARB.ArrayBuffer, (ReadOnlySpan<float>)vertices, BufferUsageARB.StaticDraw);
+
+            _gl.BindBuffer(BufferTargetARB.ElementArrayBuffer, ebo);
+            _gl.BufferData(BufferTargetARB.ElementArrayBuffer, (ReadOnlySpan<uint>)indices, BufferUsageARB.StaticDraw);
+
+            _gl.VertexAttribPointer(0, 3, VertexAttribPointerType.Float, false, 5 * sizeof(float), 0);
+            _gl.EnableVertexAttribArray(0);
+            _gl.VertexAttribPointer(1, 2, VertexAttribPointerType.Float, false, 5 * sizeof(float), 3 * sizeof(float));
+            _gl.EnableVertexAttribArray(1);
+
+            uint prevProgram = _currentProgram;
+            if (_shaderPrograms.TryGetValue("Textured", out uint texProgram))
+            {
+                _gl.UseProgram(texProgram);
+                _gl.ActiveTexture(TextureUnit.Texture0);
+                _gl.BindTexture(TextureTarget.Texture2D, textureId);
+                int texLoc = _gl.GetUniformLocation(texProgram, "uTexture");
+                if (texLoc != -1)
+                    _gl.Uniform1(texLoc, 0);
+            }
+            else
+            {
+                Console.WriteLine("警告：未找到纹理着色器，无法绘制纹理。");
+                _gl.DeleteVertexArray(vao);
+                _gl.DeleteBuffer(vbo);
+                _gl.DeleteBuffer(ebo);
+                return;
+            }
+
+            _gl.DrawElements(PrimitiveType.Triangles, 6, DrawElementsType.UnsignedInt, 0);
+
+            _gl.UseProgram(prevProgram);
+            _gl.DeleteVertexArray(vao);
+            _gl.DeleteBuffer(vbo);
+            _gl.DeleteBuffer(ebo);
+            _gl.BindVertexArray(0);
+            _gl.BindBuffer(BufferTargetARB.ArrayBuffer, 0);
+        }
+
+        // ==================== UI 绘制方法 ====================
+
+        /// <summary>
+        /// 将屏幕像素坐标转换为 NDC 坐标
+        /// </summary>
+        private (float ndcX, float ndcY) PixelToNDC(float pixelX, float pixelY)
+        {
+            float halfWidth = _window.Size.X / 2.0f;
+            float halfHeight = _window.Size.Y / 2.0f;
+            float ndcX = (pixelX - halfWidth) / halfWidth;
+            float ndcY = (halfHeight - pixelY) / halfHeight;
+            return (ndcX, ndcY);
+        }
+
+        /// <summary>
+        /// 绘制一个 UI 元素树
+        /// </summary>
+        public void DrawUI(UIElement root)
+        {
+            DrawUIElement(root);
+        }
+
+        /// <summary>
+        /// 递归绘制 UI 元素
+        /// </summary>
+        private void DrawUIElement(UIElement element)
+        {
+            if (!element.Visible)
+                return;
+
+            Vector4 oldColor = _currentColor;
+
+            if (element.BackgroundColor.W > 0)
+            {
+                SetColor(element.BackgroundColor.X, element.BackgroundColor.Y, element.BackgroundColor.Z, element.BackgroundColor.W);
+                (float x1, float y1) = PixelToNDC(element.X, element.Y);
+                (float x2, float y2) = PixelToNDC(element.X + element.Width, element.Y + element.Height);
+                DrawQuad(x1, y1, 0, x2, y1, 0, x2, y2, 0, x1, y2, 0);
+            }
+
+            switch (element.Type)
+            {
+                case UIElementType.Label:
+                case UIElementType.Button:
+                    if (!string.IsNullOrEmpty(element.Text))
+                    {
+                        SetColor(element.TextColor.X, element.TextColor.Y, element.TextColor.Z, element.TextColor.W);
+                        (float tx1, float ty1) = PixelToNDC(element.X + 5, element.Y + 5);
+                        (float tx2, float ty2) = PixelToNDC(element.X + element.Width - 5, element.Y + element.Height - 5);
+                        DrawQuad(tx1, ty1, 0, tx2, ty1, 0, tx2, ty2, 0, tx1, ty2, 0);
+                    }
+                    break;
+
+                case UIElementType.Image:
+                    if (!string.IsNullOrEmpty(element.ImageSource))
+                    {
+                        string fullPath = Path.Combine(AppContext.BaseDirectory, "Assets", element.ImageSource);
+                        uint texId = LoadTexture(fullPath);
+                        if (texId != 0)
+                        {
+                            (float x1, float y1) = PixelToNDC(element.X, element.Y);
+                            (float x2, float y2) = PixelToNDC(element.X + element.Width, element.Y + element.Height);
+                            DrawTexturedQuad(x1, y1, x2, y2, texId);
+                        }
+                        else
+                        {
+                            // 纹理加载失败，用背景色填充
+                            SetColor(element.BackgroundColor.X, element.BackgroundColor.Y, element.BackgroundColor.Z, element.BackgroundColor.W);
+                            (float x1, float y1) = PixelToNDC(element.X, element.Y);
+                            (float x2, float y2) = PixelToNDC(element.X + element.Width, element.Y + element.Height);
+                            DrawQuad(x1, y1, 0, x2, y1, 0, x2, y2, 0, x1, y2, 0);
+                        }
+                    }
+                    else
+                    {
+                        // 没有图片源，用背景色填充
+                        SetColor(element.BackgroundColor.X, element.BackgroundColor.Y, element.BackgroundColor.Z, element.BackgroundColor.W);
+                        (float x1, float y1) = PixelToNDC(element.X, element.Y);
+                        (float x2, float y2) = PixelToNDC(element.X + element.Width, element.Y + element.Height);
+                        DrawQuad(x1, y1, 0, x2, y1, 0, x2, y2, 0, x1, y2, 0);
+                    }
+                    break;
+            }
+
+            SetColor(oldColor.X, oldColor.Y, oldColor.Z, oldColor.W);
+
+            foreach (var child in element.Children)
+            {
+                DrawUIElement(child);
+            }
         }
 
         /// <summary>
