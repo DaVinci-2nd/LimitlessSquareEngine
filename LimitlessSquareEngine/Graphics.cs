@@ -13,6 +13,9 @@ namespace LimitlessSquareEngine
     {
         private GL _gl;
         private IWindow _window;
+        private uint _quadVAO;
+        private uint _quadVBO;
+        private bool _quadInitialized = false;
 
         // 图形缓存
         private Dictionary<string, uint> _shaderPrograms = new Dictionary<string, uint>();
@@ -186,12 +189,43 @@ namespace LimitlessSquareEngine
         }
 
         /// <summary>
+        /// 初始化渲染资源
+        /// </summary>
+        private void InitQuadRenderer()
+        {
+            if (_quadInitialized) return;
+
+            _quadVAO = _gl.GenVertexArray();
+            _quadVBO = _gl.GenBuffer();
+
+            _gl.BindVertexArray(_quadVAO);
+            _gl.BindBuffer(BufferTargetARB.ArrayBuffer, _quadVBO);
+
+            float[] vertices = new float[6 * 9];
+
+            _gl.BufferData(BufferTargetARB.ArrayBuffer, (ReadOnlySpan<float>)vertices, BufferUsageARB.DynamicDraw);
+
+            _gl.VertexAttribPointer(0, 3, VertexAttribPointerType.Float, false, 9 * sizeof(float), 0);
+            _gl.EnableVertexAttribArray(0);
+
+            _gl.VertexAttribPointer(1, 4, VertexAttribPointerType.Float, false, 9 * sizeof(float), 3 * sizeof(float));
+            _gl.EnableVertexAttribArray(1);
+
+            _gl.VertexAttribPointer(2, 2, VertexAttribPointerType.Float, false, 9 * sizeof(float), 7 * sizeof(float));
+            _gl.EnableVertexAttribArray(2);
+
+            _gl.BindVertexArray(0);
+
+            _quadInitialized = true;
+        }
+
+        /// <summary>
         /// 初始化OpenGL资源
         /// </summary>
         public void Initialize()
         {
             if (_isInitialized) return;
-
+            InitQuadRenderer();
             // 创建VAO和VBO
             _vertexArrayObject = _gl.GenVertexArray();
             _vertexBufferObject = _gl.GenBuffer();
@@ -200,68 +234,25 @@ namespace LimitlessSquareEngine
             _gl.BindBuffer(BufferTargetARB.ArrayBuffer, _vertexBufferObject);
 
             // 设置顶点属性指针 (位置: 3 floats, 颜色: 4 floats)
-            _gl.VertexAttribPointer(0, 3, VertexAttribPointerType.Float, false, 7 * sizeof(float), 0);
+            _gl.VertexAttribPointer(0, 3, VertexAttribPointerType.Float, false, 9 * sizeof(float), 0);
             _gl.EnableVertexAttribArray(0);
 
-            _gl.VertexAttribPointer(1, 4, VertexAttribPointerType.Float, false, 7 * sizeof(float), 3 * sizeof(float));
+            _gl.VertexAttribPointer(1, 4, VertexAttribPointerType.Float, false, 9 * sizeof(float), 3 * sizeof(float));
             _gl.EnableVertexAttribArray(1);
+
+            _gl.VertexAttribPointer(2, 2, VertexAttribPointerType.Float, false, 9 * sizeof(float), 7 * sizeof(float));
+            _gl.EnableVertexAttribArray(2);
+
 
             // _shaderProgram = CreateShaderProgram();
             LoadShaders();
+            _gl.Enable(GLEnum.DepthTest);
+            _gl.BlendFunc(GLEnum.SrcAlpha, GLEnum.OneMinusSrcAlpha);
 
             _gl.BindBuffer(BufferTargetARB.ArrayBuffer, 0);
             _gl.BindVertexArray(0);
 
             _isInitialized = true;
-        }
-
-        /// <summary>
-        /// 纹理着色器
-        /// </summary>
-        private uint CreateTexturedShaderProgram()
-        {
-            string vertexSource = @"
-                #version 330 core
-                layout(location = 0) in vec3 aPos;
-                layout(location = 1) in vec2 aTexCoord;
-                out vec2 vTexCoord;
-                void main()
-                {
-                    gl_Position = vec4(aPos, 1.0);
-                    vTexCoord = aTexCoord;
-                }";
-
-            string fragmentSource = @"
-                #version 330 core
-                uniform sampler2D uTexture;
-                in vec2 vTexCoord;
-                out vec4 FragColor;
-                void main()
-                {
-                    FragColor = texture(uTexture, vTexCoord);
-                }";
-
-            uint vertexShader = CompileShader(ShaderType.VertexShader, vertexSource);
-            uint fragmentShader = CompileShader(ShaderType.FragmentShader, fragmentSource);
-
-            uint program = _gl.CreateProgram();
-            _gl.AttachShader(program, vertexShader);
-            _gl.AttachShader(program, fragmentShader);
-            _gl.LinkProgram(program);
-
-            _gl.GetProgram(program, ProgramPropertyARB.LinkStatus, out int success);
-            if (success == 0)
-            {
-                string infoLog = _gl.GetProgramInfoLog(program);
-                throw new Exception($"[X] 纹理着色器链接失败：{infoLog}");
-            }
-
-            _gl.DetachShader(program, vertexShader);
-            _gl.DetachShader(program, fragmentShader);
-            _gl.DeleteShader(vertexShader);
-            _gl.DeleteShader(fragmentShader);
-
-            return program;
         }
 
         /// <summary>
@@ -314,7 +305,7 @@ namespace LimitlessSquareEngine
         public void ClearBackground()
         {
             _gl.ClearColor(_backgroundColor.X, _backgroundColor.Y, _backgroundColor.Z, _backgroundColor.W);
-            _gl.Clear(ClearBufferMask.ColorBufferBit);
+            _gl.Clear(ClearBufferMask.ColorBufferBit | ClearBufferMask.DepthBufferBit);
         }
 
 
@@ -323,33 +314,9 @@ namespace LimitlessSquareEngine
         /// </summary>
         public void DrawPoint(float x, float y, float z = 0)
         {
-            // 创建临时顶点数据
-            float[] vertices = new float[]
-            {
-        x, y, z, _currentColor.X, _currentColor.Y, _currentColor.Z, _currentColor.W
-            };
-
-            // 创建临时缓冲并绘制
-            uint vao = _gl.GenVertexArray();
-            uint vbo = _gl.GenBuffer();
-
-            _gl.BindVertexArray(vao);
-            _gl.BindBuffer(BufferTargetARB.ArrayBuffer, vbo);
-            _gl.BufferData(BufferTargetARB.ArrayBuffer, (ReadOnlySpan<float>)vertices, BufferUsageARB.StaticDraw);
-
-            // 设置顶点属性
-            _gl.VertexAttribPointer(0, 3, VertexAttribPointerType.Float, false, 7 * sizeof(float), 0);
-            _gl.EnableVertexAttribArray(0);
-            _gl.VertexAttribPointer(1, 4, VertexAttribPointerType.Float, false, 7 * sizeof(float), 3 * sizeof(float));
-            _gl.EnableVertexAttribArray(1);
-
-            _gl.DrawArrays(PrimitiveType.Points, 0, 1);
-
-            // 清理
-            _gl.DeleteVertexArray(vao);
-            _gl.DeleteBuffer(vbo);
-            _gl.BindVertexArray(0);
-            _gl.BindBuffer(BufferTargetARB.ArrayBuffer, 0);
+            _vertexBuffer.Clear();
+            AddVertex(x, y, z, 0f, 0f);
+            Flush(PrimitiveType.Points);
         }
 
         /// <summary>
@@ -421,17 +388,25 @@ namespace LimitlessSquareEngine
         /// <summary>
         /// 绘制四边形
         /// </summary>
-        public void DrawQuad(float x1, float y1, float z1,
-                            float x2, float y2, float z2,
-                            float x3, float y3, float z3,
-                            float x4, float y4, float z4)
+        public void DrawQuad(
+            float x1, float y1, float z1,
+            float x2, float y2, float z2,
+            float x3, float y3, float z3,
+            float x4, float y4, float z4)
         {
             _vertexBuffer.Clear();
+
+            // triangle 1
             AddVertex(x1, y1, z1);
             AddVertex(x2, y2, z2);
             AddVertex(x3, y3, z3);
+
+            // triangle 2
+            AddVertex(x3, y3, z3);
             AddVertex(x4, y4, z4);
-            Flush(PrimitiveType.Quads);
+            AddVertex(x1, y1, z1);
+
+            Flush(PrimitiveType.Triangles);
         }
 
         /// <summary>
@@ -444,10 +419,174 @@ namespace LimitlessSquareEngine
                     x + width, y + height, 0,
                     x, y + height, 0);
         }
+        /// <summary>
+        /// 绘制纹理面
+        /// </summary>
+        /// <param name="x1"></param>
+        /// <param name="y1"></param>
+        /// <param name="z1"></param>
+        /// <param name="x2"></param>
+        /// <param name="y2"></param>
+        /// <param name="z2"></param>
+        /// <param name="x3"></param>
+        /// <param name="y3"></param>
+        /// <param name="z3"></param>
+        /// <param name="x4"></param>
+        /// <param name="y4"></param>
+        /// <param name="z4"></param>
+        /// <param name="texturePath"></param>
+        public void DrawTextured(
+            float x1, float y1, float z1,
+            float x2, float y2, float z2,
+            float x3, float y3, float z3,
+            float x4, float y4, float z4,
+            string texturePath)
+        {
+            int texLoc = _gl.GetUniformLocation(_currentProgram, "uTexture");
+            if (texLoc == -1)
+            {
+                Console.WriteLine("[X] Current shader does not support texture");
+                return;
+            }
+
+            string fullPath = Path.Combine(AppContext.BaseDirectory, "Assets", "Textures", texturePath);
+            uint texId = LoadTexture(fullPath);
+            if (texId == 0)
+            {
+                Console.WriteLine($"[X] Texture not found: {fullPath}");
+                return;
+            }
+
+            // 两个三角形
+            float[] vertices =
+            {
+                // triangle 1
+                x1,y1,z1, 1,1,1,1, 0,0,
+                x2,y2,z2, 1,1,1,1, 1,0,
+                x3,y3,z3, 1,1,1,1, 1,1,
+
+                // triangle 2
+                x3,y3,z3, 1,1,1,1, 1,1,
+                x4,y4,z4, 1,1,1,1, 0,1,
+                x1,y1,z1, 1,1,1,1, 0,0
+            };
+
+            InitQuadRenderer();
+
+            _gl.UseProgram(_currentProgram);
+
+            _gl.BindVertexArray(_quadVAO);
+            _gl.BindBuffer(BufferTargetARB.ArrayBuffer, _quadVBO);
+
+            _gl.BufferSubData(BufferTargetARB.ArrayBuffer, 0, (ReadOnlySpan<float>)vertices);
+
+            _gl.VertexAttribPointer(0, 3, VertexAttribPointerType.Float, false, 9 * sizeof(float), 0);
+            _gl.EnableVertexAttribArray(0);
+
+            _gl.VertexAttribPointer(1, 4, VertexAttribPointerType.Float, false, 9 * sizeof(float), 3 * sizeof(float));
+            _gl.EnableVertexAttribArray(1);
+
+            _gl.VertexAttribPointer(2, 2, VertexAttribPointerType.Float, false, 9 * sizeof(float), 7 * sizeof(float));
+            _gl.EnableVertexAttribArray(2);
+
+            int useTexLoc = _gl.GetUniformLocation(_currentProgram, "uUseTexture");
+            if (useTexLoc != -1)
+                _gl.Uniform1(useTexLoc, 1);
+
+            int colorLoc = _gl.GetUniformLocation(_currentProgram, "uColor");
+            if (colorLoc != -1)
+                _gl.Uniform4(colorLoc, 1f, 1f, 1f, 1f);
+
+            _gl.ActiveTexture(TextureUnit.Texture0);
+            _gl.BindTexture(TextureTarget.Texture2D, texId);
+
+            _gl.Uniform1(texLoc, 0);
+
+            _gl.DrawArrays(PrimitiveType.Triangles, 0, 6);
+
+            _gl.BindTexture(TextureTarget.Texture2D, 0);
+            _gl.BindBuffer(BufferTargetARB.ArrayBuffer, 0);
+            _gl.BindVertexArray(0);
+        }
+
+        /// <summary>
+        /// 绘制带纹理的四边形
+        /// </summary>
+        public void DrawTexturedQuad(float x1, float y1, float x2, float y2, string texturePath)
+        {
+            int texLoc = _gl.GetUniformLocation(_currentProgram, "uTexture");
+            if (texLoc == -1)
+            {
+                Console.WriteLine("[X] Current shader does not support texture");
+                return;
+            }
+
+            string fullPath = Path.Combine(AppContext.BaseDirectory, "Assets", "Textures", texturePath);
+            uint texId = LoadTexture(fullPath);
+            if (texId == 0)
+            {
+                Console.WriteLine($"[X] The texture file does not exist: {fullPath}");
+                return;
+            }
+
+            // 直接展开成两个三角形，完全绕开 EBO / DrawElements
+            float[] vertices = new float[]
+            {
+                // triangle 1
+             // x   y   z     r  g  b  a    u  v
+                x1, y1, 0,    1, 1, 1, 1,   0, 0,
+                x2, y1, 0,    1, 1, 1, 1,   1, 0,
+                x2, y2, 0,    1, 1, 1, 1,   1, 1,
+
+                // triangle 2
+                x2, y2, 0,    1, 1, 1, 1,   1, 1,
+                x1, y2, 0,    1, 1, 1, 1,   0, 1,
+                x1, y1, 0,    1, 1, 1, 1,   0, 0
+            };
+
+            InitQuadRenderer();
+            _gl.BindVertexArray(_quadVAO);
+            _gl.BindBuffer(BufferTargetARB.ArrayBuffer, _quadVBO);
+
+            _gl.UseProgram(_currentProgram);
+
+            _gl.BindVertexArray(_quadVAO);
+            _gl.BindBuffer(BufferTargetARB.ArrayBuffer, _quadVBO);
+            _gl.BufferSubData(BufferTargetARB.ArrayBuffer, 0, (ReadOnlySpan<float>)vertices);
+
+            _gl.VertexAttribPointer(0, 3, VertexAttribPointerType.Float, false, 9 * sizeof(float), 0);
+            _gl.EnableVertexAttribArray(0);
+
+            _gl.VertexAttribPointer(1, 4, VertexAttribPointerType.Float, false, 9 * sizeof(float), 3 * sizeof(float));
+            _gl.EnableVertexAttribArray(1);
+
+            _gl.VertexAttribPointer(2, 2, VertexAttribPointerType.Float, false, 9 * sizeof(float), 7 * sizeof(float));
+            _gl.EnableVertexAttribArray(2);
+
+            int useTexLoc = _gl.GetUniformLocation(_currentProgram, "uUseTexture");
+            if (useTexLoc != -1)
+                _gl.Uniform1(useTexLoc, 1);
+
+            int colorLoc = _gl.GetUniformLocation(_currentProgram, "uColor");
+            if (colorLoc != -1)
+                _gl.Uniform4(colorLoc, 1f, 1f, 1f, 1f);
+
+            _gl.ActiveTexture(TextureUnit.Texture0);
+            _gl.BindTexture(TextureTarget.Texture2D, texId);
+            _gl.Uniform1(texLoc, 0);
+
+            _gl.DrawArrays(PrimitiveType.Triangles, 0, 6);
+
+            _gl.BindTexture(TextureTarget.Texture2D, 0);
+            _gl.BindBuffer(BufferTargetARB.ArrayBuffer, 0);
+            _gl.BindVertexArray(0);
+        }
+
+        
 
 
         /// <summary>
-        /// 从文件加载纹理（使用SixLabors.ImageSharp）
+        /// 从文件加载纹理
         /// </summary>
         private uint LoadTexture(string path)
         {
@@ -495,6 +634,8 @@ namespace LimitlessSquareEngine
                             PixelType.UnsignedByte,
                             (ReadOnlySpan<byte>)pixelBytes);
 
+                    _gl.GenerateMipmap(TextureTarget.Texture2D);
+
                     _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.Linear);
                     _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMagFilter, (int)TextureMagFilter.Linear);
                     _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapS, (int)TextureWrapMode.ClampToEdge);
@@ -509,68 +650,6 @@ namespace LimitlessSquareEngine
                 Console.WriteLine($"[X] Failed to load texture {path}: {ex.Message}");
                 return 0;
             }
-        }
-
-        /// <summary>
-        /// 绘制带纹理的四边形
-        /// </summary>
-        private void DrawTexturedQuad(float x1, float y1, float x2, float y2, uint textureId)
-        {
-            if (textureId == 0) return;
-
-            float[] vertices = new float[]
-            {
-                x1, y1, 0,   0, 0,
-                x2, y1, 0,   1, 0,
-                x2, y2, 0,   1, 1,
-                x1, y2, 0,   0, 1
-            };
-            uint[] indices = new uint[] { 0, 1, 2, 2, 3, 0 };
-
-            uint vao = _gl.GenVertexArray();
-            uint vbo = _gl.GenBuffer();
-            uint ebo = _gl.GenBuffer();
-
-            _gl.BindVertexArray(vao);
-
-            _gl.BindBuffer(BufferTargetARB.ArrayBuffer, vbo);
-            _gl.BufferData(BufferTargetARB.ArrayBuffer, (ReadOnlySpan<float>)vertices, BufferUsageARB.StaticDraw);
-
-            _gl.BindBuffer(BufferTargetARB.ElementArrayBuffer, ebo);
-            _gl.BufferData(BufferTargetARB.ElementArrayBuffer, (ReadOnlySpan<uint>)indices, BufferUsageARB.StaticDraw);
-
-            _gl.VertexAttribPointer(0, 3, VertexAttribPointerType.Float, false, 5 * sizeof(float), 0);
-            _gl.EnableVertexAttribArray(0);
-            _gl.VertexAttribPointer(1, 2, VertexAttribPointerType.Float, false, 5 * sizeof(float), 3 * sizeof(float));
-            _gl.EnableVertexAttribArray(1);
-
-            uint prevProgram = _currentProgram;
-            if (_shaderPrograms.TryGetValue("Textured", out uint texProgram))
-            {
-                _gl.UseProgram(texProgram);
-                _gl.ActiveTexture(TextureUnit.Texture0);
-                _gl.BindTexture(TextureTarget.Texture2D, textureId);
-                int texLoc = _gl.GetUniformLocation(texProgram, "uTexture");
-                if (texLoc != -1)
-                    _gl.Uniform1(texLoc, 0);
-            }
-            else
-            {
-                Console.WriteLine("[X] No shader supporting textures was found, unable to draw textures");
-                _gl.DeleteVertexArray(vao);
-                _gl.DeleteBuffer(vbo);
-                _gl.DeleteBuffer(ebo);
-                return;
-            }
-
-            _gl.DrawElements(PrimitiveType.Triangles, 6, DrawElementsType.UnsignedInt, 0);
-
-            _gl.UseProgram(prevProgram);
-            _gl.DeleteVertexArray(vao);
-            _gl.DeleteBuffer(vbo);
-            _gl.DeleteBuffer(ebo);
-            _gl.BindVertexArray(0);
-            _gl.BindBuffer(BufferTargetARB.ArrayBuffer, 0);
         }
 
         // ==================== UI 绘制方法 ====================
@@ -635,7 +714,7 @@ namespace LimitlessSquareEngine
                         {
                             (float x1, float y1) = PixelToNDC(element.X, element.Y);
                             (float x2, float y2) = PixelToNDC(element.X + element.Width, element.Y + element.Height);
-                            DrawTexturedQuad(x1, y1, x2, y2, texId);
+                            DrawTexturedQuad(x1, y1, x2, y2, element.ImageSource);
                         }
                         else
                         {
@@ -666,17 +745,14 @@ namespace LimitlessSquareEngine
         }
 
         /// <summary>
-        /// 添加一个顶点到缓冲区
+        /// 添加带UV顶点到缓冲区
         /// </summary>
-        private void AddVertex(float x, float y, float z)
+        private void AddVertex(float x, float y, float z, float u = 0f, float v = 0f)
         {
-            _vertexBuffer.Add(x);
-            _vertexBuffer.Add(y);
-            _vertexBuffer.Add(z);
-            _vertexBuffer.Add(_currentColor.X);
-            _vertexBuffer.Add(_currentColor.Y);
-            _vertexBuffer.Add(_currentColor.Z);
-            _vertexBuffer.Add(_currentColor.W);
+            _vertexBuffer.Add(x); _vertexBuffer.Add(y); _vertexBuffer.Add(z);
+            _vertexBuffer.Add(_currentColor.X); _vertexBuffer.Add(_currentColor.Y);
+            _vertexBuffer.Add(_currentColor.Z); _vertexBuffer.Add(_currentColor.W);
+            _vertexBuffer.Add(u); _vertexBuffer.Add(v);
         }
 
         /// <summary>
@@ -694,15 +770,25 @@ namespace LimitlessSquareEngine
             _gl.BufferData(BufferTargetARB.ArrayBuffer, (ReadOnlySpan<float>)vertices, BufferUsageARB.DynamicDraw);
 
             // 重新设置顶点属性指针
-            _gl.VertexAttribPointer(0, 3, VertexAttribPointerType.Float, false, 7 * sizeof(float), 0);
+            _gl.VertexAttribPointer(0, 3, VertexAttribPointerType.Float, false, 9 * sizeof(float), 0);
             _gl.EnableVertexAttribArray(0);
-            _gl.VertexAttribPointer(1, 4, VertexAttribPointerType.Float, false, 7 * sizeof(float), 3 * sizeof(float));
+
+            _gl.VertexAttribPointer(1, 4, VertexAttribPointerType.Float, false, 9 * sizeof(float), 3 * sizeof(float));
             _gl.EnableVertexAttribArray(1);
+
+            _gl.VertexAttribPointer(2, 2, VertexAttribPointerType.Float, false, 9 * sizeof(float), 7 * sizeof(float));
+            _gl.EnableVertexAttribArray(2);
+
 
             // 绑定着色器程序
             _gl.UseProgram(_currentProgram);
+            int useTexLoc = _gl.GetUniformLocation(_currentProgram, "uUseTexture");
+            if (useTexLoc != -1) _gl.Uniform1(useTexLoc, 0);
 
-            _gl.DrawArrays(primitiveType, 0, (uint)(_vertexBuffer.Count / 7));
+            int colorLoc = _gl.GetUniformLocation(_currentProgram, "uColor");
+            if (colorLoc != -1) _gl.Uniform4(colorLoc, 1f, 1f, 1f, 1f);
+
+            _gl.DrawArrays(primitiveType, 0, (uint)(_vertexBuffer.Count / 9));
 
             _gl.BindBuffer(BufferTargetARB.ArrayBuffer, 0);
             _gl.BindVertexArray(0);

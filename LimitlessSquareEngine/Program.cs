@@ -4,6 +4,7 @@ using Silk.NET.Core;
 using Silk.NET.OpenGL;
 using Silk.NET.Windowing;
 using SkiaSharp;
+using System;
 using System.Collections.Concurrent;
 using System.Numerics;
 using System.Text.Json;
@@ -91,7 +92,8 @@ namespace LimitlessSquareEngine
         static int nextTaskId = 0;
 
         static Graphics? _graphics;
-
+        // 定义纹理路径集合
+        static List<string> _texturePaths = new List<string>();
         // 定义布局集合
         static Dictionary<string, List<UIElement>> _uiLayouts = new Dictionary<string, List<UIElement>>();
 
@@ -108,7 +110,7 @@ namespace LimitlessSquareEngine
             {
                 Directory.CreateDirectory("Assets/Scene");
                 Directory.CreateDirectory("Assets/Textures/Icon");
-                Directory.CreateDirectory("Assets/Textures/UI");
+                Directory.CreateDirectory("Assets/UI");
                 Directory.CreateDirectory("Scripts");
                 Directory.CreateDirectory("Assets/Shaders");
             }
@@ -260,6 +262,11 @@ namespace LimitlessSquareEngine
                         instance.LuaScript.Globals["graphics"] = graphics;
                         // 注入打印输出
                         instance.LuaScript.Globals["print"] = (Action<object>)((obj) => Console.WriteLine(obj));
+                        // 注入纹理目录
+                        Table textureTable = new Table(instance.LuaScript);
+                        foreach (var path in _texturePaths)
+                            textureTable.Append(DynValue.NewString(path));
+                        instance.LuaScript.Globals["texture_paths"] = textureTable;
 
                         // 执行脚本文件
                         instance.LuaScript.DoFile(file);
@@ -293,6 +300,7 @@ namespace LimitlessSquareEngine
                     foreach (string file in allFiles)
                     {
                         string? directory = Path.GetDirectoryName(file);
+                        // UI布局文件
                         if (directory.StartsWith(uiBasePath, StringComparison.OrdinalIgnoreCase))
                         {
                             if (Path.GetExtension(file).Equals(".json", StringComparison.OrdinalIgnoreCase))
@@ -323,6 +331,16 @@ namespace LimitlessSquareEngine
                                     Console.WriteLine($"[!] Failed to load UI layout from {file}: {ex.Message}");
                                 }
                             }
+                        }
+
+                        // 纹理文件
+                        string texturesBasePath = Path.Combine(assetsPath, "Textures");
+                        if (file.StartsWith(texturesBasePath, StringComparison.OrdinalIgnoreCase) &&
+                            Path.GetExtension(file).Equals(".png", StringComparison.OrdinalIgnoreCase))
+                        {
+                            string relativePath = file.Substring(texturesBasePath.Length + 1);
+                            relativePath = relativePath.Replace('\\', '/');
+                            _texturePaths.Add(relativePath);
                         }
                     }
                 }
