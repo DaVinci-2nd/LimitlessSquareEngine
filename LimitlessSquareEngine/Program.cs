@@ -1,4 +1,5 @@
 ﻿using MoonSharp.Interpreter;
+using MoonSharp.Interpreter.Platforms;
 using Silk.NET.Core;
 using Silk.NET.OpenGL;
 using Silk.NET.Windowing;
@@ -23,8 +24,20 @@ namespace LimitlessSquareEngine
         public LuaScriptInstance(string filePath)
         {
             FilePath = filePath;
+            // 配置Lua设置
+            Script.GlobalOptions.Platform = new LimitedPlatformAccessor();
             // 创建独立Lua解释器环境
-            LuaScript = new Script();
+            LuaScript = new Script(CoreModules.Basic | CoreModules.Math | CoreModules.String | CoreModules.Table | CoreModules.Coroutine);
+            // 防止开发者顺网线爬进你的系统
+            LuaScript.Globals["os"] = DynValue.Nil;
+            LuaScript.Globals["io"] = DynValue.Nil;
+            LuaScript.Globals["file"] = DynValue.Nil;
+            LuaScript.Globals["load"] = DynValue.Nil;
+            LuaScript.Globals["loadfile"] = DynValue.Nil;
+            LuaScript.Globals["dofile"] = DynValue.Nil;
+            LuaScript.Globals["loadstring"] = DynValue.Nil;
+            LuaScript.Globals["package"] = DynValue.Nil;
+            LuaScript.Globals["require"] = DynValue.Nil;
             InitFunction = DynValue.Nil;
             LoopFunction = DynValue.Nil;
         }
@@ -66,9 +79,9 @@ namespace LimitlessSquareEngine
         // Lua脚本定义
         static List<LuaScriptInstance> _luaScriptInstances = new List<LuaScriptInstance>();
         // 窗口定义
-        static IWindow _window;
+        static IWindow? _window;
         // 图形定义
-        static GL _gl;
+        static GL? _gl;
 
         // 定义任务队列
         static BlockingCollection<Action> taskQueue = new BlockingCollection<Action>();
@@ -76,7 +89,8 @@ namespace LimitlessSquareEngine
         static ConcurrentDictionary<int, TaskCompletionSource<DynValue>> taskResults = new ConcurrentDictionary<int, TaskCompletionSource<DynValue>>();
         // 任务ID
         static int nextTaskId = 0;
-        static Graphics _graphics;
+
+        static Graphics? _graphics;
 
         // 定义布局集合
         static Dictionary<string, List<UIElement>> _uiLayouts = new Dictionary<string, List<UIElement>>();
@@ -89,6 +103,20 @@ namespace LimitlessSquareEngine
         /// </summary>
         static void Initialize()
         {
+            // 文件结构创建
+            try
+            {
+                Directory.CreateDirectory("Assets/Scene");
+                Directory.CreateDirectory("Assets/Textures/Icon");
+                Directory.CreateDirectory("Assets/Textures/UI");
+                Directory.CreateDirectory("Scripts");
+                Directory.CreateDirectory("Assets/Shaders");
+            }
+            catch 
+            {
+
+            }
+
             // 注册数据类型
             UserData.RegisterType<GameData>();
             // 初始化窗口
@@ -105,7 +133,7 @@ namespace LimitlessSquareEngine
             _window.Load += () =>
             {
                 // 图标设置
-                byte[] iconBytes = null;
+                byte[]? iconBytes = null;
                 // 搜索图标文件夹
                 string iconFolder = Path.Combine(AppContext.BaseDirectory, "Assets", "Textures", "Icon");
                 if (Directory.Exists(iconFolder))
@@ -199,15 +227,15 @@ namespace LimitlessSquareEngine
                         {
                             if (tcs.Task.IsFaulted)
                             {
-                                return new DynValue[] { DynValue.Nil, DynValue.NewString(tcs.Task.Exception.InnerException.Message) };
+                                return [DynValue.Nil, DynValue.NewString(tcs.Task.Exception.InnerException.Message)];
                             }
                             else
                             {
-                                return new DynValue[] { tcs.Task.Result };
+                                return [tcs.Task.Result];
                             }
                         }
                     }
-                    return new DynValue[] { DynValue.Nil };
+                    return [DynValue.Nil];
                 };
 
                 // 定义游戏数据
@@ -230,6 +258,8 @@ namespace LimitlessSquareEngine
                         instance.LuaScript.Globals["get_task_result"] = getTaskResultFunc;
                         // 注入图形对象
                         instance.LuaScript.Globals["graphics"] = graphics;
+                        // 注入打印输出
+                        instance.LuaScript.Globals["print"] = (Action<object>)((obj) => Console.WriteLine(obj));
 
                         // 执行脚本文件
                         instance.LuaScript.DoFile(file);
@@ -244,7 +274,7 @@ namespace LimitlessSquareEngine
                             instance.LoopFunction = loopFunc;
 
                         _luaScriptInstances.Add(instance);
-                        Console.WriteLine($"Loaded script: {file}");
+                        Console.WriteLine($"[i] Loaded script: {file}");
                     }
                 }
 
@@ -262,7 +292,7 @@ namespace LimitlessSquareEngine
                     string[] allFiles = Directory.GetFiles(assetsPath, "*.*", SearchOption.AllDirectories);
                     foreach (string file in allFiles)
                     {
-                        string directory = Path.GetDirectoryName(file);
+                        string? directory = Path.GetDirectoryName(file);
                         if (directory.StartsWith(uiBasePath, StringComparison.OrdinalIgnoreCase))
                         {
                             if (Path.GetExtension(file).Equals(".json", StringComparison.OrdinalIgnoreCase))
@@ -273,9 +303,10 @@ namespace LimitlessSquareEngine
                                     var elements = JsonSerializer.Deserialize<List<UIElement>>(json, options);
                                     if (elements != null)
                                     {
-                                        void SetParent(UIElement element, UIElement parent = null)
+                                        void SetParent(UIElement element, UIElement? parent = null)
                                         {
-                                            element.Parent = parent;
+                                            if (parent != null)
+                                                element.Parent = parent;
                                             foreach (var child in element.Children)
                                                 SetParent(child, element);
                                         }
@@ -284,12 +315,12 @@ namespace LimitlessSquareEngine
 
                                         string key = Path.GetFileNameWithoutExtension(file);
                                         _uiLayouts[key] = elements;
-                                        Console.WriteLine($"Loaded UI layout: {key}");
+                                        Console.WriteLine($"[i] Loaded UI layout: {key}");
                                     }
                                 }
                                 catch (Exception ex)
                                 {
-                                    Console.WriteLine($"Failed to load UI layout from {file}: {ex.Message}");
+                                    Console.WriteLine($"[!] Failed to load UI layout from {file}: {ex.Message}");
                                 }
                             }
                         }
@@ -308,9 +339,16 @@ namespace LimitlessSquareEngine
                     }
                     catch (ScriptRuntimeException ex)
                     {
-                        Console.WriteLine($"Error in init function of script '{instance.FilePath}': {ex.DecoratedMessage}");
+                        Console.WriteLine($"[X] Error in init function of script '{instance.FilePath}': {ex.DecoratedMessage}");
                     }
                 }
+            };
+
+            // 关闭事件
+            _window.Closing += () =>
+            {
+                // 这里以后写退出时的操作！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！
+
             };
 
             // 初始化窗口
@@ -349,7 +387,7 @@ namespace LimitlessSquareEngine
                     }
                     catch (ScriptRuntimeException ex)
                     {
-                        Console.WriteLine($"Error in loop function of script '{instance.FilePath}': {ex.DecoratedMessage}");
+                        Console.WriteLine($"[X] Error in loop function of script '{instance.FilePath}': {ex.DecoratedMessage}");
                     }
                 }
             }
@@ -363,7 +401,17 @@ namespace LimitlessSquareEngine
         /// </summary>
         static void Main()
         {
-            Console.WriteLine("Hello, World!");
+            Console.WriteLine("///////////////////////////////////////////////");
+            Console.WriteLine("Limitless Square Engine");
+            Console.WriteLine("by DaVinci-2nd");
+            Console.WriteLine("///////////////////////////////////////////////");
+            Console.WriteLine("献给热爱游戏的大家！");
+            Console.WriteLine("Dedicated to all those who love games!");
+            Console.WriteLine("-----------------------------------------------");
+            Console.WriteLine("欢迎关注作者的bilibili账号");
+            Console.WriteLine("Welcome to follow the author's Bilibili account");
+            Console.WriteLine("https://space.bilibili.com/432070384");
+            Console.WriteLine("///////////////////////////////////////////////");
             // 执行初始化
             Initialize();
 

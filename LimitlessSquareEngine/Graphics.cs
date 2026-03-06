@@ -5,7 +5,6 @@ using SixLabors.ImageSharp;
 using SixLabors.ImageSharp.PixelFormats;
 using SixLabors.ImageSharp.Processing;
 using System.Numerics;
-using System.Runtime.InteropServices;
 
 namespace LimitlessSquareEngine
 {
@@ -29,9 +28,9 @@ namespace LimitlessSquareEngine
         /// <exception cref="Exception"></exception>
         private void LoadShaders()
         {
-            string shadersPath = Path.Combine(AppContext.BaseDirectory, "Shaders");
+            string shadersPath = Path.Combine(AppContext.BaseDirectory, "Assets", "Shaders");
             if (!Directory.Exists(shadersPath))
-                throw new DirectoryNotFoundException("Shaders folder not found.");
+                throw new DirectoryNotFoundException("[X] Shaders folder not found.");
 
             // 获取所有着色器
             string[] vertexFiles = Directory.GetFiles(shadersPath, "*.vert", SearchOption.AllDirectories);
@@ -42,7 +41,7 @@ namespace LimitlessSquareEngine
                 string fragFile = Path.Combine(directory, name + ".frag");
                 if (!File.Exists(fragFile))
                 {
-                    Console.WriteLine($"找不到与 {vertFile} 对应的frag文件，已跳过。");
+                    Console.WriteLine($"[!] The frag file corresponding to {vertFile} cannot be found, Skipped.");
                     continue;
                 }
 
@@ -61,7 +60,7 @@ namespace LimitlessSquareEngine
                 if (success == 0)
                 {
                     string infoLog = _gl.GetProgramInfoLog(program);
-                    throw new Exception($"着色器 '{name}' 链接失败：{infoLog}");
+                    throw new Exception($"[X] Shader '{name}' failed to link: {infoLog}");
                 }
 
                 _gl.DetachShader(program, vertexShader);
@@ -72,11 +71,11 @@ namespace LimitlessSquareEngine
                 string relativePath = vertFile.Substring(shadersPath.Length + 1);
                 string key = relativePath.Replace(".vert", "").Replace('\\', '/');
                 _shaderPrograms[key] = program;
-                Console.WriteLine($"已加载着色器 {key}");
+                Console.WriteLine($"[i] has been successfully loaded {key} shader");
             }
 
             if (_shaderPrograms.Count == 0)
-                throw new Exception("未找到任何有效的着色器");
+                throw new Exception("[X] No valid shader found");
 
             // 设置默认程序
             _shaderProgram = _shaderPrograms.Values.First();
@@ -102,7 +101,7 @@ namespace LimitlessSquareEngine
             else
             {
                 // 未找到着色器时用备用着色器代替
-                Console.WriteLine($"Shader '{name}' not found.");
+                Console.WriteLine($"[X] Shader '{name}' not found.");
                 const string fallbackKey = "__internal_fallback_purple__";
                 if (!_shaderPrograms.TryGetValue(fallbackKey, out uint fallbackProgram))
                 {
@@ -155,7 +154,7 @@ namespace LimitlessSquareEngine
             if (success == 0)
             {
                 string infoLog = _gl.GetProgramInfoLog(program);
-                throw new Exception($"后备紫色着色器链接失败：{infoLog}");
+                throw new Exception($"[X] Default shader loading error: {infoLog}");
             }
 
             _gl.DetachShader(program, vertexShader);
@@ -254,7 +253,7 @@ namespace LimitlessSquareEngine
             if (success == 0)
             {
                 string infoLog = _gl.GetProgramInfoLog(program);
-                throw new Exception($"纹理着色器链接失败：{infoLog}");
+                throw new Exception($"[X] 纹理着色器链接失败：{infoLog}");
             }
 
             _gl.DetachShader(program, vertexShader);
@@ -279,68 +278,10 @@ namespace LimitlessSquareEngine
             if (success == 0)
             {
                 string infoLog = _gl.GetShaderInfoLog(shader);
-                throw new Exception($"Shader compilation failed: {infoLog}");
+                throw new Exception($"[X] Shader compilation failed: {infoLog}");
             }
             return shader;
         }
-
-        /*
-        /// <summary>
-        /// 创建着色器程序
-        /// </summary>
-        private uint CreateShaderProgram()
-        {
-            // 扫描着色器文件夹
-            string shadersPath = Path.Combine(AppContext.BaseDirectory, "Shaders");
-            if (!Directory.Exists(shadersPath))
-                throw new DirectoryNotFoundException("Shaders folder not found.");
-            // 顶点着色器源码
-            string vertexSource = @"
-                #version 330 core
-                layout(location = 0) in vec3 aPos;
-                layout(location = 1) in vec4 aColor;
-                out vec4 vColor;
-                void main()
-                {
-                    gl_Position = vec4(aPos, 1.0);
-                    vColor = aColor;
-                }";
-
-            // 片段着色器源码
-            string fragmentSource = @"
-                #version 330 core
-                in vec4 vColor;
-                out vec4 FragColor;
-                void main()
-                {
-                    FragColor = vColor;
-                }";
-
-            uint vertexShader = CompileShader(ShaderType.VertexShader, vertexSource);
-            uint fragmentShader = CompileShader(ShaderType.FragmentShader, fragmentSource);
-
-            uint program = _gl.CreateProgram();
-            _gl.AttachShader(program, vertexShader);
-            _gl.AttachShader(program, fragmentShader);
-            _gl.LinkProgram(program);
-
-            // 检查链接错误
-            _gl.GetProgram(program, ProgramPropertyARB.LinkStatus, out int success);
-            if (success == 0)
-            {
-                string infoLog = _gl.GetProgramInfoLog(program);
-                throw new Exception($"Shader program linking failed: {infoLog}");
-            }
-
-            // 链接成功后可以删除着色器对象
-            _gl.DetachShader(program, vertexShader);
-            _gl.DetachShader(program, fragmentShader);
-            _gl.DeleteShader(vertexShader);
-            _gl.DeleteShader(fragmentShader);
-
-            return program;
-        }
-        */
 
         /// <summary>
         /// 设置当前绘制颜色 (每个分量0-1)
@@ -515,7 +456,7 @@ namespace LimitlessSquareEngine
 
             if (!File.Exists(path))
             {
-                Console.WriteLine($"纹理文件不存在: {path}");
+                Console.WriteLine($"[X] The texture file does not exist: {path}");
                 return 0;
             }
 
@@ -565,13 +506,13 @@ namespace LimitlessSquareEngine
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"加载纹理失败 {path}: {ex.Message}");
+                Console.WriteLine($"[X] Failed to load texture {path}: {ex.Message}");
                 return 0;
             }
         }
 
         /// <summary>
-        /// 绘制带纹理的四边形（使用纹理着色器）
+        /// 绘制带纹理的四边形
         /// </summary>
         private void DrawTexturedQuad(float x1, float y1, float x2, float y2, uint textureId)
         {
@@ -615,7 +556,7 @@ namespace LimitlessSquareEngine
             }
             else
             {
-                Console.WriteLine("警告：未找到纹理着色器，无法绘制纹理。");
+                Console.WriteLine("[X] No shader supporting textures was found, unable to draw textures");
                 _gl.DeleteVertexArray(vao);
                 _gl.DeleteBuffer(vbo);
                 _gl.DeleteBuffer(ebo);
@@ -635,7 +576,7 @@ namespace LimitlessSquareEngine
         // ==================== UI 绘制方法 ====================
 
         /// <summary>
-        /// 将屏幕像素坐标转换为 NDC 坐标
+        /// 将屏幕像素坐标转换为NDC坐标
         /// </summary>
         private (float ndcX, float ndcY) PixelToNDC(float pixelX, float pixelY)
         {
@@ -647,7 +588,7 @@ namespace LimitlessSquareEngine
         }
 
         /// <summary>
-        /// 绘制一个 UI 元素树
+        /// 绘制一个UI元素树
         /// </summary>
         public void DrawUI(UIElement root)
         {
@@ -655,7 +596,7 @@ namespace LimitlessSquareEngine
         }
 
         /// <summary>
-        /// 递归绘制 UI 元素
+        /// 递归绘制UI元素
         /// </summary>
         private void DrawUIElement(UIElement element)
         {
