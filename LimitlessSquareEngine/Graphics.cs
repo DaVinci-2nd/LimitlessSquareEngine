@@ -24,6 +24,43 @@ namespace LimitlessSquareEngine
         // 激活的着色器序列
         private uint _currentProgram;
 
+        private RenderSpace _activeRenderSpace = RenderSpace.Canvas;
+
+        private Matrix4x4 _activeModelMatrix = Matrix4x4.Identity;
+        private Matrix4x4 _activeViewMatrix = Matrix4x4.Identity;
+        private Matrix4x4 _activeProjectionMatrix = Matrix4x4.Identity;
+
+        // 给以后的相机/场景系统用
+        private bool _cameraContextActive = false;
+        private int _activeSceneId = -1;
+
+        /// <summary>
+        /// 渲染类型枚举
+        /// </summary>
+        internal enum RenderSpace
+        {
+            Canvas = 0,
+            Camera = 1
+        }
+
+        /// <summary>
+        /// 透视/正交矩阵
+        /// </summary>
+        /// <param name="fovRadians"></param>
+        /// <param name="aspect"></param>
+        /// <param name="near"></param>
+        /// <param name="far"></param>
+        /// <returns></returns>
+        public static Matrix4x4 CreatePerspective(float fovRadians, float aspect, float near, float far)
+        {
+            return Matrix4x4.CreatePerspectiveFieldOfView(fovRadians, aspect, near, far);
+        }
+
+        public static Matrix4x4 CreateOrthographic(float width, float height, float near, float far)
+        {
+            return Matrix4x4.CreateOrthographic(width, height, near, far);
+        }
+
         /// <summary>
         /// 加载着色器
         /// </summary>
@@ -130,10 +167,25 @@ namespace LimitlessSquareEngine
                 #version 330 core
                 layout(location = 0) in vec3 aPos;
                 layout(location = 1) in vec4 aColor;
+
+                uniform int uRenderSpace;
+                uniform mat4 uModel;
+                uniform mat4 uView;
+                uniform mat4 uProjection;
+
                 out vec4 vColor;
+
                 void main()
                 {
-                    gl_Position = vec4(aPos, 1.0);
+                    if (uRenderSpace == 0)
+                    {
+                        gl_Position = vec4(aPos, 1.0);
+                    }
+                    else
+                    {
+                        gl_Position = uProjection * uView * uModel * vec4(aPos, 1.0);
+                    }
+
                     vColor = aColor;
                 }";
 
@@ -248,6 +300,7 @@ namespace LimitlessSquareEngine
             LoadShaders();
             _gl.Enable(GLEnum.DepthTest);
             _gl.BlendFunc(GLEnum.SrcAlpha, GLEnum.OneMinusSrcAlpha);
+            _gl.Enable(GLEnum.Blend);
 
             _gl.BindBuffer(BufferTargetARB.ArrayBuffer, 0);
             _gl.BindVertexArray(0);
@@ -314,6 +367,7 @@ namespace LimitlessSquareEngine
         /// </summary>
         public void DrawPoint(float x, float y, float z = 0)
         {
+            EnsureLuaCanvasMode();
             _vertexBuffer.Clear();
             AddVertex(x, y, z, 0f, 0f);
             Flush(PrimitiveType.Points);
@@ -324,6 +378,7 @@ namespace LimitlessSquareEngine
         /// </summary>
         public void DrawPoints(Table points)
         {
+            EnsureLuaCanvasMode();
             // 清空缓冲
             _vertexBuffer.Clear();
 
@@ -346,6 +401,7 @@ namespace LimitlessSquareEngine
         /// </summary>
         public void DrawLine(float x1, float y1, float z1, float x2, float y2, float z2)
         {
+            EnsureLuaCanvasMode();
             _vertexBuffer.Clear();
             AddVertex(x1, y1, z1);
             AddVertex(x2, y2, z2);
@@ -357,6 +413,7 @@ namespace LimitlessSquareEngine
         /// </summary>
         public void DrawLineStrip(Table points)
         {
+            EnsureLuaCanvasMode();
             _vertexBuffer.Clear();
 
             for (int i = 1; i <= points.Length; i += 3)
@@ -378,6 +435,7 @@ namespace LimitlessSquareEngine
                                  float x2, float y2, float z2,
                                  float x3, float y3, float z3)
         {
+            EnsureLuaCanvasMode();
             _vertexBuffer.Clear();
             AddVertex(x1, y1, z1);
             AddVertex(x2, y2, z2);
@@ -394,6 +452,7 @@ namespace LimitlessSquareEngine
             float x3, float y3, float z3,
             float x4, float y4, float z4)
         {
+            EnsureLuaCanvasMode();
             _vertexBuffer.Clear();
 
             // triangle 1
@@ -414,6 +473,7 @@ namespace LimitlessSquareEngine
         /// </summary>
         public void DrawRect(float x, float y, float width, float height)
         {
+            EnsureLuaCanvasMode();
             DrawQuad(x, y, 0,
                     x + width, y, 0,
                     x + width, y + height, 0,
@@ -442,6 +502,7 @@ namespace LimitlessSquareEngine
             float x4, float y4, float z4,
             string texturePath)
         {
+            EnsureLuaCanvasMode();
             int texLoc = _gl.GetUniformLocation(_currentProgram, "uTexture");
             if (texLoc == -1)
             {
@@ -460,15 +521,13 @@ namespace LimitlessSquareEngine
             // 两个三角形
             float[] vertices =
             {
-                // triangle 1
-                x1,y1,z1, 1,1,1,1, 0,0,
-                x2,y2,z2, 1,1,1,1, 1,0,
-                x3,y3,z3, 1,1,1,1, 1,1,
+                x1,y1,z1, _currentColor.X,_currentColor.Y,_currentColor.Z,_currentColor.W, 0,0,
+                x2,y2,z2, _currentColor.X,_currentColor.Y,_currentColor.Z,_currentColor.W, 1,0,
+                x3,y3,z3, _currentColor.X,_currentColor.Y,_currentColor.Z,_currentColor.W, 1,1,
 
-                // triangle 2
-                x3,y3,z3, 1,1,1,1, 1,1,
-                x4,y4,z4, 1,1,1,1, 0,1,
-                x1,y1,z1, 1,1,1,1, 0,0
+                x3,y3,z3, _currentColor.X,_currentColor.Y,_currentColor.Z,_currentColor.W, 1,1,
+                x4,y4,z4, _currentColor.X,_currentColor.Y,_currentColor.Z,_currentColor.W, 0,1,
+                x1,y1,z1, _currentColor.X,_currentColor.Y,_currentColor.Z,_currentColor.W, 0,0
             };
 
             InitQuadRenderer();
@@ -489,13 +548,7 @@ namespace LimitlessSquareEngine
             _gl.VertexAttribPointer(2, 2, VertexAttribPointerType.Float, false, 9 * sizeof(float), 7 * sizeof(float));
             _gl.EnableVertexAttribArray(2);
 
-            int useTexLoc = _gl.GetUniformLocation(_currentProgram, "uUseTexture");
-            if (useTexLoc != -1)
-                _gl.Uniform1(useTexLoc, 1);
-
-            int colorLoc = _gl.GetUniformLocation(_currentProgram, "uColor");
-            if (colorLoc != -1)
-                _gl.Uniform4(colorLoc, 1f, 1f, 1f, 1f);
+            ApplyRenderUniforms(true);
 
             _gl.ActiveTexture(TextureUnit.Texture0);
             _gl.BindTexture(TextureTarget.Texture2D, texId);
@@ -514,6 +567,7 @@ namespace LimitlessSquareEngine
         /// </summary>
         public void DrawTexturedQuad(float x1, float y1, float x2, float y2, string texturePath)
         {
+            EnsureLuaCanvasMode();
             int texLoc = _gl.GetUniformLocation(_currentProgram, "uTexture");
             if (texLoc == -1)
             {
@@ -529,19 +583,15 @@ namespace LimitlessSquareEngine
                 return;
             }
 
-            // 直接展开成两个三角形，完全绕开 EBO / DrawElements
             float[] vertices = new float[]
             {
-                // triangle 1
-             // x   y   z     r  g  b  a    u  v
-                x1, y1, 0,    1, 1, 1, 1,   0, 0,
-                x2, y1, 0,    1, 1, 1, 1,   1, 0,
-                x2, y2, 0,    1, 1, 1, 1,   1, 1,
+                x1, y1, 0,    _currentColor.X,_currentColor.Y,_currentColor.Z,_currentColor.W,   0, 0,
+                x2, y1, 0,    _currentColor.X,_currentColor.Y,_currentColor.Z,_currentColor.W,   1, 0,
+                x2, y2, 0,    _currentColor.X,_currentColor.Y,_currentColor.Z,_currentColor.W,   1, 1,
 
-                // triangle 2
-                x2, y2, 0,    1, 1, 1, 1,   1, 1,
-                x1, y2, 0,    1, 1, 1, 1,   0, 1,
-                x1, y1, 0,    1, 1, 1, 1,   0, 0
+                x2, y2, 0,    _currentColor.X,_currentColor.Y,_currentColor.Z,_currentColor.W,   1, 1,
+                x1, y2, 0,    _currentColor.X,_currentColor.Y,_currentColor.Z,_currentColor.W,   0, 1,
+                x1, y1, 0,    _currentColor.X,_currentColor.Y,_currentColor.Z,_currentColor.W,   0, 0
             };
 
             InitQuadRenderer();
@@ -563,13 +613,7 @@ namespace LimitlessSquareEngine
             _gl.VertexAttribPointer(2, 2, VertexAttribPointerType.Float, false, 9 * sizeof(float), 7 * sizeof(float));
             _gl.EnableVertexAttribArray(2);
 
-            int useTexLoc = _gl.GetUniformLocation(_currentProgram, "uUseTexture");
-            if (useTexLoc != -1)
-                _gl.Uniform1(useTexLoc, 1);
-
-            int colorLoc = _gl.GetUniformLocation(_currentProgram, "uColor");
-            if (colorLoc != -1)
-                _gl.Uniform4(colorLoc, 1f, 1f, 1f, 1f);
+            ApplyRenderUniforms(true);
 
             _gl.ActiveTexture(TextureUnit.Texture0);
             _gl.BindTexture(TextureTarget.Texture2D, texId);
@@ -671,6 +715,7 @@ namespace LimitlessSquareEngine
         /// </summary>
         public void DrawUI(UIElement root)
         {
+            UseCanvasSpace();
             DrawUIElement(root);
         }
 
@@ -744,6 +789,90 @@ namespace LimitlessSquareEngine
             }
         }
 
+        // 相机系统调用接口
+        public void BeginCameraRender(Matrix4x4 view, Matrix4x4 projection, int sceneId = -1)
+        {
+            _cameraContextActive = true;
+            _activeRenderSpace = RenderSpace.Camera;
+            _activeViewMatrix = view;
+            _activeProjectionMatrix = projection;
+            _activeModelMatrix = Matrix4x4.Identity;
+            _activeSceneId = sceneId;
+        }
+
+        public void SetModelMatrix(Matrix4x4 model)
+        {
+            _activeModelMatrix = model;
+        }
+
+        public void EndCameraRender()
+        {
+            _cameraContextActive = false;
+            _activeRenderSpace = RenderSpace.Canvas;
+            _activeViewMatrix = Matrix4x4.Identity;
+            _activeProjectionMatrix = Matrix4x4.Identity;
+            _activeModelMatrix = Matrix4x4.Identity;
+            _activeSceneId = -1;
+        }
+
+        // 上传辅助函数
+        private void ApplyRenderUniforms(bool useTexture)
+        {
+            int renderSpaceLoc = _gl.GetUniformLocation(_currentProgram, "uRenderSpace");
+            if (renderSpaceLoc != -1)
+                _gl.Uniform1(renderSpaceLoc, (int)_activeRenderSpace);
+
+            int useTexLoc = _gl.GetUniformLocation(_currentProgram, "uUseTexture");
+            if (useTexLoc != -1)
+                _gl.Uniform1(useTexLoc, useTexture ? 1 : 0);
+
+            int colorLoc = _gl.GetUniformLocation(_currentProgram, "uColor");
+            if (colorLoc != -1)
+                _gl.Uniform4(colorLoc, 1f, 1f, 1f, 1f);
+
+            int modelLoc = _gl.GetUniformLocation(_currentProgram, "uModel");
+            if (modelLoc != -1)
+                SetMatrixUniform(modelLoc, _activeModelMatrix);
+
+            int viewLoc = _gl.GetUniformLocation(_currentProgram, "uView");
+            if (viewLoc != -1)
+                SetMatrixUniform(viewLoc, _activeViewMatrix);
+
+            int projLoc = _gl.GetUniformLocation(_currentProgram, "uProjection");
+            if (projLoc != -1)
+                SetMatrixUniform(projLoc, _activeProjectionMatrix);
+        }
+        // 矩阵上传函数
+        private void SetMatrixUniform(int location, Matrix4x4 matrix)
+        {
+            float[] values =
+            {
+        matrix.M11, matrix.M12, matrix.M13, matrix.M14,
+        matrix.M21, matrix.M22, matrix.M23, matrix.M24,
+        matrix.M31, matrix.M32, matrix.M33, matrix.M34,
+        matrix.M41, matrix.M42, matrix.M43, matrix.M44
+    };
+
+            _gl.UniformMatrix4(location, 1, false, values);
+        }
+
+        /// <summary>
+        /// 在Canvas层
+        /// </summary>
+        private void UseCanvasSpace()
+        {
+            _activeRenderSpace = RenderSpace.Canvas;
+            _activeModelMatrix = Matrix4x4.Identity;
+            _activeViewMatrix = Matrix4x4.Identity;
+            _activeProjectionMatrix = Matrix4x4.Identity;
+        }
+
+        private void EnsureLuaCanvasMode()
+        {
+            if (!_cameraContextActive)
+                UseCanvasSpace();
+        }
+
         /// <summary>
         /// 添加带UV顶点到缓冲区
         /// </summary>
@@ -782,11 +911,7 @@ namespace LimitlessSquareEngine
 
             // 绑定着色器程序
             _gl.UseProgram(_currentProgram);
-            int useTexLoc = _gl.GetUniformLocation(_currentProgram, "uUseTexture");
-            if (useTexLoc != -1) _gl.Uniform1(useTexLoc, 0);
-
-            int colorLoc = _gl.GetUniformLocation(_currentProgram, "uColor");
-            if (colorLoc != -1) _gl.Uniform4(colorLoc, 1f, 1f, 1f, 1f);
+            ApplyRenderUniforms(false);
 
             _gl.DrawArrays(primitiveType, 0, (uint)(_vertexBuffer.Count / 9));
 
