@@ -20,7 +20,15 @@ namespace LimitlessSquareEngine
         // 图形缓存
         private Dictionary<string, uint> _shaderPrograms = new Dictionary<string, uint>();
         // 纹理缓存
-        private Dictionary<string, uint> _textures = new Dictionary<string, uint>();
+        private struct TextureInfo
+        {
+            public uint Id;
+            public bool HasTransparency;
+            public int Width;
+            public int Height;
+        }
+
+        private Dictionary<string, TextureInfo> _textures = new();
         // 激活的着色器序列
         private uint _currentProgram;
 
@@ -29,6 +37,32 @@ namespace LimitlessSquareEngine
         private Matrix4x4 _activeModelMatrix = Matrix4x4.Identity;
         private Matrix4x4 _activeViewMatrix = Matrix4x4.Identity;
         private Matrix4x4 _activeProjectionMatrix = Matrix4x4.Identity;
+
+        private enum RenderQueueType
+        {
+            Opaque = 0,
+            Transparent = 1
+        }
+
+        private struct RenderCommand
+        {
+            public float[] Vertices;
+            public PrimitiveType PrimitiveType;
+            public uint Program;
+            public bool UseTexture;
+            public uint TextureId;
+            public RenderSpace RenderSpace;
+
+            public Matrix4x4 Model;
+            public Matrix4x4 View;
+            public Matrix4x4 Projection;
+
+            public RenderQueueType QueueType;
+            public float SortDepth;
+            public long SubmissionIndex;
+        }
+        private readonly List<RenderCommand> _renderQueue = new();
+        private long _submissionCounter = 0;
 
         // 给以后的相机/场景系统用
         private bool _cameraContextActive = false;
@@ -41,6 +75,55 @@ namespace LimitlessSquareEngine
         {
             Canvas = 0,
             Camera = 1
+        }
+
+        /// <summary>
+        /// 透明类型判断
+        /// </summary>
+        /// <param name="textured"></param>
+        /// <param name="textureHasTransparency"></param>
+        /// <returns></returns>
+        private bool IsCurrentDrawTransparent(bool textured, bool textureHasTransparency = false)
+        {
+            if (_currentColor.W < 1f)
+                return true;
+
+            if (textured && textureHasTransparency)
+                return true;
+
+            return false;
+        }
+
+        /// <summary>
+        /// 深度排序
+        /// </summary>
+        /// <param name="vertices"></param>
+        /// <param name="model"></param>
+        /// <param name="view"></param>
+        /// <param name="renderSpace"></param>
+        /// <returns></returns>
+        private float ComputeSortDepth(float[] vertices, Matrix4x4 model, Matrix4x4 view, RenderSpace renderSpace)
+        {
+            int vertexCount = vertices.Length / 9;
+            if (vertexCount == 0) return 0f;
+
+            Vector3 center = Vector3.Zero;
+            for (int i = 0; i < vertexCount; i++)
+            {
+                int idx = i * 9;
+                center += new Vector3(vertices[idx], vertices[idx + 1], vertices[idx + 2]);
+            }
+            center /= vertexCount;
+
+            if (renderSpace == RenderSpace.Canvas)
+            {
+                Vector4 canvasPos = Vector4.Transform(new Vector4(center, 1f), model);
+                return -canvasPos.Z;
+            }
+
+            Vector4 world = Vector4.Transform(new Vector4(center, 1f), model);
+            Vector4 viewPos = Vector4.Transform(world, view);
+            return -viewPos.Z;
         }
 
         /// <summary>
@@ -118,8 +201,7 @@ namespace LimitlessSquareEngine
                 throw new Exception("[X] No valid shader found");
 
             // 设置默认程序
-            _shaderProgram = _shaderPrograms.Values.First();
-            _currentProgram = _shaderProgram;
+            _currentProgram = _shaderPrograms.Values.First();
             _gl.UseProgram(_currentProgram);
         }
 
@@ -127,7 +209,6 @@ namespace LimitlessSquareEngine
         /// 应用着色器
         /// </summary>
         /// <param name="name"></param>
-        /// <exception cref="ScriptRuntimeException"></exception>
         public void UseShader(string name)
         {
             if (_shaderPrograms.TryGetValue(name, out uint program))
@@ -224,7 +305,6 @@ namespace LimitlessSquareEngine
         private List<float> _vertexBuffer = new List<float>();
         private uint _vertexArrayObject;
         private uint _vertexBufferObject;
-        private uint _shaderProgram;
         private bool _isInitialized = false;
 
         //当前绘制颜色
@@ -328,7 +408,7 @@ namespace LimitlessSquareEngine
         }
 
         /// <summary>
-        /// 设置当前绘制颜色 (每个分量0-1)
+        /// 设置当前绘制颜色 (分量0-1)
         /// </summary>
         public void SetColor(float r, float g, float b, float a = 1.0f)
         {
@@ -336,7 +416,7 @@ namespace LimitlessSquareEngine
         }
 
         /// <summary>
-        /// 设置当前绘制颜色 (使用整数0-255)
+        /// 设置当前绘制颜色 (整数0-255)
         /// </summary>
         public void SetColorRGB(int r, int g, int b, int a = 255)
         {
@@ -503,6 +583,7 @@ namespace LimitlessSquareEngine
             string texturePath)
         {
             EnsureLuaCanvasMode();
+
             int texLoc = _gl.GetUniformLocation(_currentProgram, "uTexture");
             if (texLoc == -1)
             {
@@ -511,14 +592,13 @@ namespace LimitlessSquareEngine
             }
 
             string fullPath = Path.Combine(AppContext.BaseDirectory, "Assets", "Textures", texturePath);
-            uint texId = LoadTexture(fullPath);
-            if (texId == 0)
+            TextureInfo tex = LoadTexture(fullPath);
+            if (tex.Id == 0)
             {
                 Console.WriteLine($"[X] Texture not found: {fullPath}");
                 return;
             }
 
-            // 两个三角形
             float[] vertices =
             {
                 x1,y1,z1, _currentColor.X,_currentColor.Y,_currentColor.Z,_currentColor.W, 0,0,
@@ -530,36 +610,25 @@ namespace LimitlessSquareEngine
                 x1,y1,z1, _currentColor.X,_currentColor.Y,_currentColor.Z,_currentColor.W, 0,0
             };
 
-            InitQuadRenderer();
+            bool transparent = IsCurrentDrawTransparent(true, tex.HasTransparency);
 
-            _gl.UseProgram(_currentProgram);
+            var cmd = new RenderCommand
+            {
+                Vertices = vertices,
+                PrimitiveType = PrimitiveType.Triangles,
+                Program = _currentProgram,
+                UseTexture = true,
+                TextureId = tex.Id,
+                RenderSpace = _activeRenderSpace,
+                Model = _activeModelMatrix,
+                View = _activeViewMatrix,
+                Projection = _activeProjectionMatrix,
+                QueueType = transparent ? RenderQueueType.Transparent : RenderQueueType.Opaque,
+                SortDepth = ComputeSortDepth(vertices, _activeModelMatrix, _activeViewMatrix, _activeRenderSpace),
+                SubmissionIndex = _submissionCounter++
+            };
 
-            _gl.BindVertexArray(_quadVAO);
-            _gl.BindBuffer(BufferTargetARB.ArrayBuffer, _quadVBO);
-
-            _gl.BufferSubData(BufferTargetARB.ArrayBuffer, 0, (ReadOnlySpan<float>)vertices);
-
-            _gl.VertexAttribPointer(0, 3, VertexAttribPointerType.Float, false, 9 * sizeof(float), 0);
-            _gl.EnableVertexAttribArray(0);
-
-            _gl.VertexAttribPointer(1, 4, VertexAttribPointerType.Float, false, 9 * sizeof(float), 3 * sizeof(float));
-            _gl.EnableVertexAttribArray(1);
-
-            _gl.VertexAttribPointer(2, 2, VertexAttribPointerType.Float, false, 9 * sizeof(float), 7 * sizeof(float));
-            _gl.EnableVertexAttribArray(2);
-
-            ApplyRenderUniforms(true);
-
-            _gl.ActiveTexture(TextureUnit.Texture0);
-            _gl.BindTexture(TextureTarget.Texture2D, texId);
-
-            _gl.Uniform1(texLoc, 0);
-
-            _gl.DrawArrays(PrimitiveType.Triangles, 0, 6);
-
-            _gl.BindTexture(TextureTarget.Texture2D, 0);
-            _gl.BindBuffer(BufferTargetARB.ArrayBuffer, 0);
-            _gl.BindVertexArray(0);
+            _renderQueue.Add(cmd);
         }
 
         /// <summary>
@@ -568,6 +637,7 @@ namespace LimitlessSquareEngine
         public void DrawTexturedQuad(float x1, float y1, float x2, float y2, string texturePath)
         {
             EnsureLuaCanvasMode();
+
             int texLoc = _gl.GetUniformLocation(_currentProgram, "uTexture");
             if (texLoc == -1)
             {
@@ -576,107 +646,99 @@ namespace LimitlessSquareEngine
             }
 
             string fullPath = Path.Combine(AppContext.BaseDirectory, "Assets", "Textures", texturePath);
-            uint texId = LoadTexture(fullPath);
-            if (texId == 0)
+            TextureInfo tex = LoadTexture(fullPath);
+            if (tex.Id == 0)
             {
                 Console.WriteLine($"[X] The texture file does not exist: {fullPath}");
                 return;
             }
 
-            float[] vertices = new float[]
+            float[] vertices =
             {
-                x1, y1, 0,    _currentColor.X,_currentColor.Y,_currentColor.Z,_currentColor.W,   0, 0,
-                x2, y1, 0,    _currentColor.X,_currentColor.Y,_currentColor.Z,_currentColor.W,   1, 0,
-                x2, y2, 0,    _currentColor.X,_currentColor.Y,_currentColor.Z,_currentColor.W,   1, 1,
+                x1, y1, 0, _currentColor.X,_currentColor.Y,_currentColor.Z,_currentColor.W, 0, 0,
+                x2, y1, 0, _currentColor.X,_currentColor.Y,_currentColor.Z,_currentColor.W, 1, 0,
+                x2, y2, 0, _currentColor.X,_currentColor.Y,_currentColor.Z,_currentColor.W, 1, 1,
 
-                x2, y2, 0,    _currentColor.X,_currentColor.Y,_currentColor.Z,_currentColor.W,   1, 1,
-                x1, y2, 0,    _currentColor.X,_currentColor.Y,_currentColor.Z,_currentColor.W,   0, 1,
-                x1, y1, 0,    _currentColor.X,_currentColor.Y,_currentColor.Z,_currentColor.W,   0, 0
+                x2, y2, 0, _currentColor.X,_currentColor.Y,_currentColor.Z,_currentColor.W, 1, 1,
+                x1, y2, 0, _currentColor.X,_currentColor.Y,_currentColor.Z,_currentColor.W, 0, 1,
+                x1, y1, 0, _currentColor.X,_currentColor.Y,_currentColor.Z,_currentColor.W, 0, 0
             };
 
-            InitQuadRenderer();
-            _gl.BindVertexArray(_quadVAO);
-            _gl.BindBuffer(BufferTargetARB.ArrayBuffer, _quadVBO);
+            bool transparent = IsCurrentDrawTransparent(true, tex.HasTransparency);
 
-            _gl.UseProgram(_currentProgram);
+            var cmd = new RenderCommand
+            {
+                Vertices = vertices,
+                PrimitiveType = PrimitiveType.Triangles,
+                Program = _currentProgram,
+                UseTexture = true,
+                TextureId = tex.Id,
+                RenderSpace = _activeRenderSpace,
+                Model = _activeModelMatrix,
+                View = _activeViewMatrix,
+                Projection = _activeProjectionMatrix,
+                QueueType = transparent ? RenderQueueType.Transparent : RenderQueueType.Opaque,
+                SortDepth = ComputeSortDepth(vertices, _activeModelMatrix, _activeViewMatrix, _activeRenderSpace),
+                SubmissionIndex = _submissionCounter++
+            };
 
-            _gl.BindVertexArray(_quadVAO);
-            _gl.BindBuffer(BufferTargetARB.ArrayBuffer, _quadVBO);
-            _gl.BufferSubData(BufferTargetARB.ArrayBuffer, 0, (ReadOnlySpan<float>)vertices);
-
-            _gl.VertexAttribPointer(0, 3, VertexAttribPointerType.Float, false, 9 * sizeof(float), 0);
-            _gl.EnableVertexAttribArray(0);
-
-            _gl.VertexAttribPointer(1, 4, VertexAttribPointerType.Float, false, 9 * sizeof(float), 3 * sizeof(float));
-            _gl.EnableVertexAttribArray(1);
-
-            _gl.VertexAttribPointer(2, 2, VertexAttribPointerType.Float, false, 9 * sizeof(float), 7 * sizeof(float));
-            _gl.EnableVertexAttribArray(2);
-
-            ApplyRenderUniforms(true);
-
-            _gl.ActiveTexture(TextureUnit.Texture0);
-            _gl.BindTexture(TextureTarget.Texture2D, texId);
-            _gl.Uniform1(texLoc, 0);
-
-            _gl.DrawArrays(PrimitiveType.Triangles, 0, 6);
-
-            _gl.BindTexture(TextureTarget.Texture2D, 0);
-            _gl.BindBuffer(BufferTargetARB.ArrayBuffer, 0);
-            _gl.BindVertexArray(0);
+            _renderQueue.Add(cmd);
         }
 
-        
+
 
 
         /// <summary>
         /// 从文件加载纹理
         /// </summary>
-        private uint LoadTexture(string path)
+        private TextureInfo LoadTexture(string path)
         {
-            if (_textures.TryGetValue(path, out uint existingTex))
+            if (_textures.TryGetValue(path, out TextureInfo existingTex))
                 return existingTex;
 
             if (!File.Exists(path))
             {
                 Console.WriteLine($"[X] The texture file does not exist: {path}");
-                return 0;
+                return default;
             }
 
             try
             {
                 using (Image<Rgba32> image = Image.Load<Rgba32>(path))
                 {
-                    // 翻转图像，因为OpenGL原点在左下角
                     image.Mutate(x => x.Flip(FlipMode.Vertical));
 
                     uint texture = _gl.GenTexture();
                     _gl.BindTexture(TextureTarget.Texture2D, texture);
 
-                    // 分配缓冲区并复制像素数据
                     int pixelCount = image.Width * image.Height;
                     Rgba32[] pixels = new Rgba32[pixelCount];
                     image.CopyPixelDataTo(pixels);
 
-                    // 转换为字节数组
                     byte[] pixelBytes = new byte[pixelCount * 4];
+                    bool hasTransparency = false;
+
                     for (int i = 0; i < pixelCount; i++)
                     {
                         pixelBytes[i * 4] = pixels[i].R;
                         pixelBytes[i * 4 + 1] = pixels[i].G;
                         pixelBytes[i * 4 + 2] = pixels[i].B;
                         pixelBytes[i * 4 + 3] = pixels[i].A;
+
+                        if (pixels[i].A < 255)
+                            hasTransparency = true;
                     }
 
-                    _gl.TexImage2D(TextureTarget.Texture2D,
-                            0,
-                            InternalFormat.Rgba,
-                            (uint)image.Width,
-                            (uint)image.Height,
-                            0,
-                            PixelFormat.Rgba,
-                            PixelType.UnsignedByte,
-                            (ReadOnlySpan<byte>)pixelBytes);
+                    _gl.TexImage2D(
+                        TextureTarget.Texture2D,
+                        0,
+                        InternalFormat.Rgba,
+                        (uint)image.Width,
+                        (uint)image.Height,
+                        0,
+                        PixelFormat.Rgba,
+                        PixelType.UnsignedByte,
+                        (ReadOnlySpan<byte>)pixelBytes);
 
                     _gl.GenerateMipmap(TextureTarget.Texture2D);
 
@@ -685,14 +747,22 @@ namespace LimitlessSquareEngine
                     _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapS, (int)TextureWrapMode.ClampToEdge);
                     _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapT, (int)TextureWrapMode.ClampToEdge);
 
-                    _textures[path] = texture;
-                    return texture;
+                    TextureInfo info = new TextureInfo
+                    {
+                        Id = texture,
+                        HasTransparency = hasTransparency,
+                        Width = image.Width,
+                        Height = image.Height
+                    };
+
+                    _textures[path] = info;
+                    return info;
                 }
             }
             catch (Exception ex)
             {
                 Console.WriteLine($"[X] Failed to load texture {path}: {ex.Message}");
-                return 0;
+                return default;
             }
         }
 
@@ -754,7 +824,8 @@ namespace LimitlessSquareEngine
                     if (!string.IsNullOrEmpty(element.ImageSource))
                     {
                         string fullPath = Path.Combine(AppContext.BaseDirectory, "Assets", element.ImageSource);
-                        uint texId = LoadTexture(fullPath);
+                        TextureInfo tex = LoadTexture(fullPath);
+                        uint texId = tex.Id;
                         if (texId != 0)
                         {
                             (float x1, float y1) = PixelToNDC(element.X, element.Y);
@@ -873,9 +944,107 @@ namespace LimitlessSquareEngine
                 UseCanvasSpace();
         }
 
+        [MoonSharpHidden]
+        public void ExecuteRenderQueue()
+        {
+            if (!_isInitialized) Initialize();
+            if (_renderQueue.Count == 0) return;
+
+            InitQuadRenderer();
+
+            var opaque = _renderQueue
+                .Where(c => c.QueueType == RenderQueueType.Opaque)
+                .OrderBy(c => c.SubmissionIndex)
+                .ToList();
+
+            var transparent = _renderQueue
+                .Where(c => c.QueueType == RenderQueueType.Transparent)
+                .OrderByDescending(c => c.SortDepth)
+                .ThenBy(c => c.SubmissionIndex)
+                .ToList();
+
+            // 绘制非透明
+            _gl.Enable(GLEnum.DepthTest);
+            _gl.DepthFunc(GLEnum.Less);
+            _gl.DepthMask(true);
+            _gl.Enable(GLEnum.Blend);
+            _gl.BlendFunc(GLEnum.SrcAlpha, GLEnum.OneMinusSrcAlpha);
+
+            foreach (var cmd in opaque)
+                ExecuteCommand(cmd);
+
+            // 绘制透明
+            _gl.Enable(GLEnum.DepthTest);
+            _gl.DepthFunc(GLEnum.Lequal);
+            _gl.DepthMask(false);
+            _gl.Enable(GLEnum.Blend);
+            _gl.BlendFunc(GLEnum.SrcAlpha, GLEnum.OneMinusSrcAlpha);
+
+            foreach (var cmd in transparent)
+                ExecuteCommand(cmd);
+
+            // 恢复默认状态
+            _gl.DepthMask(true);
+            _gl.DepthFunc(GLEnum.Less);
+
+            _renderQueue.Clear();
+        }
+
+        private void ExecuteCommand(RenderCommand cmd)
+        {
+            _currentProgram = cmd.Program;
+            _gl.UseProgram(cmd.Program);
+
+            _activeRenderSpace = cmd.RenderSpace;
+            _activeModelMatrix = cmd.Model;
+            _activeViewMatrix = cmd.View;
+            _activeProjectionMatrix = cmd.Projection;
+
+            _gl.BindVertexArray(_quadVAO);
+            _gl.BindBuffer(BufferTargetARB.ArrayBuffer, _quadVBO);
+            _gl.BufferData(BufferTargetARB.ArrayBuffer, (ReadOnlySpan<float>)cmd.Vertices, BufferUsageARB.DynamicDraw);
+
+            _gl.VertexAttribPointer(0, 3, VertexAttribPointerType.Float, false, 9 * sizeof(float), 0);
+            _gl.EnableVertexAttribArray(0);
+
+            _gl.VertexAttribPointer(1, 4, VertexAttribPointerType.Float, false, 9 * sizeof(float), 3 * sizeof(float));
+            _gl.EnableVertexAttribArray(1);
+
+            _gl.VertexAttribPointer(2, 2, VertexAttribPointerType.Float, false, 9 * sizeof(float), 7 * sizeof(float));
+            _gl.EnableVertexAttribArray(2);
+
+            ApplyRenderUniforms(cmd.UseTexture);
+
+            if (cmd.UseTexture)
+            {
+                int texLoc = _gl.GetUniformLocation(cmd.Program, "uTexture");
+                if (texLoc != -1)
+                {
+                    _gl.ActiveTexture(TextureUnit.Texture0);
+                    _gl.BindTexture(TextureTarget.Texture2D, cmd.TextureId);
+                    _gl.Uniform1(texLoc, 0);
+                }
+            }
+            else
+            {
+                _gl.BindTexture(TextureTarget.Texture2D, 0);
+            }
+
+            _gl.DrawArrays(cmd.PrimitiveType, 0, (uint)(cmd.Vertices.Length / 9));
+
+            _gl.BindTexture(TextureTarget.Texture2D, 0);
+            _gl.BindBuffer(BufferTargetARB.ArrayBuffer, 0);
+            _gl.BindVertexArray(0);
+        }
+
         /// <summary>
         /// 添加带UV顶点到缓冲区
         /// </summary>
+        /// <param name="x"></param>
+        /// <param name="y"></param>
+        /// <param name="z"></param>
+        /// <param name="u"></param>
+        /// <param name="v"></param>
         private void AddVertex(float x, float y, float z, float u = 0f, float v = 0f)
         {
             _vertexBuffer.Add(x); _vertexBuffer.Add(y); _vertexBuffer.Add(z);
@@ -887,6 +1056,7 @@ namespace LimitlessSquareEngine
         /// <summary>
         /// 刷新缓冲区到GPU并绘制
         /// </summary>
+        /// <param name="primitiveType"></param>
         private void Flush(PrimitiveType primitiveType)
         {
             if (_vertexBuffer.Count == 0) return;
@@ -894,29 +1064,25 @@ namespace LimitlessSquareEngine
 
             var vertices = _vertexBuffer.ToArray();
 
-            _gl.BindVertexArray(_vertexArrayObject);
-            _gl.BindBuffer(BufferTargetARB.ArrayBuffer, _vertexBufferObject);
-            _gl.BufferData(BufferTargetARB.ArrayBuffer, (ReadOnlySpan<float>)vertices, BufferUsageARB.DynamicDraw);
+            bool transparent = IsCurrentDrawTransparent(false);
 
-            // 重新设置顶点属性指针
-            _gl.VertexAttribPointer(0, 3, VertexAttribPointerType.Float, false, 9 * sizeof(float), 0);
-            _gl.EnableVertexAttribArray(0);
+            var cmd = new RenderCommand
+            {
+                Vertices = vertices,
+                PrimitiveType = primitiveType,
+                Program = _currentProgram,
+                UseTexture = false,
+                TextureId = 0,
+                RenderSpace = _activeRenderSpace,
+                Model = _activeModelMatrix,
+                View = _activeViewMatrix,
+                Projection = _activeProjectionMatrix,
+                QueueType = transparent ? RenderQueueType.Transparent : RenderQueueType.Opaque,
+                SortDepth = ComputeSortDepth(vertices, _activeModelMatrix, _activeViewMatrix, _activeRenderSpace),
+                SubmissionIndex = _submissionCounter++
+            };
 
-            _gl.VertexAttribPointer(1, 4, VertexAttribPointerType.Float, false, 9 * sizeof(float), 3 * sizeof(float));
-            _gl.EnableVertexAttribArray(1);
-
-            _gl.VertexAttribPointer(2, 2, VertexAttribPointerType.Float, false, 9 * sizeof(float), 7 * sizeof(float));
-            _gl.EnableVertexAttribArray(2);
-
-
-            // 绑定着色器程序
-            _gl.UseProgram(_currentProgram);
-            ApplyRenderUniforms(false);
-
-            _gl.DrawArrays(primitiveType, 0, (uint)(_vertexBuffer.Count / 9));
-
-            _gl.BindBuffer(BufferTargetARB.ArrayBuffer, 0);
-            _gl.BindVertexArray(0);
+            _renderQueue.Add(cmd);
         }
 
         /// <summary>

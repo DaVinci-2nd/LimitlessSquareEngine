@@ -96,6 +96,10 @@ namespace LimitlessSquareEngine
         static List<string> _texturePaths = new List<string>();
         // 定义布局集合
         static Dictionary<string, List<UIElement>> _uiLayouts = new Dictionary<string, List<UIElement>>();
+        // 场景文件注册表
+        static Dictionary<string, string> _sceneFileRegistry = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        // 场景文件验证信息
+        static Dictionary<string, string> _sceneFileDisplayName = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
         // 定义前一帧时间
         private static double _lastFrameTime;
@@ -296,10 +300,21 @@ namespace LimitlessSquareEngine
                     };
 
                     string uiBasePath = Path.Combine(assetsPath, "UI");
+                    string texturesBasePath = Path.Combine(assetsPath, "Textures");
+                    string sceneBasePath = Path.Combine(assetsPath, "Scene");
+
+                    _sceneFileRegistry.Clear();
+                    _sceneFileDisplayName.Clear();
+
                     string[] allFiles = Directory.GetFiles(assetsPath, "*.*", SearchOption.AllDirectories);
+                    Array.Sort(allFiles, StringComparer.OrdinalIgnoreCase);
+
                     foreach (string file in allFiles)
                     {
                         string? directory = Path.GetDirectoryName(file);
+                        if (string.IsNullOrWhiteSpace(directory))
+                            continue;
+
                         // UI布局文件
                         if (directory.StartsWith(uiBasePath, StringComparison.OrdinalIgnoreCase))
                         {
@@ -318,6 +333,7 @@ namespace LimitlessSquareEngine
                                             foreach (var child in element.Children)
                                                 SetParent(child, element);
                                         }
+
                                         foreach (var element in elements)
                                             SetParent(element);
 
@@ -331,18 +347,54 @@ namespace LimitlessSquareEngine
                                     Console.WriteLine($"[!] Failed to load UI layout from {file}: {ex.Message}");
                                 }
                             }
+
+                            continue;
+                        }
+
+                        // 场景文件
+                        if (directory.StartsWith(sceneBasePath, StringComparison.OrdinalIgnoreCase) &&
+                            Path.GetExtension(file).Equals(".json", StringComparison.OrdinalIgnoreCase))
+                        {
+                            try
+                            {
+                                if (!TryValidateSceneFile(file, out string sceneId, out string reason))
+                                {
+                                    Console.WriteLine($"[!] Invalid scene file skipped: {file} | Reason: {reason}");
+                                    continue;
+                                }
+
+                                if (_sceneFileRegistry.TryGetValue(sceneId, out string? oldPath))
+                                {
+                                    Console.WriteLine($"[!] Duplicate scene id '{sceneId}' found. Replacing:");
+                                    Console.WriteLine($"    Old: {oldPath}");
+                                    Console.WriteLine($"    New: {file}");
+                                }
+
+                                _sceneFileRegistry[sceneId] = file;
+                                _sceneFileDisplayName[sceneId] = Path.GetFileName(file);
+
+                                Console.WriteLine($"[i] Registered scene: {sceneId} -> {file}");
+                            }
+                            catch (Exception ex)
+                            {
+                                Console.WriteLine($"[!] Failed to scan scene file {file}: {ex.Message}");
+                            }
+
+                            continue;
                         }
 
                         // 纹理文件
-                        string texturesBasePath = Path.Combine(assetsPath, "Textures");
                         if (file.StartsWith(texturesBasePath, StringComparison.OrdinalIgnoreCase) &&
                             Path.GetExtension(file).Equals(".png", StringComparison.OrdinalIgnoreCase))
                         {
                             string relativePath = file.Substring(texturesBasePath.Length + 1);
                             relativePath = relativePath.Replace('\\', '/');
                             _texturePaths.Add(relativePath);
+                            continue;
                         }
                     }
+
+                    Console.WriteLine($"[i] Scene scan completed. Registered scenes: {_sceneFileRegistry.Count}");
                 }
 
                 // 调用所有脚本的init函数
@@ -393,6 +445,8 @@ namespace LimitlessSquareEngine
             // 清除颜色缓冲
             _graphics?.ClearBackground();
 
+            _graphics?.ExecuteRenderQueue();
+
             // 遍历所有脚本实例
             foreach (var instance in _luaScriptInstances)
             {
@@ -419,17 +473,19 @@ namespace LimitlessSquareEngine
         /// </summary>
         static void Main()
         {
-            Console.WriteLine("///////////////////////////////////////////////");
+            Console.WriteLine("////////////////////////////////////////////////////");
             Console.WriteLine("Limitless Square Engine");
             Console.WriteLine("by DaVinci-2nd");
-            Console.WriteLine("///////////////////////////////////////////////");
+            Console.WriteLine("----------------------------------------------------");
+            Console.WriteLine("https://github.com/DaVinci-2nd/LimitlessSquareEngine");
+            Console.WriteLine("////////////////////////////////////////////////////");
             Console.WriteLine("献给热爱游戏的大家！");
             Console.WriteLine("Dedicated to all those who love games!");
-            Console.WriteLine("-----------------------------------------------");
-            Console.WriteLine("欢迎关注作者的bilibili账号");
-            Console.WriteLine("Welcome to follow the author's Bilibili account");
+            Console.WriteLine("----------------------------------------------------");
+            Console.WriteLine("欢迎关注作者的bilibili账号！");
+            Console.WriteLine("Welcome to follow the author's Bilibili account!");
             Console.WriteLine("https://space.bilibili.com/432070384");
-            Console.WriteLine("///////////////////////////////////////////////");
+            Console.WriteLine("////////////////////////////////////////////////////");
             // 执行初始化
             Initialize();
 
@@ -465,6 +521,169 @@ namespace LimitlessSquareEngine
                 // 执行任务
                 task();
             }
+        }
+
+        /// <summary>
+        /// 验证场景文件结构是否合法。
+        /// </summary>
+        /// <param name="filePath"></param>
+        /// <param name="sceneId"></param>
+        /// <param name="reason"></param>
+        /// <returns></returns>
+        static bool TryValidateSceneFile(string filePath, out string sceneId, out string reason)
+        {
+            sceneId = string.Empty;
+            reason = string.Empty;
+
+            string json = File.ReadAllText(filePath);
+            using JsonDocument doc = JsonDocument.Parse(json);
+
+            JsonElement root = doc.RootElement;
+            if (root.ValueKind != JsonValueKind.Object)
+            {
+                reason = "Root must be a JSON object.";
+                return false;
+            }
+
+            if (!TryGetProperty(root, "sceneId", out JsonElement sceneIdElement) ||
+                sceneIdElement.ValueKind != JsonValueKind.String)
+            {
+                reason = "Missing or invalid 'sceneId'.";
+                return false;
+            }
+
+            sceneId = sceneIdElement.GetString()?.Trim() ?? string.Empty;
+            if (string.IsNullOrWhiteSpace(sceneId))
+            {
+                reason = "'sceneId' cannot be empty.";
+                return false;
+            }
+
+            if (!TryGetProperty(root, "objects", out JsonElement objectsElement) ||
+                objectsElement.ValueKind != JsonValueKind.Array)
+            {
+                reason = "Missing or invalid 'objects' array.";
+                return false;
+            }
+
+            // 基础验证
+            HashSet<string> objectIds = new HashSet<string>(StringComparer.Ordinal);
+            Dictionary<string, string?> parentMap = new Dictionary<string, string?>(StringComparer.Ordinal);
+
+            foreach (JsonElement obj in objectsElement.EnumerateArray())
+            {
+                if (obj.ValueKind != JsonValueKind.Object)
+                {
+                    reason = "Every item in 'objects' must be a JSON object.";
+                    return false;
+                }
+
+                if (!TryGetProperty(obj, "id", out JsonElement objectIdElement) ||
+                    objectIdElement.ValueKind != JsonValueKind.String)
+                {
+                    reason = "Every object must contain a string 'id'.";
+                    return false;
+                }
+
+                string objectId = objectIdElement.GetString()?.Trim() ?? string.Empty;
+                if (string.IsNullOrWhiteSpace(objectId))
+                {
+                    reason = "Object 'id' cannot be empty.";
+                    return false;
+                }
+
+                if (!objectIds.Add(objectId))
+                {
+                    reason = $"Duplicate object id '{objectId}' in scene '{sceneId}'.";
+                    return false;
+                }
+
+                string? parentId = null;
+
+                if (TryGetProperty(obj, "transform", out JsonElement transformElement))
+                {
+                    if (transformElement.ValueKind != JsonValueKind.Object)
+                    {
+                        reason = $"Object '{objectId}' has invalid 'transform'.";
+                        return false;
+                    }
+
+                    if (TryGetProperty(transformElement, "parentId", out JsonElement parentIdElement))
+                    {
+                        if (parentIdElement.ValueKind == JsonValueKind.Null)
+                        {
+                            parentId = null;
+                        }
+                        else if (parentIdElement.ValueKind == JsonValueKind.String)
+                        {
+                            parentId = parentIdElement.GetString();
+                            if (string.IsNullOrWhiteSpace(parentId))
+                                parentId = null;
+                        }
+                        else
+                        {
+                            reason = $"Object '{objectId}' has invalid 'transform.parentId'.";
+                            return false;
+                        }
+                    }
+                }
+
+                parentMap[objectId] = parentId;
+            }
+
+            // 检查parentId是否存在
+            foreach (var pair in parentMap)
+            {
+                string objectId = pair.Key;
+                string? parentId = pair.Value;
+
+                if (!string.IsNullOrWhiteSpace(parentId) && !objectIds.Contains(parentId))
+                {
+                    reason = $"Object '{objectId}' references missing parent '{parentId}'.";
+                    return false;
+                }
+            }
+
+            // 检查是否存在循环父子关系
+            foreach (string objectId in objectIds)
+            {
+                HashSet<string> visited = new HashSet<string>(StringComparer.Ordinal);
+                string? current = objectId;
+
+                while (!string.IsNullOrWhiteSpace(current))
+                {
+                    if (!visited.Add(current))
+                    {
+                        reason = $"Circular parent relationship detected at object '{objectId}'.";
+                        return false;
+                    }
+
+                    if (!parentMap.TryGetValue(current, out string? nextParent))
+                        break;
+
+                    current = nextParent;
+                }
+            }
+
+            return true;
+        }
+
+        /// <summary>
+        /// 读取JSON属性
+        /// </summary>
+        static bool TryGetProperty(JsonElement element, string propertyName, out JsonElement value)
+        {
+            foreach (JsonProperty prop in element.EnumerateObject())
+            {
+                if (string.Equals(prop.Name, propertyName, StringComparison.Ordinal))
+                {
+                    value = prop.Value;
+                    return true;
+                }
+            }
+
+            value = default;
+            return false;
         }
     }
 }

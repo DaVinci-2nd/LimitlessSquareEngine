@@ -4,11 +4,13 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Numerics;
 using System.Text;
+using System.Text.Json.Serialization;
 using System.Threading.Tasks;
 
 namespace LimitlessSquareEngine
 {
     // UI元素类型
+    [JsonConverter(typeof(JsonStringEnumConverter))]
     public enum UIElementType
     {
         Panel,
