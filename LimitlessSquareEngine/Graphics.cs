@@ -16,6 +16,15 @@ namespace LimitlessSquareEngine
         private uint _quadVAO;
         private uint _quadVBO;
         private bool _quadInitialized = false;
+        private readonly Dictionary<string, MeshData> _meshes = new(StringComparer.Ordinal);
+
+        private uint _sceneSolidProgram = 0;
+        private long _sceneBatchCounter = 0;
+
+        // 渲染区域
+        private bool _sceneViewportUseFixedAspect = false;
+        private float _sceneViewportAspectWidth = 16f;
+        private float _sceneViewportAspectHeight = 9f;
 
         // 图形缓存
         private Dictionary<string, uint> _shaderPrograms = new Dictionary<string, uint>();
@@ -44,6 +53,44 @@ namespace LimitlessSquareEngine
             Transparent = 1
         }
 
+        private enum RenderPass
+        {
+            Scene = 0,
+            Canvas = 1
+        }
+
+        private readonly struct MeshData
+        {
+            public string Id { get; }
+            public float[] Vertices { get; }
+            public PrimitiveType PrimitiveType { get; }
+
+            public MeshData(string id, float[] vertices, PrimitiveType primitiveType)
+            {
+                Id = id;
+                Vertices = vertices;
+                PrimitiveType = primitiveType;
+            }
+        }
+
+        private readonly struct ViewportRect
+        {
+            public int X { get; }
+            public int Y { get; }
+            public int Width { get; }
+            public int Height { get; }
+
+            public float Aspect => Height <= 0 ? 1f : Width / (float)Height;
+
+            public ViewportRect(int x, int y, int width, int height)
+            {
+                X = x;
+                Y = y;
+                Width = width;
+                Height = height;
+            }
+        }
+
         private struct RenderCommand
         {
             public float[] Vertices;
@@ -60,6 +107,15 @@ namespace LimitlessSquareEngine
             public RenderQueueType QueueType;
             public float SortDepth;
             public long SubmissionIndex;
+
+            public RenderPass Pass;
+            public long BatchId;
+            public long BatchSubmissionOrder;
+
+            public int ViewportX;
+            public int ViewportY;
+            public int ViewportWidth;
+            public int ViewportHeight;
         }
         private readonly List<RenderCommand> _renderQueue = new();
         private long _submissionCounter = 0;
@@ -145,6 +201,53 @@ namespace LimitlessSquareEngine
         }
 
         /// <summary>
+        /// 设置场景全屏窗口
+        /// </summary>
+        [MoonSharpHidden]
+        public void SetSceneViewportFillWindow()
+        {
+            _sceneViewportUseFixedAspect = false;
+        }
+
+        [MoonSharpHidden]
+        public void SetSceneViewportFixedAspect(float width, float height)
+        {
+            if (width <= 0f || height <= 0f)
+                throw new ArgumentException("[X] Fixed aspect width/height must be > 0.");
+
+            _sceneViewportUseFixedAspect = true;
+            _sceneViewportAspectWidth = width;
+            _sceneViewportAspectHeight = height;
+        }
+
+        private ViewportRect GetSceneViewportRect()
+        {
+            int windowWidth = _window.Size.X;
+            int windowHeight = _window.Size.Y;
+
+            if (!_sceneViewportUseFixedAspect)
+                return new ViewportRect(0, 0, windowWidth, windowHeight);
+
+            float targetAspect = _sceneViewportAspectWidth / _sceneViewportAspectHeight;
+            float windowAspect = windowWidth / (float)windowHeight;
+
+            if (windowAspect > targetAspect)
+            {
+                int viewportHeight = windowHeight;
+                int viewportWidth = (int)MathF.Round(viewportHeight * targetAspect);
+                int viewportX = (windowWidth - viewportWidth) / 2;
+                return new ViewportRect(viewportX, 0, viewportWidth, viewportHeight);
+            }
+            else
+            {
+                int viewportWidth = windowWidth;
+                int viewportHeight = (int)MathF.Round(viewportWidth / targetAspect);
+                int viewportY = (windowHeight - viewportHeight) / 2;
+                return new ViewportRect(0, viewportY, viewportWidth, viewportHeight);
+            }
+        }
+
+        /// <summary>
         /// 加载着色器
         /// </summary>
         /// <exception cref="DirectoryNotFoundException"></exception>
@@ -203,6 +306,8 @@ namespace LimitlessSquareEngine
             // 设置默认程序
             _currentProgram = _shaderPrograms.Values.First();
             _gl.UseProgram(_currentProgram);
+            EnsureSceneSolidShader();
+            RegisterBuiltInMeshes();
         }
 
         /// <summary>
@@ -625,7 +730,14 @@ namespace LimitlessSquareEngine
                 Projection = _activeProjectionMatrix,
                 QueueType = transparent ? RenderQueueType.Transparent : RenderQueueType.Opaque,
                 SortDepth = ComputeSortDepth(vertices, _activeModelMatrix, _activeViewMatrix, _activeRenderSpace),
-                SubmissionIndex = _submissionCounter++
+                SubmissionIndex = _submissionCounter++,
+                Pass = RenderPass.Canvas,
+                BatchId = -1,
+                BatchSubmissionOrder = -1,
+                ViewportX = 0,
+                ViewportY = 0,
+                ViewportWidth = _window.Size.X,
+                ViewportHeight = _window.Size.Y
             };
 
             _renderQueue.Add(cmd);
@@ -679,7 +791,14 @@ namespace LimitlessSquareEngine
                 Projection = _activeProjectionMatrix,
                 QueueType = transparent ? RenderQueueType.Transparent : RenderQueueType.Opaque,
                 SortDepth = ComputeSortDepth(vertices, _activeModelMatrix, _activeViewMatrix, _activeRenderSpace),
-                SubmissionIndex = _submissionCounter++
+                SubmissionIndex = _submissionCounter++,
+                Pass = RenderPass.Canvas,
+                BatchId = -1,
+                BatchSubmissionOrder = -1,
+                ViewportX = 0,
+                ViewportY = 0,
+                ViewportWidth = _window.Size.X,
+                ViewportHeight = _window.Size.Y
             };
 
             _renderQueue.Add(cmd);
@@ -886,6 +1005,135 @@ namespace LimitlessSquareEngine
             _activeSceneId = -1;
         }
 
+        [MoonSharpHidden]
+        public void QueueLoadedSceneRender()
+        {
+            if (!_isInitialized)
+                Initialize();
+
+            EnsureSceneSolidShader();
+            RegisterBuiltInMeshes();
+
+            foreach (SceneData scene in Scene.GetLoadedScenes())
+            {
+                IReadOnlyList<SceneCameraQueueItem> cameraQueue = Scene.GetCameraQueue(scene.SceneId);
+                if (cameraQueue.Count == 0)
+                    continue;
+
+                Dictionary<string, SceneWorldState> worldStates = Scene.BuildWorldStates(scene);
+
+                foreach (SceneCameraQueueItem cameraItem in cameraQueue.OrderBy(c => c.SubmissionOrder))
+                {
+                    QueueSceneCamera(scene, worldStates, cameraItem);
+                }
+            }
+        }
+
+        private void QueueSceneCamera(
+            SceneData scene,
+            Dictionary<string, SceneWorldState> worldStates,
+            SceneCameraQueueItem cameraItem)
+        {
+            // 模式1本轮明确忽略
+            if (cameraItem.Settings.RenderMode != 0)
+                return;
+
+            if (!worldStates.TryGetValue(cameraItem.ObjectId, out SceneWorldState cameraWorld))
+                return;
+
+            ViewportRect viewport = GetSceneViewportRect();
+            Matrix4x4 view = CreateSceneViewMatrix(cameraWorld);
+            Matrix4x4 projection = CreateSceneProjection(cameraItem.Settings, viewport.Aspect);
+
+            long batchId = ++_sceneBatchCounter;
+
+            foreach (SceneObject obj in scene.Objects)
+            {
+                if (!obj.Active || !obj.Visible)
+                    continue;
+
+                if (obj.Id == cameraItem.ObjectId)
+                    continue;
+
+                if (string.Equals(obj.Type, "Camera", StringComparison.Ordinal))
+                    continue;
+
+                if (string.IsNullOrWhiteSpace(obj.Mesh))
+                    continue;
+
+                if (!_meshes.TryGetValue(obj.Mesh, out MeshData mesh))
+                {
+                    Console.WriteLine($"[!] Mesh '{obj.Mesh}' not found for object '{obj.Id}'.");
+                    continue;
+                }
+
+                if (!worldStates.TryGetValue(obj.Id, out SceneWorldState objectWorld))
+                    continue;
+
+                // 双精度绝对坐标 -> 相机相对双精度 -> 单精度提交GPU
+                Double3 relativePosition = objectWorld.Position - cameraWorld.Position;
+
+                Matrix4x4 model =
+                    Matrix4x4.CreateScale((float)objectWorld.Scale.X, (float)objectWorld.Scale.Y, (float)objectWorld.Scale.Z) *
+                    Matrix4x4.CreateFromQuaternion(objectWorld.Rotation.ToSingle()) *
+                    Matrix4x4.CreateTranslation((float)relativePosition.X, (float)relativePosition.Y, (float)relativePosition.Z);
+
+                var cmd = new RenderCommand
+                {
+                    Vertices = mesh.Vertices,
+                    PrimitiveType = mesh.PrimitiveType,
+                    Program = _sceneSolidProgram,
+                    UseTexture = false,
+                    TextureId = 0,
+                    RenderSpace = RenderSpace.Camera,
+                    Model = model,
+                    View = view,
+                    Projection = projection,
+
+                    QueueType = RenderQueueType.Opaque,
+                    SortDepth = ComputeSortDepth(mesh.Vertices, model, view, RenderSpace.Camera),
+                    SubmissionIndex = _submissionCounter++,
+
+                    Pass = RenderPass.Scene,
+                    BatchId = batchId,
+                    BatchSubmissionOrder = cameraItem.SubmissionOrder,
+                    ViewportX = viewport.X,
+                    ViewportY = viewport.Y,
+                    ViewportWidth = viewport.Width,
+                    ViewportHeight = viewport.Height
+                };
+
+                _renderQueue.Add(cmd);
+            }
+        }
+
+        private Matrix4x4 CreateSceneViewMatrix(SceneWorldState cameraWorld)
+        {
+            Quaternion cameraRotation = cameraWorld.Rotation.ToSingle();
+            Quaternion inverse = Quaternion.Inverse(cameraRotation);
+            return Matrix4x4.CreateFromQuaternion(inverse);
+        }
+
+        private Matrix4x4 CreateSceneProjection(CameraRenderSettings settings, float aspect)
+        {
+            float near = (float)settings.NearClip;
+            float far = (float)settings.FarClip;
+
+            if (settings.ProjectionType == 1)
+            {
+                // 正交
+                float height = (float)settings.FovOrSize;
+                float width = height * aspect;
+                return CreateOrthographic(width, height, near, far);
+            }
+            else
+            {
+                // 透视
+                float fovRadians = (float)(settings.FovOrSize * Math.PI / 180.0);
+                return CreatePerspective(fovRadians, aspect, near, far);
+            }
+        }
+
         // 上传辅助函数
         private void ApplyRenderUniforms(bool useTexture)
         {
@@ -947,23 +1195,85 @@ namespace LimitlessSquareEngine
         [MoonSharpHidden]
         public void ExecuteRenderQueue()
         {
-            if (!_isInitialized) Initialize();
-            if (_renderQueue.Count == 0) return;
+            if (!_isInitialized)
+                Initialize();
+
+            if (_renderQueue.Count == 0)
+                return;
 
             InitQuadRenderer();
 
-            var opaque = _renderQueue
+            List<RenderCommand> sceneCommands = _renderQueue
+                .Where(c => c.Pass == RenderPass.Scene)
+                .ToList();
+
+            List<RenderCommand> canvasCommands = _renderQueue
+                .Where(c => c.Pass == RenderPass.Canvas)
+                .ToList();
+
+            ExecuteScenePass(sceneCommands);
+            ExecuteCanvasPass(canvasCommands);
+
+            _renderQueue.Clear();
+        }
+
+        private void ExecuteScenePass(List<RenderCommand> sceneCommands)
+        {
+            if (sceneCommands.Count == 0)
+                return;
+
+            var batches = sceneCommands
+                .GroupBy(c => c.BatchId)
+                .OrderBy(g => g.First().BatchSubmissionOrder)
+                .ToList();
+
+            foreach (var batch in batches)
+            {
+                RenderCommand first = batch.First();
+
+                int vpX = first.ViewportX;
+                int vpY = first.ViewportY;
+                uint vpW = (uint)Math.Max(1, first.ViewportWidth);
+                uint vpH = (uint)Math.Max(1, first.ViewportHeight);
+
+                _gl.Viewport(vpX, vpY, vpW, vpH);
+
+                _gl.Enable(GLEnum.ScissorTest);
+                _gl.Scissor(vpX, vpY, vpW, vpH);
+                _gl.ClearColor(_backgroundColor.X, _backgroundColor.Y, _backgroundColor.Z, _backgroundColor.W);
+                _gl.Clear(ClearBufferMask.ColorBufferBit | ClearBufferMask.DepthBufferBit);
+                _gl.Disable(GLEnum.ScissorTest);
+
+                ExecuteSortedCommands(batch.ToList());
+            }
+
+            // 场景结束后恢复整窗viewport并清一次深度
+            _gl.Viewport(0, 0, (uint)_window.Size.X, (uint)_window.Size.Y);
+            _gl.Clear(ClearBufferMask.DepthBufferBit);
+        }
+
+        private void ExecuteCanvasPass(List<RenderCommand> canvasCommands)
+        {
+            if (canvasCommands.Count == 0)
+                return;
+
+            _gl.Viewport(0, 0, (uint)_window.Size.X, (uint)_window.Size.Y);
+            ExecuteSortedCommands(canvasCommands);
+        }
+
+        private void ExecuteSortedCommands(List<RenderCommand> commands)
+        {
+            var opaque = commands
                 .Where(c => c.QueueType == RenderQueueType.Opaque)
                 .OrderBy(c => c.SubmissionIndex)
                 .ToList();
 
-            var transparent = _renderQueue
+            var transparent = commands
                 .Where(c => c.QueueType == RenderQueueType.Transparent)
                 .OrderByDescending(c => c.SortDepth)
                 .ThenBy(c => c.SubmissionIndex)
                 .ToList();
 
-            // 绘制非透明
             _gl.Enable(GLEnum.DepthTest);
             _gl.DepthFunc(GLEnum.Less);
             _gl.DepthMask(true);
@@ -973,7 +1283,6 @@ namespace LimitlessSquareEngine
             foreach (var cmd in opaque)
                 ExecuteCommand(cmd);
 
-            // 绘制透明
             _gl.Enable(GLEnum.DepthTest);
             _gl.DepthFunc(GLEnum.Lequal);
             _gl.DepthMask(false);
@@ -983,11 +1292,8 @@ namespace LimitlessSquareEngine
             foreach (var cmd in transparent)
                 ExecuteCommand(cmd);
 
-            // 恢复默认状态
             _gl.DepthMask(true);
             _gl.DepthFunc(GLEnum.Less);
-
-            _renderQueue.Clear();
         }
 
         private void ExecuteCommand(RenderCommand cmd)
@@ -1038,6 +1344,146 @@ namespace LimitlessSquareEngine
         }
 
         /// <summary>
+        /// 网格注册器
+        /// </summary>
+        /// <param name="id"></param>
+        /// <param name="vertices"></param>
+        /// <param name="primitiveType"></param>
+        /// <exception cref="ArgumentException"></exception>
+        [MoonSharpHidden]
+        public void RegisterMesh(string id, float[] vertices, PrimitiveType primitiveType = PrimitiveType.Triangles)
+        {
+            if (string.IsNullOrWhiteSpace(id))
+                throw new ArgumentException("[X] Mesh id cannot be null or empty.", nameof(id));
+
+            if (vertices == null || vertices.Length == 0 || vertices.Length % 9 != 0)
+                throw new ArgumentException("[X] Mesh vertices must be non-empty and aligned to 9 floats per vertex.", nameof(vertices));
+
+            _meshes[id] = new MeshData(id, vertices, primitiveType);
+        }
+
+        private void EnsureSceneSolidShader()
+        {
+            if (_sceneSolidProgram != 0)
+                return;
+
+            const string vertexSource = @"
+                #version 330 core
+                layout(location = 0) in vec3 aPos;
+                layout(location = 1) in vec4 aColor;
+
+                uniform mat4 uModel;
+                uniform mat4 uView;
+                uniform mat4 uProjection;
+
+                out vec4 vColor;
+
+                void main()
+                {
+                    gl_Position = uProjection * uView * uModel * vec4(aPos, 1.0);
+                    vColor = aColor;
+                }";
+
+            const string fragmentSource = @"
+                #version 330 core
+                in vec4 vColor;
+                out vec4 FragColor;
+
+                void main()
+                {
+                    FragColor = vColor;
+                }";
+
+            uint vertexShader = CompileShader(ShaderType.VertexShader, vertexSource);
+            uint fragmentShader = CompileShader(ShaderType.FragmentShader, fragmentSource);
+
+            uint program = _gl.CreateProgram();
+            _gl.AttachShader(program, vertexShader);
+            _gl.AttachShader(program, fragmentShader);
+            _gl.LinkProgram(program);
+
+            _gl.GetProgram(program, ProgramPropertyARB.LinkStatus, out int success);
+            if (success == 0)
+            {
+                string infoLog = _gl.GetProgramInfoLog(program);
+                throw new Exception($"[X] Scene solid shader link failed: {infoLog}");
+            }
+
+            _gl.DetachShader(program, vertexShader);
+            _gl.DetachShader(program, fragmentShader);
+            _gl.DeleteShader(vertexShader);
+            _gl.DeleteShader(fragmentShader);
+
+            _sceneSolidProgram = program;
+        }
+
+        private void RegisterBuiltInMeshes()
+        {
+            if (_meshes.ContainsKey("builtin/cube_1x1x1"))
+                return;
+
+            RegisterMesh("builtin/cube_1x1x1", CreateUnitCubeVertices(), PrimitiveType.Triangles);
+        }
+
+        private float[] CreateUnitCubeVertices()
+        {
+            var data = new List<float>(36 * 9);
+
+            void AddVertex(float x, float y, float z)
+            {
+                data.Add(x);
+                data.Add(y);
+                data.Add(z);
+
+                data.Add(1f);
+                data.Add(1f);
+                data.Add(1f);
+                data.Add(1f);
+
+                data.Add(0f);
+                data.Add(0f);
+            }
+
+            void AddTri(
+                float ax, float ay, float az,
+                float bx, float by, float bz,
+                float cx, float cy, float cz)
+            {
+                AddVertex(ax, ay, az);
+                AddVertex(bx, by, bz);
+                AddVertex(cx, cy, cz);
+            }
+
+            float n = 0.5f;
+
+            // +Z
+            AddTri(-n, -n, n, n, -n, n, n, n, n);
+            AddTri(n, n, n, -n, n, n, -n, -n, n);
+
+            // -Z
+            AddTri(n, -n, -n, -n, -n, -n, -n, n, -n);
+            AddTri(-n, n, -n, n, n, -n, n, -n, -n);
+
+            // -X
+            AddTri(-n, -n, -n, -n, -n, n, -n, n, n);
+            AddTri(-n, n, n, -n, n, -n, -n, -n, -n);
+
+            // +X
+            AddTri(n, -n, n, n, -n, -n, n, n, -n);
+            AddTri(n, n, -n, n, n, n, n, -n, n);
+
+            // +Y
+            AddTri(-n, n, n, n, n, n, n, n, -n);
+            AddTri(n, n, -n, -n, n, -n, -n, n, n);
+
+            // -Y
+            AddTri(-n, -n, -n, n, -n, -n, n, -n, n);
+            AddTri(n, -n, n, -n, -n, n, -n, -n, -n);
+
+            return data.ToArray();
+        }
+
+        /// <summary>
         /// 添加带UV顶点到缓冲区
         /// </summary>
         /// <param name="x"></param>
@@ -1079,7 +1525,14 @@ namespace LimitlessSquareEngine
                 Projection = _activeProjectionMatrix,
                 QueueType = transparent ? RenderQueueType.Transparent : RenderQueueType.Opaque,
                 SortDepth = ComputeSortDepth(vertices, _activeModelMatrix, _activeViewMatrix, _activeRenderSpace),
-                SubmissionIndex = _submissionCounter++
+                SubmissionIndex = _submissionCounter++,
+                Pass = RenderPass.Canvas,
+                BatchId = -1,
+                BatchSubmissionOrder = -1,
+                ViewportX = 0,
+                ViewportY = 0,
+                ViewportWidth = _window.Size.X,
+                ViewportHeight = _window.Size.Y
             };
 
             _renderQueue.Add(cmd);

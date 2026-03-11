@@ -93,11 +93,11 @@ namespace LimitlessSquareEngine
 
         static Graphics? _graphics;
         // 定义纹理路径集合
-        static List<string> _texturePaths = new List<string>();
+        internal static List<string> _texturePaths = new List<string>();
         // 定义布局集合
-        static Dictionary<string, List<UIElement>> _uiLayouts = new Dictionary<string, List<UIElement>>();
+        internal static Dictionary<string, List<UIElement>> _uiLayouts = new Dictionary<string, List<UIElement>>();
         // 场景文件注册表
-        static Dictionary<string, string> _sceneFileRegistry = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        internal static Dictionary<string, string> _sceneFileRegistry = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         // 场景文件验证信息
         static Dictionary<string, string> _sceneFileDisplayName = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
@@ -125,6 +125,11 @@ namespace LimitlessSquareEngine
 
             // 注册数据类型
             UserData.RegisterType<GameData>();
+            UserData.RegisterType<Graphics>();
+            UserData.RegisterType<SceneData>();
+            UserData.RegisterType<SceneObject>();
+            UserData.RegisterType<SceneTransform>();
+            UserData.RegisterType<Double3>();
             // 初始化窗口
             var options = WindowOptions.Default;
             options.Size = new Silk.NET.Maths.Vector2D<int>(800, 600);
@@ -132,8 +137,6 @@ namespace LimitlessSquareEngine
             options.IsVisible = true;
             options.ShouldSwapAutomatically = false;
             _window = Window.Create(options);
-
-            UserData.RegisterType<Graphics>();
 
             // 加载事件
             _window.Load += () =>
@@ -271,6 +274,24 @@ namespace LimitlessSquareEngine
                         foreach (var path in _texturePaths)
                             textureTable.Append(DynValue.NewString(path));
                         instance.LuaScript.Globals["texture_paths"] = textureTable;
+
+                        // 注入场景加载函数
+                        instance.LuaScript.Globals["load_scene"] = (Func<string, SceneData>)((sceneId) =>
+                        {
+                            return Scene.LoadScene(sceneId);
+                        });
+
+                        // 注入场景移除函数
+                        instance.LuaScript.Globals["remove_scene"] = (Action<string>)((sceneId) =>
+                        {
+                            Scene.RemoveScene(sceneId);
+                        });
+
+                        // 注入手动重扫摄像机函数
+                        instance.LuaScript.Globals["rescan_scene_cameras"] = (Action<string>)((sceneId) =>
+                        {
+                            Scene.RebuildCameraQueue(sceneId);
+                        });
 
                         // 执行脚本文件
                         instance.LuaScript.DoFile(file);
@@ -444,8 +465,8 @@ namespace LimitlessSquareEngine
 
             // 清除颜色缓冲
             _graphics?.ClearBackground();
-
-            _graphics?.ExecuteRenderQueue();
+            // 交场景相机渲染
+            _graphics?.QueueLoadedSceneRender();
 
             // 遍历所有脚本实例
             foreach (var instance in _luaScriptInstances)
@@ -463,6 +484,7 @@ namespace LimitlessSquareEngine
                     }
                 }
             }
+            _graphics?.ExecuteRenderQueue();
 
             // 交换缓冲区
             _window.SwapBuffers();
@@ -623,6 +645,42 @@ namespace LimitlessSquareEngine
                         else
                         {
                             reason = $"Object '{objectId}' has invalid 'transform.parentId'.";
+                            return false;
+                        }
+                    }
+                }
+                string objectType = "Object";
+                if (TryGetProperty(obj, "type", out JsonElement typeElement))
+                {
+                    if (typeElement.ValueKind != JsonValueKind.String)
+                    {
+                        reason = $"Object '{objectId}' has invalid 'type'.";
+                        return false;
+                    }
+
+                    objectType = typeElement.GetString()?.Trim() ?? "Object";
+                }
+
+                if (string.Equals(objectType, "Camera", StringComparison.Ordinal))
+                {
+                    if (TryGetProperty(obj, "data", out JsonElement dataElement))
+                    {
+                        if (dataElement.ValueKind == JsonValueKind.Null)
+                        {
+                            // null 也视为空
+                        }
+                        else if (dataElement.ValueKind == JsonValueKind.String)
+                        {
+                            string rawCameraData = dataElement.GetString() ?? string.Empty;
+                            if (!Scene.TryValidateCameraDataString(rawCameraData, objectId, out string cameraReason))
+                            {
+                                reason = cameraReason;
+                                return false;
+                            }
+                        }
+                        else
+                        {
+                            reason = $"Object '{objectId}' camera 'data' must be string or null.";
                             return false;
                         }
                     }
