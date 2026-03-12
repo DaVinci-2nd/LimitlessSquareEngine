@@ -296,6 +296,18 @@ namespace LimitlessSquareEngine
                             Scene.RebuildCameraQueue(sceneId);
                         });
 
+                        // 注入天空盒设置函数
+                        instance.LuaScript.Globals["set_skybox"] = (Action<string, string>)((shaderName, parametersJson) =>
+                        {
+                            graphics.SetScreenSkybox(shaderName, parametersJson);
+                        });
+
+                        // 注入天空盒卸载函数
+                        instance.LuaScript.Globals["clear_skybox"] = (Action)(() =>
+                        {
+                            graphics.ClearScreenSkybox();
+                        });
+
                         // 执行脚本文件
                         instance.LuaScript.DoFile(file);
 
