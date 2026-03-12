@@ -5,6 +5,7 @@ using SixLabors.ImageSharp;
 using SixLabors.ImageSharp.PixelFormats;
 using SixLabors.ImageSharp.Processing;
 using System.Numerics;
+using System.Text.Json;
 
 namespace LimitlessSquareEngine
 {
@@ -18,7 +19,6 @@ namespace LimitlessSquareEngine
         private bool _quadInitialized = false;
         private readonly Dictionary<string, MeshData> _meshes = new(StringComparer.Ordinal);
 
-        private uint _sceneSolidProgram = 0;
         private long _sceneBatchCounter = 0;
 
         // 渲染区域
@@ -40,6 +40,10 @@ namespace LimitlessSquareEngine
         private Dictionary<string, TextureInfo> _textures = new();
         // 激活的着色器序列
         private uint _currentProgram;
+        private readonly Dictionary<string, MaterialData> _materialCache = new(StringComparer.Ordinal);
+        private readonly Dictionary<uint, List<ActiveUniformInfo>> _programUniformCache = new();
+        private static readonly JsonElement _emptyJsonObject = JsonDocument.Parse("{}").RootElement.Clone();
+        private MaterialData _fallbackMaterial;
 
         private RenderSpace _activeRenderSpace = RenderSpace.Canvas;
 
@@ -90,6 +94,59 @@ namespace LimitlessSquareEngine
                 Height = height;
             }
         }
+        private enum MaterialTextureWrapMode
+        {
+            Repeat = 0,
+            Clamp = 1
+        }
+
+        private sealed class MaterialData
+        {
+            public string Id { get; init; } = "";
+            public uint Program { get; init; }
+            public JsonElement Parameters { get; init; }
+            public Vector2 TextureUV { get; init; } = Vector2.One;
+            public MaterialTextureWrapMode TextureWrap { get; init; } = MaterialTextureWrapMode.Repeat;
+        }
+
+        private sealed class SkyboxData
+        {
+            public string Id { get; init; } = "";
+            public uint Program { get; init; }
+            public JsonElement Parameters { get; init; }
+        }
+
+        private SkyboxData _screenSkybox;
+        private readonly Dictionary<string, SkyboxData> _cameraSkyboxes = new(StringComparer.Ordinal);
+
+        private readonly struct ActiveUniformInfo
+        {
+            public string Name { get; }
+            public int Location { get; }
+            public UniformType Type { get; }
+
+            public ActiveUniformInfo(string name, int location, UniformType type)
+            {
+                Name = name;
+                Location = location;
+                Type = type;
+            }
+        }
+
+        private bool TryGetActiveUniformExact(uint program, string uniformName, out ActiveUniformInfo uniform)
+        {
+            foreach (ActiveUniformInfo item in GetActiveUniforms(program))
+            {
+                if (string.Equals(item.Name, uniformName, StringComparison.Ordinal))
+                {
+                    uniform = item;
+                    return true;
+                }
+            }
+
+            uniform = default;
+            return false;
+        }
 
         private struct RenderCommand
         {
@@ -116,9 +173,51 @@ namespace LimitlessSquareEngine
             public int ViewportY;
             public int ViewportWidth;
             public int ViewportHeight;
+
+            public MaterialData Material;
+            public SkyboxData Skybox;
+
+            public bool ForceWhiteVertexColor;
+            public bool IsSkybox;
         }
         private readonly List<RenderCommand> _renderQueue = new();
         private long _submissionCounter = 0;
+
+        private float[] PrepareVerticesForCommand(in RenderCommand cmd)
+        {
+            bool needWhiteColor = cmd.ForceWhiteVertexColor;
+
+            Vector2 uvScale = cmd.Material != null ? cmd.Material.TextureUV : Vector2.One;
+            bool needScaleUv =
+                MathF.Abs(uvScale.X - 1f) > 0.0001f ||
+                MathF.Abs(uvScale.Y - 1f) > 0.0001f;
+
+            if (!needWhiteColor && !needScaleUv)
+                return cmd.Vertices;
+
+            float[] vertices = (float[])cmd.Vertices.Clone();
+
+            // 每顶点 9 个 float:
+            // [x, y, z, r, g, b, a, u, v]
+            for (int i = 0; i + 8 < vertices.Length; i += 9)
+            {
+                if (needWhiteColor)
+                {
+                    vertices[i + 3] = 1f;
+                    vertices[i + 4] = 1f;
+                    vertices[i + 5] = 1f;
+                    vertices[i + 6] = 1f;
+                }
+
+                if (needScaleUv)
+                {
+                    vertices[i + 7] *= uvScale.X;
+                    vertices[i + 8] *= uvScale.Y;
+                }
+            }
+
+            return vertices;
+        }
 
         // 给以后的相机/场景系统用
         private bool _cameraContextActive = false;
@@ -306,7 +405,6 @@ namespace LimitlessSquareEngine
             // 设置默认程序
             _currentProgram = _shaderPrograms.Values.First();
             _gl.UseProgram(_currentProgram);
-            EnsureSceneSolidShader();
             RegisterBuiltInMeshes();
         }
 
@@ -423,6 +521,33 @@ namespace LimitlessSquareEngine
         {
             _gl = gl;
             _window = window;
+        }
+
+        public void SetScreenSkybox(string shaderName, string parametersJson = "{}")
+        {
+            _screenSkybox = BuildSkyboxData("__screen__", shaderName, parametersJson);
+        }
+
+        public void ClearScreenSkybox()
+        {
+            _screenSkybox = null;
+        }
+
+        public void SetCameraSkybox(string cameraObjectId, string shaderName, string parametersJson = "{}")
+        {
+            if (string.IsNullOrWhiteSpace(cameraObjectId))
+                throw new ArgumentException("[X] Camera skybox target id cannot be null or empty.", nameof(cameraObjectId));
+
+            string key = cameraObjectId.Trim();
+            _cameraSkyboxes[key] = BuildSkyboxData(key, shaderName, parametersJson);
+        }
+
+        public void ClearCameraSkybox(string cameraObjectId)
+        {
+            if (string.IsNullOrWhiteSpace(cameraObjectId))
+                return;
+
+            _cameraSkyboxes.Remove(cameraObjectId.Trim());
         }
 
         /// <summary>
@@ -737,7 +862,11 @@ namespace LimitlessSquareEngine
                 ViewportX = 0,
                 ViewportY = 0,
                 ViewportWidth = _window.Size.X,
-                ViewportHeight = _window.Size.Y
+                ViewportHeight = _window.Size.Y,
+                Material = null,
+                Skybox = null,
+                ForceWhiteVertexColor = false,
+                IsSkybox = false
             };
 
             _renderQueue.Add(cmd);
@@ -798,7 +927,11 @@ namespace LimitlessSquareEngine
                 ViewportX = 0,
                 ViewportY = 0,
                 ViewportWidth = _window.Size.X,
-                ViewportHeight = _window.Size.Y
+                ViewportHeight = _window.Size.Y,
+                Material = null,
+                Skybox = null,
+                ForceWhiteVertexColor = false,
+                IsSkybox = false
             };
 
             _renderQueue.Add(cmd);
@@ -883,6 +1016,727 @@ namespace LimitlessSquareEngine
                 Console.WriteLine($"[X] Failed to load texture {path}: {ex.Message}");
                 return default;
             }
+        }
+
+        private string NormalizeMaterialKey(string raw)
+        {
+            string key = raw.Replace('\\', '/').Trim();
+
+            if (key.StartsWith("/"))
+                key = key[1..];
+
+            if (key.StartsWith("Assets/", StringComparison.OrdinalIgnoreCase))
+                key = key["Assets/".Length..];
+
+            if (key.StartsWith("Materials/", StringComparison.OrdinalIgnoreCase))
+                key = key["Materials/".Length..];
+
+            if (key.EndsWith(".json", StringComparison.OrdinalIgnoreCase))
+                key = key[..^5];
+
+            return key;
+        }
+
+        private uint GetFallbackProgram()
+        {
+            const string fallbackKey = "__internal_fallback_purple__";
+
+            if (!_shaderPrograms.TryGetValue(fallbackKey, out uint fallbackProgram))
+            {
+                fallbackProgram = CreateFallbackShaderProgram();
+                _shaderPrograms[fallbackKey] = fallbackProgram;
+            }
+
+            return fallbackProgram;
+        }
+
+        private MaterialData GetFallbackMaterial()
+        {
+            if (_fallbackMaterial != null)
+                return _fallbackMaterial;
+
+            _fallbackMaterial = new MaterialData
+            {
+                Id = "__internal_fallback_purple__",
+                Program = GetFallbackProgram(),
+                Parameters = _emptyJsonObject
+            };
+
+            return _fallbackMaterial;
+        }
+        private JsonElement ParseSkyboxParameters(string parametersJson)
+        {
+            string json = string.IsNullOrWhiteSpace(parametersJson) ? "{}" : parametersJson;
+
+            using JsonDocument doc = JsonDocument.Parse(json);
+            if (doc.RootElement.ValueKind != JsonValueKind.Object)
+                throw new ArgumentException("[X] Skybox parameters must be a JSON object.");
+
+            return doc.RootElement.Clone();
+        }
+
+        private SkyboxData BuildSkyboxData(string id, string shaderKey, string parametersJson)
+        {
+            return new SkyboxData
+            {
+                Id = id,
+                Program = ResolveShaderProgramOrFallback(shaderKey),
+                Parameters = ParseSkyboxParameters(parametersJson)
+            };
+        }
+
+        private bool TryGetSceneObject(SceneData scene, string objectId, out SceneObject obj)
+        {
+            foreach (SceneObject item in scene.Objects)
+            {
+                if (string.Equals(item.Id, objectId, StringComparison.Ordinal))
+                {
+                    obj = item;
+                    return true;
+                }
+            }
+
+            obj = null;
+            return false;
+        }
+
+        private bool IsSceneCameraMarkedMain(SceneObject cameraObj)
+        {
+            if (cameraObj == null)
+                return false;
+
+            if (!string.Equals(cameraObj.Type, "Camera", StringComparison.Ordinal))
+                return false;
+
+            if (string.IsNullOrWhiteSpace(cameraObj.Data))
+                return false;
+
+            try
+            {
+                using JsonDocument doc = JsonDocument.Parse(cameraObj.Data);
+
+                if (doc.RootElement.ValueKind != JsonValueKind.Object)
+                    return false;
+
+                if (!doc.RootElement.TryGetProperty("isMainCamera", out JsonElement mainElement))
+                    return false;
+
+                return mainElement.ValueKind == JsonValueKind.True;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private string ResolveMainScreenCameraId()
+        {
+            foreach (SceneData scene in Scene.GetLoadedScenes())
+            {
+                IReadOnlyList<SceneCameraQueueItem> cameraQueue = Scene.GetCameraQueue(scene.SceneId);
+
+                foreach (SceneCameraQueueItem cameraItem in cameraQueue.OrderBy(c => c.SubmissionOrder))
+                {
+                    if (cameraItem.Settings.RenderMode != 0)
+                        continue;
+
+                    if (cameraItem.Settings.IsMainCamera)
+                        return cameraItem.ObjectId;
+                }
+            }
+
+            return null;
+        }
+
+        private SkyboxData ResolveSkyboxForCamera(string cameraObjectId, int renderMode, string mainScreenCameraId)
+        {
+            if (renderMode == 0)
+            {
+                if (_screenSkybox == null)
+                    return null;
+
+                if (string.IsNullOrWhiteSpace(mainScreenCameraId))
+                    return null;
+
+                return string.Equals(cameraObjectId, mainScreenCameraId, StringComparison.Ordinal)
+                    ? _screenSkybox
+                    : null;
+            }
+
+            if (_cameraSkyboxes.TryGetValue(cameraObjectId, out SkyboxData skybox))
+                return skybox;
+
+            return null;
+        }
+
+        private uint ResolveShaderProgramOrFallback(string shaderKey)
+        {
+            if (!string.IsNullOrWhiteSpace(shaderKey) &&
+                _shaderPrograms.TryGetValue(shaderKey, out uint program))
+            {
+                return program;
+            }
+
+            return GetFallbackProgram();
+        }
+
+        private bool TryLoadMaterial(string materialKey, out MaterialData material)
+        {
+            material = null;
+
+            string key = NormalizeMaterialKey(materialKey);
+
+            if (_materialCache.TryGetValue(key, out MaterialData cached))
+            {
+                material = cached;
+                return true;
+            }
+
+            if (!Program._materialFileRegistry.TryGetValue(key, out string filePath))
+                return false;
+
+            if (!File.Exists(filePath))
+                return false;
+
+            try
+            {
+                string json = File.ReadAllText(filePath);
+                using JsonDocument doc = JsonDocument.Parse(json);
+
+                JsonElement root = doc.RootElement;
+                if (root.ValueKind != JsonValueKind.Object)
+                    return false;
+
+                string shaderKey = "";
+                if (root.TryGetProperty("shader", out JsonElement shaderElement) &&
+                    shaderElement.ValueKind == JsonValueKind.String)
+                {
+                    shaderKey = shaderElement.GetString() ?? "";
+                }
+
+                JsonElement parameters = _emptyJsonObject;
+                if (root.TryGetProperty("parameters", out JsonElement parametersElement) &&
+                    parametersElement.ValueKind == JsonValueKind.Object)
+                {
+                    parameters = parametersElement.Clone();
+                }
+
+                Vector2 textureUV = ReadMaterialTextureUV(parameters);
+                MaterialTextureWrapMode textureWrap = ReadMaterialTextureWrap(parameters);
+
+                material = new MaterialData
+                {
+                    Id = key,
+                    Program = ResolveShaderProgramOrFallback(shaderKey),
+                    Parameters = parameters,
+                    TextureUV = textureUV,
+                    TextureWrap = textureWrap
+                };
+
+                _materialCache[key] = material;
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[!] Failed to load material '{materialKey}': {ex.Message}");
+                return false;
+            }
+        }
+
+        private MaterialData ResolveSceneMaterial(SceneObject obj)
+        {
+            if (!string.IsNullOrWhiteSpace(obj.Material) &&
+                TryLoadMaterial(obj.Material, out MaterialData material))
+            {
+                return material;
+            }
+
+            return GetFallbackMaterial();
+        }
+
+        private List<ActiveUniformInfo> GetActiveUniforms(uint program)
+        {
+            if (_programUniformCache.TryGetValue(program, out List<ActiveUniformInfo> cached))
+                return cached;
+
+            _gl.GetProgram(program, ProgramPropertyARB.ActiveUniforms, out int count);
+
+            var result = new List<ActiveUniformInfo>(count);
+
+            for (uint i = 0; i < (uint)count; i++)
+            {
+                string name = _gl.GetActiveUniform(program, i, out int _, out UniformType type);
+
+                if (name.EndsWith("[0]", StringComparison.Ordinal))
+                    name = name[..^3];
+
+                int location = _gl.GetUniformLocation(program, name);
+                result.Add(new ActiveUniformInfo(name, location, type));
+            }
+
+            _programUniformCache[program] = result;
+            return result;
+        }
+
+        private bool IsEngineManagedUniform(string uniformName)
+        {
+            return string.Equals(uniformName, "uRenderSpace", StringComparison.Ordinal) ||
+                   string.Equals(uniformName, "uModel", StringComparison.Ordinal) ||
+                   string.Equals(uniformName, "uView", StringComparison.Ordinal) ||
+                   string.Equals(uniformName, "uProjection", StringComparison.Ordinal);
+        }
+
+        private void ApplyCoreSceneUniforms()
+        {
+            int renderSpaceLoc = _gl.GetUniformLocation(_currentProgram, "uRenderSpace");
+            if (renderSpaceLoc != -1)
+                _gl.Uniform1(renderSpaceLoc, (int)_activeRenderSpace);
+
+            int modelLoc = _gl.GetUniformLocation(_currentProgram, "uModel");
+            if (modelLoc != -1)
+                SetMatrixUniform(modelLoc, _activeModelMatrix);
+
+            int viewLoc = _gl.GetUniformLocation(_currentProgram, "uView");
+            if (viewLoc != -1)
+                SetMatrixUniform(viewLoc, _activeViewMatrix);
+
+            int projLoc = _gl.GetUniformLocation(_currentProgram, "uProjection");
+            if (projLoc != -1)
+                SetMatrixUniform(projLoc, _activeProjectionMatrix);
+        }
+
+        private Dictionary<string, int> ApplyMaterialDefaults(uint program)
+        {
+            var samplerUnits = new Dictionary<string, int>(StringComparer.Ordinal);
+            int nextSamplerUnit = 0;
+
+            foreach (ActiveUniformInfo uniform in GetActiveUniforms(program))
+            {
+                if (uniform.Location == -1)
+                    continue;
+
+                if (IsEngineManagedUniform(uniform.Name))
+                    continue;
+
+                switch (uniform.Type)
+                {
+                    case UniformType.Float:
+                        _gl.Uniform1(uniform.Location, 0f);
+                        break;
+
+                    case UniformType.FloatVec2:
+                        _gl.Uniform2(uniform.Location, 0f, 0f);
+                        break;
+
+                    case UniformType.FloatVec3:
+                        _gl.Uniform3(uniform.Location, 0f, 0f, 0f);
+                        break;
+
+                    case UniformType.FloatVec4:
+                        _gl.Uniform4(uniform.Location, 0.5f, 0.5f, 0.5f, 1f);
+                        break;
+
+                    case UniformType.Int:
+                    case UniformType.Bool:
+                        _gl.Uniform1(uniform.Location, 0);
+                        break;
+
+                    case UniformType.IntVec2:
+                    case UniformType.BoolVec2:
+                        _gl.Uniform2(uniform.Location, 0, 0);
+                        break;
+
+                    case UniformType.IntVec3:
+                    case UniformType.BoolVec3:
+                        _gl.Uniform3(uniform.Location, 0, 0, 0);
+                        break;
+
+                    case UniformType.IntVec4:
+                    case UniformType.BoolVec4:
+                        _gl.Uniform4(uniform.Location, 0, 0, 0, 0);
+                        break;
+
+                    case UniformType.FloatMat4:
+                        SetMatrixUniform(uniform.Location, Matrix4x4.Identity);
+                        break;
+
+                    case UniformType.Sampler2D:
+                        samplerUnits[uniform.Name] = nextSamplerUnit;
+                        _gl.ActiveTexture((TextureUnit)((int)TextureUnit.Texture0 + nextSamplerUnit));
+                        _gl.BindTexture(TextureTarget.Texture2D, 0);
+                        _gl.Uniform1(uniform.Location, nextSamplerUnit);
+                        nextSamplerUnit++;
+                        break;
+                }
+            }
+
+            _gl.ActiveTexture(TextureUnit.Texture0);
+            return samplerUnits;
+        }
+
+        private string ResolveTexturePath(string rawPath)
+        {
+            string normalized = rawPath.Replace('\\', '/');
+
+            if (Path.IsPathRooted(normalized))
+                return normalized;
+
+            string assetsRoot = Path.Combine(AppContext.BaseDirectory, "Assets");
+
+            if (normalized.StartsWith("Textures/", StringComparison.OrdinalIgnoreCase))
+                return Path.Combine(assetsRoot, normalized.Replace('/', Path.DirectorySeparatorChar));
+
+            return Path.Combine(assetsRoot, "Textures", normalized.Replace('/', Path.DirectorySeparatorChar));
+        }
+
+        private bool TryReadNumericArray(JsonElement element, out double[] values)
+        {
+            values = Array.Empty<double>();
+
+            if (element.ValueKind != JsonValueKind.Array)
+                return false;
+
+            var list = new List<double>();
+            foreach (JsonElement item in element.EnumerateArray())
+            {
+                if (item.ValueKind != JsonValueKind.Number)
+                    return false;
+
+                list.Add(item.GetDouble());
+            }
+
+            values = list.ToArray();
+            return true;
+        }
+
+        private Vector2 ReadMaterialTextureUV(JsonElement parameters)
+        {
+            if (parameters.ValueKind != JsonValueKind.Object)
+                return Vector2.One;
+
+            if (!parameters.TryGetProperty("uTextureUV", out JsonElement uvElement))
+                return Vector2.One;
+
+            if (!TryReadNumericArray(uvElement, out double[] numbers) || numbers.Length != 2)
+                return Vector2.One;
+
+            float u = (float)numbers[0];
+            float v = (float)numbers[1];
+
+            if (u <= 0f) u = 1f;
+            if (v <= 0f) v = 1f;
+
+            return new Vector2(u, v);
+        }
+
+        private MaterialTextureWrapMode ReadMaterialTextureWrap(JsonElement parameters)
+        {
+            if (parameters.ValueKind != JsonValueKind.Object)
+                return MaterialTextureWrapMode.Repeat;
+
+            if (!parameters.TryGetProperty("uTextureWrap", out JsonElement wrapElement))
+                return MaterialTextureWrapMode.Repeat;
+
+            if (wrapElement.ValueKind != JsonValueKind.String)
+                return MaterialTextureWrapMode.Repeat;
+
+            string wrap = wrapElement.GetString() ?? "";
+
+            if (string.Equals(wrap, "Clamp", StringComparison.Ordinal))
+                return MaterialTextureWrapMode.Clamp;
+
+            return MaterialTextureWrapMode.Repeat;
+        }
+
+        private void ApplyTextureWrapMode(uint textureId, MaterialTextureWrapMode wrapMode)
+        {
+            if (textureId == 0)
+                return;
+
+            int wrapValue = wrapMode == MaterialTextureWrapMode.Clamp
+                ? (int)TextureWrapMode.ClampToEdge
+                : (int)TextureWrapMode.Repeat;
+
+            _gl.BindTexture(TextureTarget.Texture2D, textureId);
+            _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapS, wrapValue);
+            _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapT, wrapValue);
+        }
+
+        private bool AllIntegral(double[] values)
+        {
+            foreach (double v in values)
+            {
+                if (Math.Abs(v - Math.Round(v)) > 0.000001)
+                    return false;
+            }
+
+            return true;
+        }
+
+        private void ApplyMaterialParameter(string uniformName, JsonElement value, Dictionary<string, int> samplerUnits, MaterialData material)
+        {
+            if (IsEngineManagedUniform(uniformName))
+                return;
+
+            if (!TryGetActiveUniformExact(_currentProgram, uniformName, out ActiveUniformInfo uniform))
+                return;
+
+            int location = uniform.Location;
+            if (location == -1)
+                return;
+
+            switch (value.ValueKind)
+            {
+                case JsonValueKind.True:
+                case JsonValueKind.False:
+                    {
+                        int boolValue = value.GetBoolean() ? 1 : 0;
+
+                        switch (uniform.Type)
+                        {
+                            case UniformType.Bool:
+                            case UniformType.Int:
+                                _gl.Uniform1(location, boolValue);
+                                break;
+                        }
+
+                        return;
+                    }
+
+                case JsonValueKind.Number:
+                    {
+                        if (value.TryGetInt32(out int intValue))
+                        {
+                            switch (uniform.Type)
+                            {
+                                case UniformType.Bool:
+                                case UniformType.Int:
+                                case UniformType.Sampler2D:
+                                    _gl.Uniform1(location, intValue);
+                                    break;
+
+                                case UniformType.Float:
+                                    _gl.Uniform1(location, (float)intValue);
+                                    break;
+                            }
+                        }
+                        else
+                        {
+                            float floatValue = (float)value.GetDouble();
+
+                            if (uniform.Type == UniformType.Float)
+                                _gl.Uniform1(location, floatValue);
+                        }
+
+                        return;
+                    }
+
+                case JsonValueKind.String:
+                    if (samplerUnits.TryGetValue(uniformName, out int unit))
+                    {
+                        string texturePath = ResolveTexturePath(value.GetString() ?? "");
+                        TextureInfo tex = LoadTexture(texturePath);
+
+                        if (tex.Id != 0)
+                        {
+                            _gl.ActiveTexture((TextureUnit)((int)TextureUnit.Texture0 + unit));
+                            _gl.BindTexture(TextureTarget.Texture2D, tex.Id);
+                            ApplyTextureWrapMode(tex.Id, material.TextureWrap);
+                            _gl.Uniform1(location, unit);
+                            _gl.ActiveTexture(TextureUnit.Texture0);
+                        }
+                    }
+                    return;
+
+                case JsonValueKind.Array:
+                    {
+                        if (!TryReadNumericArray(value, out double[] numbers))
+                            return;
+
+                        if (numbers.Length == 2)
+                        {
+                            if (uniform.Type == UniformType.FloatVec2)
+                                _gl.Uniform2(location, (float)numbers[0], (float)numbers[1]);
+                            else if (uniform.Type == UniformType.IntVec2 || uniform.Type == UniformType.BoolVec2)
+                                _gl.Uniform2(location, (int)numbers[0], (int)numbers[1]);
+                        }
+                        else if (numbers.Length == 3)
+                        {
+                            if (uniform.Type == UniformType.FloatVec3)
+                                _gl.Uniform3(location, (float)numbers[0], (float)numbers[1], (float)numbers[2]);
+                            else if (uniform.Type == UniformType.IntVec3 || uniform.Type == UniformType.BoolVec3)
+                                _gl.Uniform3(location, (int)numbers[0], (int)numbers[1], (int)numbers[2]);
+                        }
+                        else if (numbers.Length == 4)
+                        {
+                            if (uniform.Type == UniformType.FloatVec4)
+                                _gl.Uniform4(location, (float)numbers[0], (float)numbers[1], (float)numbers[2], (float)numbers[3]);
+                            else if (uniform.Type == UniformType.IntVec4 || uniform.Type == UniformType.BoolVec4)
+                                _gl.Uniform4(location, (int)numbers[0], (int)numbers[1], (int)numbers[2], (int)numbers[3]);
+                        }
+                        else if (numbers.Length == 16)
+                        {
+                            if (uniform.Type == UniformType.FloatMat4)
+                            {
+                                float[] matrixValues = numbers.Select(v => (float)v).ToArray();
+                                _gl.UniformMatrix4(location, 1, false, matrixValues);
+                            }
+                        }
+
+                        return;
+                    }
+            }
+        }
+
+        private void ApplySceneMaterial(MaterialData material)
+        {
+            Dictionary<string, int> samplerUnits = ApplyMaterialDefaults(_currentProgram);
+            ApplyCoreSceneUniforms();
+
+            if (material.Parameters.ValueKind != JsonValueKind.Object)
+                return;
+
+            foreach (JsonProperty prop in material.Parameters.EnumerateObject())
+            {
+                ApplyMaterialParameter(prop.Name, prop.Value, samplerUnits, material);
+            }
+
+            _gl.ActiveTexture(TextureUnit.Texture0);
+        }
+        private void ApplySkyboxParameter(string uniformName, JsonElement value, Dictionary<string, int> samplerUnits)
+        {
+            if (IsEngineManagedUniform(uniformName))
+                return;
+
+            if (!TryGetActiveUniformExact(_currentProgram, uniformName, out ActiveUniformInfo uniform))
+                return;
+
+            int location = uniform.Location;
+            if (location == -1)
+                return;
+
+            switch (value.ValueKind)
+            {
+                case JsonValueKind.True:
+                case JsonValueKind.False:
+                    {
+                        int boolValue = value.GetBoolean() ? 1 : 0;
+
+                        switch (uniform.Type)
+                        {
+                            case UniformType.Bool:
+                            case UniformType.Int:
+                                _gl.Uniform1(location, boolValue);
+                                break;
+                        }
+
+                        return;
+                    }
+
+                case JsonValueKind.Number:
+                    {
+                        if (value.TryGetInt32(out int intValue))
+                        {
+                            switch (uniform.Type)
+                            {
+                                case UniformType.Bool:
+                                case UniformType.Int:
+                                case UniformType.Sampler2D:
+                                    _gl.Uniform1(location, intValue);
+                                    break;
+
+                                case UniformType.Float:
+                                    _gl.Uniform1(location, (float)intValue);
+                                    break;
+                            }
+                        }
+                        else
+                        {
+                            float floatValue = (float)value.GetDouble();
+
+                            if (uniform.Type == UniformType.Float)
+                                _gl.Uniform1(location, floatValue);
+                        }
+
+                        return;
+                    }
+
+                case JsonValueKind.String:
+                    {
+                        if (samplerUnits.TryGetValue(uniformName, out int unit))
+                        {
+                            string texturePath = ResolveTexturePath(value.GetString() ?? "");
+                            TextureInfo tex = LoadTexture(texturePath);
+
+                            if (tex.Id != 0)
+                            {
+                                _gl.ActiveTexture((TextureUnit)((int)TextureUnit.Texture0 + unit));
+                                _gl.BindTexture(TextureTarget.Texture2D, tex.Id);
+                                _gl.Uniform1(location, unit);
+                                _gl.ActiveTexture(TextureUnit.Texture0);
+                            }
+                        }
+
+                        return;
+                    }
+
+                case JsonValueKind.Array:
+                    {
+                        if (!TryReadNumericArray(value, out double[] numbers))
+                            return;
+
+                        if (numbers.Length == 2)
+                        {
+                            if (uniform.Type == UniformType.FloatVec2)
+                                _gl.Uniform2(location, (float)numbers[0], (float)numbers[1]);
+                            else if (uniform.Type == UniformType.IntVec2 || uniform.Type == UniformType.BoolVec2)
+                                _gl.Uniform2(location, (int)numbers[0], (int)numbers[1]);
+                        }
+                        else if (numbers.Length == 3)
+                        {
+                            if (uniform.Type == UniformType.FloatVec3)
+                                _gl.Uniform3(location, (float)numbers[0], (float)numbers[1], (float)numbers[2]);
+                            else if (uniform.Type == UniformType.IntVec3 || uniform.Type == UniformType.BoolVec3)
+                                _gl.Uniform3(location, (int)numbers[0], (int)numbers[1], (int)numbers[2]);
+                        }
+                        else if (numbers.Length == 4)
+                        {
+                            if (uniform.Type == UniformType.FloatVec4)
+                                _gl.Uniform4(location, (float)numbers[0], (float)numbers[1], (float)numbers[2], (float)numbers[3]);
+                            else if (uniform.Type == UniformType.IntVec4 || uniform.Type == UniformType.BoolVec4)
+                                _gl.Uniform4(location, (int)numbers[0], (int)numbers[1], (int)numbers[2], (int)numbers[3]);
+                        }
+                        else if (numbers.Length == 16)
+                        {
+                            if (uniform.Type == UniformType.FloatMat4)
+                            {
+                                float[] matrixValues = numbers.Select(v => (float)v).ToArray();
+                                _gl.UniformMatrix4(location, 1, false, matrixValues);
+                            }
+                        }
+
+                        return;
+                    }
+            }
+        }
+
+        private void ApplySkybox(SkyboxData skybox)
+        {
+            Dictionary<string, int> samplerUnits = ApplyMaterialDefaults(_currentProgram);
+            ApplyCoreSceneUniforms();
+
+            if (skybox.Parameters.ValueKind != JsonValueKind.Object)
+            {
+                _gl.ActiveTexture(TextureUnit.Texture0);
+                return;
+            }
+
+            foreach (JsonProperty prop in skybox.Parameters.EnumerateObject())
+            {
+                ApplySkyboxParameter(prop.Name, prop.Value, samplerUnits);
+            }
+
+            _gl.ActiveTexture(TextureUnit.Texture0);
         }
 
         // ==================== UI 绘制方法 ====================
@@ -1011,8 +1865,9 @@ namespace LimitlessSquareEngine
             if (!_isInitialized)
                 Initialize();
 
-            EnsureSceneSolidShader();
             RegisterBuiltInMeshes();
+
+            string mainScreenCameraId = ResolveMainScreenCameraId();
 
             foreach (SceneData scene in Scene.GetLoadedScenes())
             {
@@ -1024,7 +1879,7 @@ namespace LimitlessSquareEngine
 
                 foreach (SceneCameraQueueItem cameraItem in cameraQueue.OrderBy(c => c.SubmissionOrder))
                 {
-                    QueueSceneCamera(scene, worldStates, cameraItem);
+                    QueueSceneCamera(scene, worldStates, cameraItem, mainScreenCameraId);
                 }
             }
         }
@@ -1032,9 +1887,10 @@ namespace LimitlessSquareEngine
         private void QueueSceneCamera(
             SceneData scene,
             Dictionary<string, SceneWorldState> worldStates,
-            SceneCameraQueueItem cameraItem)
+            SceneCameraQueueItem cameraItem,
+            string mainScreenCameraId)
         {
-            // 模式1本轮明确忽略
+            // 模式1本轮忽略
             if (cameraItem.Settings.RenderMode != 0)
                 return;
 
@@ -1046,6 +1902,48 @@ namespace LimitlessSquareEngine
             Matrix4x4 projection = CreateSceneProjection(cameraItem.Settings, viewport.Aspect);
 
             long batchId = ++_sceneBatchCounter;
+
+            SkyboxData skybox = ResolveSkyboxForCamera(cameraItem.ObjectId, cameraItem.Settings.RenderMode, mainScreenCameraId);
+
+            if (skybox != null)
+            {
+                if (!_meshes.TryGetValue("builtin/cube_1x1x1", out MeshData skyboxMesh))
+                    throw new Exception("[X] Builtin skybox cube mesh not found.");
+
+                float skyboxScale = MathF.Max(1f, (float)cameraItem.Settings.FarClip * 0.5f);
+                Matrix4x4 skyboxModel = Matrix4x4.CreateScale(skyboxScale);
+
+                var skyboxCmd = new RenderCommand
+                {
+                    Vertices = skyboxMesh.Vertices,
+                    PrimitiveType = skyboxMesh.PrimitiveType,
+                    Program = skybox.Program,
+                    UseTexture = false,
+                    TextureId = 0,
+                    RenderSpace = RenderSpace.Camera,
+                    Model = skyboxModel,
+                    View = view,
+                    Projection = projection,
+
+                    QueueType = RenderQueueType.Opaque,
+                    SortDepth = 0f,
+                    SubmissionIndex = _submissionCounter++,
+
+                    Pass = RenderPass.Scene,
+                    BatchId = batchId,
+                    BatchSubmissionOrder = cameraItem.SubmissionOrder,
+                    ViewportX = viewport.X,
+                    ViewportY = viewport.Y,
+                    ViewportWidth = viewport.Width,
+                    ViewportHeight = viewport.Height,
+                    Material = null,
+                    Skybox = skybox,
+                    ForceWhiteVertexColor = true,
+                    IsSkybox = true
+                };
+
+                _renderQueue.Add(skyboxCmd);
+            }
 
             foreach (SceneObject obj in scene.Objects)
             {
@@ -1078,11 +1976,13 @@ namespace LimitlessSquareEngine
                     Matrix4x4.CreateFromQuaternion(objectWorld.Rotation.ToSingle()) *
                     Matrix4x4.CreateTranslation((float)relativePosition.X, (float)relativePosition.Y, (float)relativePosition.Z);
 
+                MaterialData material = ResolveSceneMaterial(obj);
+
                 var cmd = new RenderCommand
                 {
                     Vertices = mesh.Vertices,
                     PrimitiveType = mesh.PrimitiveType,
-                    Program = _sceneSolidProgram,
+                    Program = material.Program,
                     UseTexture = false,
                     TextureId = 0,
                     RenderSpace = RenderSpace.Camera,
@@ -1100,7 +2000,11 @@ namespace LimitlessSquareEngine
                     ViewportX = viewport.X,
                     ViewportY = viewport.Y,
                     ViewportWidth = viewport.Width,
-                    ViewportHeight = viewport.Height
+                    ViewportHeight = viewport.Height,
+                    Material = material,
+                    Skybox = null,
+                    ForceWhiteVertexColor = true,
+                    IsSkybox = false
                 };
 
                 _renderQueue.Add(cmd);
@@ -1261,15 +2165,38 @@ namespace LimitlessSquareEngine
             ExecuteSortedCommands(canvasCommands);
         }
 
+        private void BindCommandGeometry(RenderCommand cmd)
+        {
+            _gl.BindVertexArray(_quadVAO);
+            _gl.BindBuffer(BufferTargetARB.ArrayBuffer, _quadVBO);
+
+            float[] uploadVertices = PrepareVerticesForCommand(cmd);
+            _gl.BufferData(BufferTargetARB.ArrayBuffer, (ReadOnlySpan<float>)uploadVertices, BufferUsageARB.DynamicDraw);
+
+            _gl.VertexAttribPointer(0, 3, VertexAttribPointerType.Float, false, 9 * sizeof(float), 0);
+            _gl.EnableVertexAttribArray(0);
+
+            _gl.VertexAttribPointer(1, 4, VertexAttribPointerType.Float, false, 9 * sizeof(float), 3 * sizeof(float));
+            _gl.EnableVertexAttribArray(1);
+
+            _gl.VertexAttribPointer(2, 2, VertexAttribPointerType.Float, false, 9 * sizeof(float), 7 * sizeof(float));
+            _gl.EnableVertexAttribArray(2);
+        }
+
         private void ExecuteSortedCommands(List<RenderCommand> commands)
         {
+            var skyboxes = commands
+                .Where(c => c.IsSkybox)
+                .OrderBy(c => c.SubmissionIndex)
+                .ToList();
+
             var opaque = commands
-                .Where(c => c.QueueType == RenderQueueType.Opaque)
+                .Where(c => !c.IsSkybox && c.QueueType == RenderQueueType.Opaque)
                 .OrderBy(c => c.SubmissionIndex)
                 .ToList();
 
             var transparent = commands
-                .Where(c => c.QueueType == RenderQueueType.Transparent)
+                .Where(c => !c.IsSkybox && c.QueueType == RenderQueueType.Transparent)
                 .OrderByDescending(c => c.SortDepth)
                 .ThenBy(c => c.SubmissionIndex)
                 .ToList();
@@ -1279,6 +2206,9 @@ namespace LimitlessSquareEngine
             _gl.DepthMask(true);
             _gl.Enable(GLEnum.Blend);
             _gl.BlendFunc(GLEnum.SrcAlpha, GLEnum.OneMinusSrcAlpha);
+
+            foreach (var cmd in skyboxes)
+                ExecuteSkyboxCommand(cmd);
 
             foreach (var cmd in opaque)
                 ExecuteCommand(cmd);
@@ -1296,6 +2226,34 @@ namespace LimitlessSquareEngine
             _gl.DepthFunc(GLEnum.Less);
         }
 
+        private void ExecuteSkyboxCommand(RenderCommand cmd)
+        {
+            _currentProgram = cmd.Program;
+            _gl.UseProgram(cmd.Program);
+
+            _activeRenderSpace = cmd.RenderSpace;
+            _activeModelMatrix = cmd.Model;
+            _activeViewMatrix = cmd.View;
+            _activeProjectionMatrix = cmd.Projection;
+
+            BindCommandGeometry(cmd);
+
+            _gl.Disable(GLEnum.DepthTest);
+            _gl.DepthMask(false);
+
+            ApplySkybox(cmd.Skybox);
+
+            _gl.DrawArrays(cmd.PrimitiveType, 0, (uint)(cmd.Vertices.Length / 9));
+
+            _gl.DepthMask(true);
+            _gl.Enable(GLEnum.DepthTest);
+
+            _gl.ActiveTexture(TextureUnit.Texture0);
+            _gl.BindTexture(TextureTarget.Texture2D, 0);
+            _gl.BindBuffer(BufferTargetARB.ArrayBuffer, 0);
+            _gl.BindVertexArray(0);
+        }
+
         private void ExecuteCommand(RenderCommand cmd)
         {
             _currentProgram = cmd.Program;
@@ -1306,38 +2264,35 @@ namespace LimitlessSquareEngine
             _activeViewMatrix = cmd.View;
             _activeProjectionMatrix = cmd.Projection;
 
-            _gl.BindVertexArray(_quadVAO);
-            _gl.BindBuffer(BufferTargetARB.ArrayBuffer, _quadVBO);
-            _gl.BufferData(BufferTargetARB.ArrayBuffer, (ReadOnlySpan<float>)cmd.Vertices, BufferUsageARB.DynamicDraw);
+            BindCommandGeometry(cmd);
 
-            _gl.VertexAttribPointer(0, 3, VertexAttribPointerType.Float, false, 9 * sizeof(float), 0);
-            _gl.EnableVertexAttribArray(0);
-
-            _gl.VertexAttribPointer(1, 4, VertexAttribPointerType.Float, false, 9 * sizeof(float), 3 * sizeof(float));
-            _gl.EnableVertexAttribArray(1);
-
-            _gl.VertexAttribPointer(2, 2, VertexAttribPointerType.Float, false, 9 * sizeof(float), 7 * sizeof(float));
-            _gl.EnableVertexAttribArray(2);
-
-            ApplyRenderUniforms(cmd.UseTexture);
-
-            if (cmd.UseTexture)
+            if (cmd.Material != null)
             {
-                int texLoc = _gl.GetUniformLocation(cmd.Program, "uTexture");
-                if (texLoc != -1)
-                {
-                    _gl.ActiveTexture(TextureUnit.Texture0);
-                    _gl.BindTexture(TextureTarget.Texture2D, cmd.TextureId);
-                    _gl.Uniform1(texLoc, 0);
-                }
+                ApplySceneMaterial(cmd.Material);
             }
             else
             {
-                _gl.BindTexture(TextureTarget.Texture2D, 0);
+                ApplyRenderUniforms(cmd.UseTexture);
+
+                if (cmd.UseTexture)
+                {
+                    int texLoc = _gl.GetUniformLocation(cmd.Program, "uTexture");
+                    if (texLoc != -1)
+                    {
+                        _gl.ActiveTexture(TextureUnit.Texture0);
+                        _gl.BindTexture(TextureTarget.Texture2D, cmd.TextureId);
+                        _gl.Uniform1(texLoc, 0);
+                    }
+                }
+                else
+                {
+                    _gl.BindTexture(TextureTarget.Texture2D, 0);
+                }
             }
 
             _gl.DrawArrays(cmd.PrimitiveType, 0, (uint)(cmd.Vertices.Length / 9));
 
+            _gl.ActiveTexture(TextureUnit.Texture0);
             _gl.BindTexture(TextureTarget.Texture2D, 0);
             _gl.BindBuffer(BufferTargetARB.ArrayBuffer, 0);
             _gl.BindVertexArray(0);
@@ -1362,61 +2317,6 @@ namespace LimitlessSquareEngine
             _meshes[id] = new MeshData(id, vertices, primitiveType);
         }
 
-        private void EnsureSceneSolidShader()
-        {
-            if (_sceneSolidProgram != 0)
-                return;
-
-            const string vertexSource = @"
-                #version 330 core
-                layout(location = 0) in vec3 aPos;
-                layout(location = 1) in vec4 aColor;
-
-                uniform mat4 uModel;
-                uniform mat4 uView;
-                uniform mat4 uProjection;
-
-                out vec4 vColor;
-
-                void main()
-                {
-                    gl_Position = uProjection * uView * uModel * vec4(aPos, 1.0);
-                    vColor = aColor;
-                }";
-
-            const string fragmentSource = @"
-                #version 330 core
-                in vec4 vColor;
-                out vec4 FragColor;
-
-                void main()
-                {
-                    FragColor = vColor;
-                }";
-
-            uint vertexShader = CompileShader(ShaderType.VertexShader, vertexSource);
-            uint fragmentShader = CompileShader(ShaderType.FragmentShader, fragmentSource);
-
-            uint program = _gl.CreateProgram();
-            _gl.AttachShader(program, vertexShader);
-            _gl.AttachShader(program, fragmentShader);
-            _gl.LinkProgram(program);
-
-            _gl.GetProgram(program, ProgramPropertyARB.LinkStatus, out int success);
-            if (success == 0)
-            {
-                string infoLog = _gl.GetProgramInfoLog(program);
-                throw new Exception($"[X] Scene solid shader link failed: {infoLog}");
-            }
-
-            _gl.DetachShader(program, vertexShader);
-            _gl.DetachShader(program, fragmentShader);
-            _gl.DeleteShader(vertexShader);
-            _gl.DeleteShader(fragmentShader);
-
-            _sceneSolidProgram = program;
-        }
-
         private void RegisterBuiltInMeshes()
         {
             if (_meshes.ContainsKey("builtin/cube_1x1x1"))
@@ -1425,11 +2325,15 @@ namespace LimitlessSquareEngine
             RegisterMesh("builtin/cube_1x1x1", CreateUnitCubeVertices(), PrimitiveType.Triangles);
         }
 
+        /// <summary>
+        /// 默认立方体
+        /// </summary>
+        /// <returns></returns>
         private float[] CreateUnitCubeVertices()
         {
             var data = new List<float>(36 * 9);
 
-            void AddVertex(float x, float y, float z)
+            void AddVertex(float x, float y, float z, float u, float v)
             {
                 data.Add(x);
                 data.Add(y);
@@ -1440,45 +2344,68 @@ namespace LimitlessSquareEngine
                 data.Add(1f);
                 data.Add(1f);
 
-                data.Add(0f);
-                data.Add(0f);
+                data.Add(u);
+                data.Add(v);
             }
 
-            void AddTri(
-                float ax, float ay, float az,
-                float bx, float by, float bz,
-                float cx, float cy, float cz)
+            void AddQuad(
+                float ax, float ay, float az, float au, float av,
+                float bx, float by, float bz, float bu, float bv,
+                float cx, float cy, float cz, float cu, float cv,
+                float dx, float dy, float dz, float du, float dv)
             {
-                AddVertex(ax, ay, az);
-                AddVertex(bx, by, bz);
-                AddVertex(cx, cy, cz);
+                AddVertex(ax, ay, az, au, av);
+                AddVertex(bx, by, bz, bu, bv);
+                AddVertex(cx, cy, cz, cu, cv);
+
+                AddVertex(cx, cy, cz, cu, cv);
+                AddVertex(dx, dy, dz, du, dv);
+                AddVertex(ax, ay, az, au, av);
             }
 
             float n = 0.5f;
 
             // +Z
-            AddTri(-n, -n, n, n, -n, n, n, n, n);
-            AddTri(n, n, n, -n, n, n, -n, -n, n);
+            AddQuad(
+                -n, -n, n, 0f, 0f,
+                 n, -n, n, 1f, 0f,
+                 n, n, n, 1f, 1f,
+                -n, n, n, 0f, 1f);
 
             // -Z
-            AddTri(n, -n, -n, -n, -n, -n, -n, n, -n);
-            AddTri(-n, n, -n, n, n, -n, n, -n, -n);
+            AddQuad(
+                 n, -n, -n, 0f, 0f,
+                -n, -n, -n, 1f, 0f,
+                -n, n, -n, 1f, 1f,
+                 n, n, -n, 0f, 1f);
 
             // -X
-            AddTri(-n, -n, -n, -n, -n, n, -n, n, n);
-            AddTri(-n, n, n, -n, n, -n, -n, -n, -n);
+            AddQuad(
+                -n, -n, -n, 0f, 0f,
+                -n, -n, n, 1f, 0f,
+                -n, n, n, 1f, 1f,
+                -n, n, -n, 0f, 1f);
 
             // +X
-            AddTri(n, -n, n, n, -n, -n, n, n, -n);
-            AddTri(n, n, -n, n, n, n, n, -n, n);
+            AddQuad(
+                 n, -n, n, 0f, 0f,
+                 n, -n, -n, 1f, 0f,
+                 n, n, -n, 1f, 1f,
+                 n, n, n, 0f, 1f);
 
             // +Y
-            AddTri(-n, n, n, n, n, n, n, n, -n);
-            AddTri(n, n, -n, -n, n, -n, -n, n, n);
+            AddQuad(
+                -n, n, n, 0f, 0f,
+                 n, n, n, 1f, 0f,
+                 n, n, -n, 1f, 1f,
+                -n, n, -n, 0f, 1f);
 
             // -Y
-            AddTri(-n, -n, -n, n, -n, -n, n, -n, n);
-            AddTri(n, -n, n, -n, -n, n, -n, -n, -n);
+            AddQuad(
+                -n, -n, -n, 0f, 0f,
+                 n, -n, -n, 1f, 0f,
+                 n, -n, n, 1f, 1f,
+                -n, -n, n, 0f, 1f);
 
             return data.ToArray();
         }
@@ -1532,7 +2459,11 @@ namespace LimitlessSquareEngine
                 ViewportX = 0,
                 ViewportY = 0,
                 ViewportWidth = _window.Size.X,
-                ViewportHeight = _window.Size.Y
+                ViewportHeight = _window.Size.Y,
+                Material = null,
+                Skybox = null,
+                ForceWhiteVertexColor = false,
+                IsSkybox = false
             };
 
             _renderQueue.Add(cmd);

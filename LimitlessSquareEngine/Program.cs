@@ -98,6 +98,8 @@ namespace LimitlessSquareEngine
         internal static Dictionary<string, List<UIElement>> _uiLayouts = new Dictionary<string, List<UIElement>>();
         // 场景文件注册表
         internal static Dictionary<string, string> _sceneFileRegistry = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        // 材质文件注册表
+        internal static Dictionary<string, string> _materialFileRegistry = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         // 场景文件验证信息
         static Dictionary<string, string> _sceneFileDisplayName = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
@@ -115,6 +117,7 @@ namespace LimitlessSquareEngine
                 Directory.CreateDirectory("Assets/Scene");
                 Directory.CreateDirectory("Assets/Textures/Icon");
                 Directory.CreateDirectory("Assets/UI");
+                Directory.CreateDirectory("Assets/Materials");
                 Directory.CreateDirectory("Scripts");
                 Directory.CreateDirectory("Assets/Shaders");
             }
@@ -323,6 +326,11 @@ namespace LimitlessSquareEngine
                     string uiBasePath = Path.Combine(assetsPath, "UI");
                     string texturesBasePath = Path.Combine(assetsPath, "Textures");
                     string sceneBasePath = Path.Combine(assetsPath, "Scene");
+                    string materialsBasePath = Path.Combine(assetsPath, "Materials");
+
+                    _sceneFileRegistry.Clear();
+                    _sceneFileDisplayName.Clear();
+                    _materialFileRegistry.Clear();
 
                     _sceneFileRegistry.Clear();
                     _sceneFileDisplayName.Clear();
@@ -404,6 +412,35 @@ namespace LimitlessSquareEngine
                             continue;
                         }
 
+                        // 材质文件
+                        if (directory.StartsWith(materialsBasePath, StringComparison.OrdinalIgnoreCase) &&
+                            Path.GetExtension(file).Equals(".json", StringComparison.OrdinalIgnoreCase))
+                        {
+                            try
+                            {
+                                if (!TryValidateMaterialFile(file, out string reason))
+                                {
+                                    Console.WriteLine($"[!] Invalid material file skipped: {file} | Reason: {reason}");
+                                    continue;
+                                }
+
+                                string key = Path.GetRelativePath(materialsBasePath, file)
+                                    .Replace('\\', '/');
+
+                                if (key.EndsWith(".json", StringComparison.OrdinalIgnoreCase))
+                                    key = key[..^5];
+
+                                _materialFileRegistry[key] = file;
+                                Console.WriteLine($"[i] Registered material: {key} -> {file}");
+                            }
+                            catch (Exception ex)
+                            {
+                                Console.WriteLine($"[!] Failed to scan material file {file}: {ex.Message}");
+                            }
+
+                            continue;
+                        }
+
                         // 纹理文件
                         if (file.StartsWith(texturesBasePath, StringComparison.OrdinalIgnoreCase) &&
                             Path.GetExtension(file).Equals(".png", StringComparison.OrdinalIgnoreCase))
@@ -415,7 +452,7 @@ namespace LimitlessSquareEngine
                         }
                     }
 
-                    Console.WriteLine($"[i] Scene scan completed. Registered scenes: {_sceneFileRegistry.Count}");
+                    Console.WriteLine($"[i] Scene scan completed. Registered scenes: {_sceneFileRegistry.Count}, materials: {_materialFileRegistry.Count}");
                 }
 
                 // 调用所有脚本的init函数
@@ -720,6 +757,60 @@ namespace LimitlessSquareEngine
                         break;
 
                     current = nextParent;
+                }
+            }
+
+            return true;
+        }
+
+        /// <summary>
+        /// 验证材质文件结构是否合法。
+        /// </summary>
+        static bool TryValidateMaterialFile(string filePath, out string reason)
+        {
+            reason = string.Empty;
+
+            string json = File.ReadAllText(filePath);
+            using JsonDocument doc = JsonDocument.Parse(json);
+
+            JsonElement root = doc.RootElement;
+            if (root.ValueKind != JsonValueKind.Object)
+            {
+                reason = "Root must be a JSON object.";
+                return false;
+            }
+
+            if (!TryGetProperty(root, "assetType", out JsonElement assetTypeElement) ||
+                assetTypeElement.ValueKind != JsonValueKind.String)
+            {
+                reason = "Missing or invalid 'assetType'.";
+                return false;
+            }
+
+            string assetType = assetTypeElement.GetString()?.Trim() ?? string.Empty;
+            if (!string.Equals(assetType, "Material", StringComparison.Ordinal))
+            {
+                reason = "'assetType' must be 'Material'.";
+                return false;
+            }
+
+            if (TryGetProperty(root, "shader", out JsonElement shaderElement))
+            {
+                if (shaderElement.ValueKind != JsonValueKind.String &&
+                    shaderElement.ValueKind != JsonValueKind.Null)
+                {
+                    reason = "'shader' must be string or null.";
+                    return false;
+                }
+            }
+
+            if (TryGetProperty(root, "parameters", out JsonElement parametersElement))
+            {
+                if (parametersElement.ValueKind != JsonValueKind.Object &&
+                    parametersElement.ValueKind != JsonValueKind.Null)
+                {
+                    reason = "'parameters' must be object or null.";
+                    return false;
                 }
             }
 

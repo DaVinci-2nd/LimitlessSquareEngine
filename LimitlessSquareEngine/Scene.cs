@@ -130,6 +130,7 @@ namespace LimitlessSquareEngine
         public double NearClip { get; set; } = 0.01;
         public double FarClip { get; set; } = 1000.0;
         public int ProjectionType { get; set; } = 0;
+        public bool IsMainCamera { get; set; } = false;
     }
 
     internal sealed class SceneCameraQueueItem
@@ -383,6 +384,12 @@ namespace LimitlessSquareEngine
                         if (prop.Value.ValueKind != JsonValueKind.Number || !prop.Value.TryGetInt32(out int projectionType) || (projectionType != 0 && projectionType != 1))
                             throw new InvalidDataException($"[X] Camera '{objectId}' data.projectionType must be 0 or 1.");
                         settings.ProjectionType = projectionType;
+                        break;
+
+                    case "isMainCamera":
+                        if (prop.Value.ValueKind != JsonValueKind.True && prop.Value.ValueKind != JsonValueKind.False)
+                            throw new InvalidDataException($"[X] Camera '{objectId}' data.isMainCamera must be true or false.");
+                        settings.IsMainCamera = prop.Value.GetBoolean();
                         break;
 
                     default:
