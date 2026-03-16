@@ -823,7 +823,7 @@ namespace LimitlessSquareEngine
     }
 
     _cameraQueues[sceneId] = queue;
-    Console.WriteLine($"[i] Camera queue rebuilt for scene '{sceneId}', count={queue.Count}");
+    //Console.WriteLine($"[i] Camera queue rebuilt for scene '{sceneId}', count={queue.Count}");
 }
 
         public static Dictionary<string, SceneWorldState> BuildWorldStates(SceneData scene)

@@ -9,6 +9,7 @@ using System.Collections.Concurrent;
 using System.Numerics;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using Silk.NET.Input;
 
 namespace LimitlessSquareEngine
 {
@@ -102,6 +103,8 @@ namespace LimitlessSquareEngine
         internal static Dictionary<string, string> _materialFileRegistry = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         // 场景文件验证信息
         static Dictionary<string, string> _sceneFileDisplayName = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        // 输入系统
+        static Input? _input;
 
         // 定义前一帧时间
         private static double _lastFrameTime;
@@ -133,6 +136,7 @@ namespace LimitlessSquareEngine
             UserData.RegisterType<SceneObject>();
             UserData.RegisterType<SceneTransform>();
             UserData.RegisterType<Double3>();
+            UserData.RegisterType<Input>();
             // 初始化窗口
             var options = WindowOptions.Default;
             options.Size = new Silk.NET.Maths.Vector2D<int>(800, 600);
@@ -253,6 +257,9 @@ namespace LimitlessSquareEngine
 
                 // 定义游戏数据
                 GameData gameData = new GameData();
+
+                // 输入对象
+                _input = new Input(_window);
 
                 // 扫描脚本文件夹
                 string scriptPath = Path.Combine(AppContext.BaseDirectory, "Scripts");
@@ -381,6 +388,9 @@ namespace LimitlessSquareEngine
                             {
                                 Scene.AlterScale(sceneId, objectId, new Double3(x, y, z));
                             });
+
+                        // 注入输入
+                        instance.LuaScript.Globals["input"] = _input;
 
                         // 执行脚本文件
                         instance.LuaScript.DoFile(file);
@@ -561,8 +571,7 @@ namespace LimitlessSquareEngine
             // 关闭事件
             _window.Closing += () =>
             {
-                // 这里以后写退出时的操作！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！
-
+                _input?.Dispose();
             };
 
             // 初始化窗口
@@ -592,6 +601,8 @@ namespace LimitlessSquareEngine
             Scene.FlushDirtyToRenderer();
             // 交场景相机渲染
             _graphics?.QueueLoadedSceneRender();
+            // 接收输入更新
+            _input?.Update();
 
             // 遍历所有脚本实例
             foreach (var instance in _luaScriptInstances)
