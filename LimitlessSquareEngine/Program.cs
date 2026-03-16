@@ -201,6 +201,7 @@ namespace LimitlessSquareEngine
                 var graphics = new Graphics(_gl, _window);
                 graphics.Initialize();
                 _graphics = graphics;
+                Scene.BindGraphics(graphics);
 
                 // 初始化帧时间
                 _lastFrameTime = _window.Time;
@@ -307,6 +308,79 @@ namespace LimitlessSquareEngine
                         {
                             graphics.ClearScreenSkybox();
                         });
+
+                        // 注入变换控制函数
+                        instance.LuaScript.Globals["set_local_position"] =
+                            (Action<string, string, double, double, double>)((sceneId, objectId, x, y, z) =>
+                            {
+                                Scene.SetLocalPosition(sceneId, objectId, new Double3(x, y, z));
+                            });
+
+                        instance.LuaScript.Globals["set_position"] =
+                            (Action<string, string, double, double, double>)((sceneId, objectId, x, y, z) =>
+                            {
+                                Scene.SetPosition(sceneId, objectId, new Double3(x, y, z));
+                            });
+
+                        instance.LuaScript.Globals["alter_local_position"] =
+                            (Action<string, string, double, double, double>)((sceneId, objectId, x, y, z) =>
+                            {
+                                Scene.AlterLocalPosition(sceneId, objectId, new Double3(x, y, z));
+                            });
+
+                        instance.LuaScript.Globals["alter_position"] =
+                            (Action<string, string, double, double, double>)((sceneId, objectId, x, y, z) =>
+                            {
+                                Scene.AlterPosition(sceneId, objectId, new Double3(x, y, z));
+                            });
+
+                        instance.LuaScript.Globals["set_local_rotation"] =
+                            (Action<string, string, double, double, double>)((sceneId, objectId, x, y, z) =>
+                            {
+                                Scene.SetLocalRotation(sceneId, objectId, new Double3(x, y, z));
+                            });
+
+                        instance.LuaScript.Globals["set_rotation"] =
+                            (Action<string, string, double, double, double>)((sceneId, objectId, x, y, z) =>
+                            {
+                                Scene.SetRotation(sceneId, objectId, new Double3(x, y, z));
+                            });
+
+                        instance.LuaScript.Globals["alter_local_rotation"] =
+                            (Action<string, string, double, double, double>)((sceneId, objectId, x, y, z) =>
+                            {
+                                Scene.AlterLocalRotate(sceneId, objectId, new Double3(x, y, z));
+                            });
+
+                        instance.LuaScript.Globals["alter_rotation"] =
+                            (Action<string, string, double, double, double>)((sceneId, objectId, x, y, z) =>
+                            {
+                                Scene.AlterRotate(sceneId, objectId, new Double3(x, y, z));
+                            });
+
+                        instance.LuaScript.Globals["set_local_scale"] =
+                            (Action<string, string, double, double, double>)((sceneId, objectId, x, y, z) =>
+                            {
+                                Scene.SetLocalScale(sceneId, objectId, new Double3(x, y, z));
+                            });
+
+                        instance.LuaScript.Globals["set_scale"] =
+                            (Action<string, string, double, double, double>)((sceneId, objectId, x, y, z) =>
+                            {
+                                Scene.SetScale(sceneId, objectId, new Double3(x, y, z));
+                            });
+
+                        instance.LuaScript.Globals["alter_local_scale"] =
+                            (Action<string, string, double, double, double>)((sceneId, objectId, x, y, z) =>
+                            {
+                                Scene.AlterLocalScale(sceneId, objectId, new Double3(x, y, z));
+                            });
+
+                        instance.LuaScript.Globals["alter_scale"] =
+                            (Action<string, string, double, double, double>)((sceneId, objectId, x, y, z) =>
+                            {
+                                Scene.AlterScale(sceneId, objectId, new Double3(x, y, z));
+                            });
 
                         // 执行脚本文件
                         instance.LuaScript.DoFile(file);
@@ -514,6 +588,8 @@ namespace LimitlessSquareEngine
 
             // 清除颜色缓冲
             _graphics?.ClearBackground();
+            // 把场景层的脏transform同步到Graphics缓存
+            Scene.FlushDirtyToRenderer();
             // 交场景相机渲染
             _graphics?.QueueLoadedSceneRender();
 

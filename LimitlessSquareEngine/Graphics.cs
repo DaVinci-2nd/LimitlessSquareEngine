@@ -133,6 +133,66 @@ namespace LimitlessSquareEngine
             }
         }
 
+        internal sealed class SceneRenderObjectSnapshot
+        {
+            public string SceneId { get; init; } = "";
+            public string ObjectId { get; init; } = "";
+            public string Type { get; init; } = "Object";
+            public bool Active { get; init; }
+            public bool Visible { get; init; }
+            public string? Mesh { get; init; }
+            public string? Material { get; init; }
+            public string RenderTag { get; init; } = "";
+
+            public Double3 WorldPosition { get; init; }
+            public DQuaternion WorldRotation { get; init; }
+            public Double3 WorldScale { get; init; }
+        }
+
+        internal sealed class SceneRenderCameraSnapshot
+        {
+            public string SceneId { get; init; } = "";
+            public string ObjectId { get; init; } = "";
+            public CameraRenderSettings Settings { get; init; } = new();
+            public int SubmissionOrder { get; init; }
+            public SceneWorldState World { get; init; }
+            public bool Active { get; init; }
+            public bool Visible { get; init; }
+        }
+
+        private readonly Dictionary<string, Dictionary<string, SceneRenderObjectSnapshot>> _sceneObjectCache
+            = new(StringComparer.Ordinal);
+
+        private readonly Dictionary<string, List<SceneRenderCameraSnapshot>> _sceneCameraCache
+            = new(StringComparer.Ordinal);
+
+        [MoonSharpHidden]
+        public void UpsertSceneObject(SceneRenderObjectSnapshot snapshot)
+        {
+            if (!_sceneObjectCache.TryGetValue(snapshot.SceneId, out var map))
+            {
+                map = new Dictionary<string, SceneRenderObjectSnapshot>(StringComparer.Ordinal);
+                _sceneObjectCache[snapshot.SceneId] = map;
+            }
+
+            map[snapshot.ObjectId] = snapshot;
+        }
+
+        [MoonSharpHidden]
+        public void ReplaceSceneCameras(string sceneId, List<SceneRenderCameraSnapshot> cameras)
+        {
+            _sceneCameraCache[sceneId] = cameras
+                .OrderBy(c => c.SubmissionOrder)
+                .ToList();
+        }
+
+        [MoonSharpHidden]
+        public void RemoveSceneCache(string sceneId)
+        {
+            _sceneObjectCache.Remove(sceneId);
+            _sceneCameraCache.Remove(sceneId);
+        }
+
         private bool TryGetActiveUniformExact(uint program, string uniformName, out ActiveUniformInfo uniform)
         {
             foreach (ActiveUniformInfo item in GetActiveUniforms(program))
@@ -1869,33 +1929,33 @@ namespace LimitlessSquareEngine
 
             string mainScreenCameraId = ResolveMainScreenCameraId();
 
-            foreach (SceneData scene in Scene.GetLoadedScenes())
+            foreach (var pair in _sceneCameraCache)
             {
-                IReadOnlyList<SceneCameraQueueItem> cameraQueue = Scene.GetCameraQueue(scene.SceneId);
-                if (cameraQueue.Count == 0)
+                string sceneId = pair.Key;
+
+                if (!_sceneObjectCache.TryGetValue(sceneId, out var objectMap))
                     continue;
 
-                Dictionary<string, SceneWorldState> worldStates = Scene.BuildWorldStates(scene);
-
-                foreach (SceneCameraQueueItem cameraItem in cameraQueue.OrderBy(c => c.SubmissionOrder))
+                foreach (var camera in pair.Value.OrderBy(c => c.SubmissionOrder))
                 {
-                    QueueSceneCamera(scene, worldStates, cameraItem, mainScreenCameraId);
+                    QueueSceneCamera(sceneId, objectMap.Values, camera, mainScreenCameraId);
                 }
             }
         }
 
         private void QueueSceneCamera(
-            SceneData scene,
-            Dictionary<string, SceneWorldState> worldStates,
-            SceneCameraQueueItem cameraItem,
+            string sceneId,
+            IEnumerable<SceneRenderObjectSnapshot> objects,
+            SceneRenderCameraSnapshot cameraItem,
             string mainScreenCameraId)
         {
-            // 模式1本轮忽略
+            if (!cameraItem.Active || !cameraItem.Visible)
+                return;
+
             if (cameraItem.Settings.RenderMode != 0)
                 return;
 
-            if (!worldStates.TryGetValue(cameraItem.ObjectId, out SceneWorldState cameraWorld))
-                return;
+            SceneWorldState cameraWorld = cameraItem.World;
 
             ViewportRect viewport = GetSceneViewportRect();
             Matrix4x4 view = CreateSceneViewMatrix(cameraWorld);
@@ -1913,7 +1973,7 @@ namespace LimitlessSquareEngine
                 float skyboxScale = MathF.Max(1f, (float)cameraItem.Settings.FarClip * 0.5f);
                 Matrix4x4 skyboxModel = Matrix4x4.CreateScale(skyboxScale);
 
-                var skyboxCmd = new RenderCommand
+                _renderQueue.Add(new RenderCommand
                 {
                     Vertices = skyboxMesh.Vertices,
                     PrimitiveType = skyboxMesh.PrimitiveType,
@@ -1924,11 +1984,9 @@ namespace LimitlessSquareEngine
                     Model = skyboxModel,
                     View = view,
                     Projection = projection,
-
                     QueueType = RenderQueueType.Opaque,
                     SortDepth = 0f,
                     SubmissionIndex = _submissionCounter++,
-
                     Pass = RenderPass.Scene,
                     BatchId = batchId,
                     BatchSubmissionOrder = cameraItem.SubmissionOrder,
@@ -1940,17 +1998,15 @@ namespace LimitlessSquareEngine
                     Skybox = skybox,
                     ForceWhiteVertexColor = true,
                     IsSkybox = true
-                };
-
-                _renderQueue.Add(skyboxCmd);
+                });
             }
 
-            foreach (SceneObject obj in scene.Objects)
+            foreach (var obj in objects)
             {
                 if (!obj.Active || !obj.Visible)
                     continue;
 
-                if (obj.Id == cameraItem.ObjectId)
+                if (obj.ObjectId == cameraItem.ObjectId)
                     continue;
 
                 if (string.Equals(obj.Type, "Camera", StringComparison.Ordinal))
@@ -1961,24 +2017,22 @@ namespace LimitlessSquareEngine
 
                 if (!_meshes.TryGetValue(obj.Mesh, out MeshData mesh))
                 {
-                    Console.WriteLine($"[!] Mesh '{obj.Mesh}' not found for object '{obj.Id}'.");
+                    Console.WriteLine($"[!] Mesh '{obj.Mesh}' not found for object '{obj.ObjectId}'.");
                     continue;
                 }
 
-                if (!worldStates.TryGetValue(obj.Id, out SceneWorldState objectWorld))
-                    continue;
-
-                // 双精度绝对坐标 -> 相机相对双精度 -> 单精度提交GPU
-                Double3 relativePosition = objectWorld.Position - cameraWorld.Position;
+                Double3 relativePosition = obj.WorldPosition - cameraWorld.Position;
 
                 Matrix4x4 model =
-                    Matrix4x4.CreateScale((float)objectWorld.Scale.X, (float)objectWorld.Scale.Y, (float)objectWorld.Scale.Z) *
-                    Matrix4x4.CreateFromQuaternion(objectWorld.Rotation.ToSingle()) *
+                    Matrix4x4.CreateScale((float)obj.WorldScale.X, (float)obj.WorldScale.Y, (float)obj.WorldScale.Z) *
+                    Matrix4x4.CreateFromQuaternion(obj.WorldRotation.ToSingle()) *
                     Matrix4x4.CreateTranslation((float)relativePosition.X, (float)relativePosition.Y, (float)relativePosition.Z);
 
-                MaterialData material = ResolveSceneMaterial(obj);
+                MaterialData material = !string.IsNullOrWhiteSpace(obj.Material) && TryLoadMaterial(obj.Material, out var loaded)
+                    ? loaded
+                    : GetFallbackMaterial();
 
-                var cmd = new RenderCommand
+                _renderQueue.Add(new RenderCommand
                 {
                     Vertices = mesh.Vertices,
                     PrimitiveType = mesh.PrimitiveType,
@@ -1989,11 +2043,9 @@ namespace LimitlessSquareEngine
                     Model = model,
                     View = view,
                     Projection = projection,
-
                     QueueType = RenderQueueType.Opaque,
                     SortDepth = ComputeSortDepth(mesh.Vertices, model, view, RenderSpace.Camera),
                     SubmissionIndex = _submissionCounter++,
-
                     Pass = RenderPass.Scene,
                     BatchId = batchId,
                     BatchSubmissionOrder = cameraItem.SubmissionOrder,
@@ -2005,9 +2057,7 @@ namespace LimitlessSquareEngine
                     Skybox = null,
                     ForceWhiteVertexColor = true,
                     IsSkybox = false
-                };
-
-                _renderQueue.Add(cmd);
+                });
             }
         }
 
