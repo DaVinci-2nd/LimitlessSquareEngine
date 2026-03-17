@@ -51,6 +51,8 @@ namespace LimitlessSquareEngine
         private Matrix4x4 _activeViewMatrix = Matrix4x4.Identity;
         private Matrix4x4 _activeProjectionMatrix = Matrix4x4.Identity;
 
+        private RenderCullMode _currentCullMode = RenderCullMode.Front;
+
         private enum RenderQueueType
         {
             Opaque = 0,
@@ -61,6 +63,13 @@ namespace LimitlessSquareEngine
         {
             Scene = 0,
             Canvas = 1
+        }
+
+        private enum RenderCullMode
+        {
+            Front = 0,
+            Back = 1,
+            Both = 2
         }
 
         private readonly struct MeshData
@@ -107,6 +116,7 @@ namespace LimitlessSquareEngine
             public JsonElement Parameters { get; init; }
             public Vector2 TextureUV { get; init; } = Vector2.One;
             public MaterialTextureWrapMode TextureWrap { get; init; } = MaterialTextureWrapMode.Repeat;
+            public RenderCullMode CullMode { get; init; } = RenderCullMode.Front;
         }
 
         private sealed class SkyboxData
@@ -114,6 +124,7 @@ namespace LimitlessSquareEngine
             public string Id { get; init; } = "";
             public uint Program { get; init; }
             public JsonElement Parameters { get; init; }
+            public RenderCullMode CullMode { get; init; } = RenderCullMode.Back;
         }
 
         private SkyboxData _screenSkybox;
@@ -239,6 +250,8 @@ namespace LimitlessSquareEngine
 
             public bool ForceWhiteVertexColor;
             public bool IsSkybox;
+
+            public RenderCullMode CullMode;
         }
         private readonly List<RenderCommand> _renderQueue = new();
         private long _submissionCounter = 0;
@@ -671,6 +684,8 @@ namespace LimitlessSquareEngine
             _gl.Enable(GLEnum.DepthTest);
             _gl.BlendFunc(GLEnum.SrcAlpha, GLEnum.OneMinusSrcAlpha);
             _gl.Enable(GLEnum.Blend);
+            _gl.FrontFace(FrontFaceDirection.Ccw);
+            ApplyCullMode(RenderCullMode.Front);
 
             _gl.BindBuffer(BufferTargetARB.ArrayBuffer, 0);
             _gl.BindVertexArray(0);
@@ -892,11 +907,11 @@ namespace LimitlessSquareEngine
             float[] vertices =
             {
                 x1,y1,z1, _currentColor.X,_currentColor.Y,_currentColor.Z,_currentColor.W, 0,0,
-                x2,y2,z2, _currentColor.X,_currentColor.Y,_currentColor.Z,_currentColor.W, 1,0,
+                x4,y4,z4, _currentColor.X,_currentColor.Y,_currentColor.Z,_currentColor.W, 0,1,
                 x3,y3,z3, _currentColor.X,_currentColor.Y,_currentColor.Z,_currentColor.W, 1,1,
 
                 x3,y3,z3, _currentColor.X,_currentColor.Y,_currentColor.Z,_currentColor.W, 1,1,
-                x4,y4,z4, _currentColor.X,_currentColor.Y,_currentColor.Z,_currentColor.W, 0,1,
+                x2,y2,z2, _currentColor.X,_currentColor.Y,_currentColor.Z,_currentColor.W, 1,0,
                 x1,y1,z1, _currentColor.X,_currentColor.Y,_currentColor.Z,_currentColor.W, 0,0
             };
 
@@ -926,7 +941,8 @@ namespace LimitlessSquareEngine
                 Material = null,
                 Skybox = null,
                 ForceWhiteVertexColor = false,
-                IsSkybox = false
+                IsSkybox = false,
+                CullMode = _currentCullMode
             };
 
             _renderQueue.Add(cmd);
@@ -991,13 +1007,12 @@ namespace LimitlessSquareEngine
                 Material = null,
                 Skybox = null,
                 ForceWhiteVertexColor = false,
-                IsSkybox = false
+                IsSkybox = false,
+                CullMode = _currentCullMode
             };
 
             _renderQueue.Add(cmd);
         }
-
-
 
 
         /// <summary>
@@ -1119,7 +1134,8 @@ namespace LimitlessSquareEngine
             {
                 Id = "__internal_fallback_purple__",
                 Program = GetFallbackProgram(),
-                Parameters = _emptyJsonObject
+                Parameters = _emptyJsonObject,
+                CullMode = RenderCullMode.Front
             };
 
             return _fallbackMaterial;
@@ -1137,11 +1153,13 @@ namespace LimitlessSquareEngine
 
         private SkyboxData BuildSkyboxData(string id, string shaderKey, string parametersJson)
         {
+            JsonElement parameters = ParseSkyboxParameters(parametersJson);
             return new SkyboxData
             {
                 Id = id,
                 Program = ResolveShaderProgramOrFallback(shaderKey),
-                Parameters = ParseSkyboxParameters(parametersJson)
+                Parameters = parameters,
+                CullMode = ReadMaterialCullMode(parameters, RenderCullMode.Back)
             };
         }
 
@@ -1283,6 +1301,7 @@ namespace LimitlessSquareEngine
 
                 Vector2 textureUV = ReadMaterialTextureUV(parameters);
                 MaterialTextureWrapMode textureWrap = ReadMaterialTextureWrap(parameters);
+                RenderCullMode cullMode = ReadMaterialCullMode(parameters, RenderCullMode.Front);
 
                 material = new MaterialData
                 {
@@ -1290,7 +1309,8 @@ namespace LimitlessSquareEngine
                     Program = ResolveShaderProgramOrFallback(shaderKey),
                     Parameters = parameters,
                     TextureUV = textureUV,
-                    TextureWrap = textureWrap
+                    TextureWrap = textureWrap,
+                    CullMode = cullMode
                 };
 
                 _materialCache[key] = material;
@@ -1506,6 +1526,59 @@ namespace LimitlessSquareEngine
                 return MaterialTextureWrapMode.Clamp;
 
             return MaterialTextureWrapMode.Repeat;
+        }
+
+        private RenderCullMode ReadMaterialCullMode(JsonElement parameters, RenderCullMode defaultValue)
+        {
+            if (parameters.ValueKind != JsonValueKind.Object)
+                return defaultValue;
+
+            if (!parameters.TryGetProperty("uCull", out JsonElement cullElement))
+                return defaultValue;
+
+            if (cullElement.ValueKind != JsonValueKind.String)
+            {
+                Console.WriteLine("[!] Material parameter 'uCull' must be 'front', 'back', or 'both'.");
+                return defaultValue;
+            }
+
+            string raw = cullElement.GetString() ?? "";
+
+            switch (raw)
+            {
+                case "front":
+                    return RenderCullMode.Front;
+
+                case "back":
+                    return RenderCullMode.Back;
+
+                case "both":
+                    return RenderCullMode.Both;
+
+                default:
+                    Console.WriteLine($"[!] Invalid uCull value '{raw}', only 'front', 'back', or 'both' are allowed.");
+                    return defaultValue;
+            }
+        }
+
+        private void ApplyCullMode(RenderCullMode mode)
+        {
+            switch (mode)
+            {
+                case RenderCullMode.Front:
+                    _gl.Enable(GLEnum.CullFace);
+                    _gl.CullFace(TriangleFace.Back);
+                    break;
+
+                case RenderCullMode.Back:
+                    _gl.Enable(GLEnum.CullFace);
+                    _gl.CullFace(TriangleFace.Front);
+                    break;
+
+                case RenderCullMode.Both:
+                    _gl.Disable(GLEnum.CullFace);
+                    break;
+            }
         }
 
         private void ApplyTextureWrapMode(uint textureId, MaterialTextureWrapMode wrapMode)
@@ -1997,7 +2070,8 @@ namespace LimitlessSquareEngine
                     Material = null,
                     Skybox = skybox,
                     ForceWhiteVertexColor = true,
-                    IsSkybox = true
+                    IsSkybox = true,
+                    CullMode = skybox.CullMode
                 });
             }
 
@@ -2056,7 +2130,8 @@ namespace LimitlessSquareEngine
                     Material = material,
                     Skybox = null,
                     ForceWhiteVertexColor = true,
-                    IsSkybox = false
+                    IsSkybox = false,
+                    CullMode = material.CullMode
                 });
             }
         }
@@ -2144,6 +2219,32 @@ namespace LimitlessSquareEngine
         {
             if (!_cameraContextActive)
                 UseCanvasSpace();
+        }
+
+        public void SetCull(string mode)
+        {
+            _currentCullMode = mode switch
+            {
+                "front" => RenderCullMode.Front,
+                "back" => RenderCullMode.Back,
+                "both" => RenderCullMode.Both,
+                _ => throw new ArgumentException("[X] Cull mode must be 'front', 'back', or 'both'.", nameof(mode))
+            };
+        }
+
+        public void SetCullFront()
+        {
+            _currentCullMode = RenderCullMode.Front;
+        }
+
+        public void SetCullBack()
+        {
+            _currentCullMode = RenderCullMode.Back;
+        }
+
+        public void SetCullBoth()
+        {
+            _currentCullMode = RenderCullMode.Both;
         }
 
         [MoonSharpHidden]
@@ -2287,6 +2388,7 @@ namespace LimitlessSquareEngine
             _activeProjectionMatrix = cmd.Projection;
 
             BindCommandGeometry(cmd);
+            ApplyCullMode(cmd.CullMode);
 
             _gl.Disable(GLEnum.DepthTest);
             _gl.DepthMask(false);
@@ -2315,6 +2417,7 @@ namespace LimitlessSquareEngine
             _activeProjectionMatrix = cmd.Projection;
 
             BindCommandGeometry(cmd);
+            ApplyCullMode(cmd.CullMode);
 
             if (cmd.Material != null)
             {
@@ -2513,7 +2616,8 @@ namespace LimitlessSquareEngine
                 Material = null,
                 Skybox = null,
                 ForceWhiteVertexColor = false,
-                IsSkybox = false
+                IsSkybox = false,
+                CullMode = _currentCullMode
             };
 
             _renderQueue.Add(cmd);

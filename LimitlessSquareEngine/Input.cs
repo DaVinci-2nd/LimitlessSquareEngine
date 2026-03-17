@@ -58,32 +58,32 @@ namespace LimitlessSquareEngine
             _pendingWheelDelta = Vector2.Zero;
         }
 
-        public bool KeyPressed(string keyName)
+        public bool GetKeyPressed(string keyName)
         {
             return TryParseKey(keyName, out var key) && _currentKeys.Contains(key);
         }
 
-        public bool KeyDown(string keyName)
+        public bool GetKeyDown(string keyName)
         {
             return TryParseKey(keyName, out var key) && _currentKeys.Contains(key) && !_previousKeys.Contains(key);
         }
 
-        public bool KeyUp(string keyName)
+        public bool GetKeyUp(string keyName)
         {
             return TryParseKey(keyName, out var key) && !_currentKeys.Contains(key) && _previousKeys.Contains(key);
         }
 
-        public bool MouseButtonPressed(string buttonName)
+        public bool GetMouseButtonPressed(string buttonName)
         {
             return TryParseMouseButton(buttonName, out var button) && _currentMouseButtons.Contains(button);
         }
 
-        public bool MouseButtonDown(string buttonName)
+        public bool GetMouseButtonDown(string buttonName)
         {
             return TryParseMouseButton(buttonName, out var button) && _currentMouseButtons.Contains(button) && !_previousMouseButtons.Contains(button);
         }
 
-        public bool MouseButtonUp(string buttonName)
+        public bool GetMouseButtonUp(string buttonName)
         {
             return TryParseMouseButton(buttonName, out var button) && !_currentMouseButtons.Contains(button) && _previousMouseButtons.Contains(button);
         }
