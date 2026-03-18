@@ -53,6 +53,73 @@ namespace LimitlessSquareEngine
 
         private RenderCullMode _currentCullMode = RenderCullMode.Front;
 
+        // 主环境光，默认灰色
+        private Vector3 _ambientLightColor = new Vector3(0.5f, 0.5f, 0.5f);
+        private float _ambientLightIntensity = 1f;
+
+        // 灯光集合
+        private readonly Dictionary<string, LightData> _lights = new(StringComparer.Ordinal);
+
+        private const uint _clusterLightBufferBinding = 0;
+        private const uint _clusterRangeBufferBinding = 1;
+        private const uint _clusterIndexBufferBinding = 2;
+
+        private const int _clusterGridSizeX = 16;
+        private const int _clusterGridSizeY = 9;
+        private const int _clusterGridSizeZ = 24;
+
+        private const string _uniformCameraPosition = "uCameraPosition";
+        private const string _uniformAmbientColor = "uAmbientColor";
+        private const string _uniformAmbientIntensity = "uAmbientIntensity";
+        private const string _uniformViewportOrigin = "uViewportOrigin";
+        private const string _uniformViewportSize = "uViewportSize";
+        private const string _uniformClusterGridSize = "uClusterGridSize";
+        private const string _uniformClusterNear = "uClusterNear";
+        private const string _uniformClusterFar = "uClusterFar";
+        private const string _uniformLightCount = "uLightCount";
+        private const string _uniformShadowAtlasTexture = "uShadowAtlasTexture";
+        private const string _uniformReflectionTexture = "uReflectionTexture";
+        private const string _uniformReflectionEnabled = "uReflectionEnabled";
+        private const string _uniformReflectionSkyboxCube = "uReflectionSkyboxCube";
+        private const string _uniformReflectionSource = "uReflectionSource";
+        private const string _uniformReflectionIntensity = "uReflectionIntensity";
+        private const string _uniformOutlinePass = "uOutlinePass";
+        private const string _uniformUseOutlineNormal = "uUseOutlineNormal";
+        private const string _uniformFaceVisibilityMode = "uFaceVisibilityMode";
+
+        private uint _clusterLightBuffer = 0;
+        private uint _clusterRangeBuffer = 0;
+        private uint _clusterIndexBuffer = 0;
+        private uint _lightingDummyTexture = 0;
+        private bool _lightingSupportInitialized = false;
+
+        private const int _reflectionSkyboxCubeSize = 256;
+
+        private uint _reflectionCaptureFramebuffer = 0;
+        private uint _reflectionSkyboxCube = 0;
+        private uint _reflectionDummyCubeTexture = 0;
+        private bool _reflectionCaptureInitialized = false;
+
+        private long _capturedReflectionBatchId = long.MinValue;
+        private bool _capturedSkyboxReflectionValid = false;
+
+        private const int _gpuPointLightStrideFloats = 52;
+        private const int _clusterCount = _clusterGridSizeX * _clusterGridSizeY * _clusterGridSizeZ;
+        private readonly List<float> _gpuLightUploadScratch = new(256);
+        private readonly List<uint>[] _clusterLightLists = CreateClusterLightLists();
+
+        private static List<uint>[] CreateClusterLightLists()
+        {
+            var result = new List<uint>[_clusterCount];
+            for (int i = 0; i < result.Length; i++)
+                result[i] = new List<uint>(8);
+
+            return result;
+        }
+
+        private long _uploadedLightingBatchId = long.MinValue;
+        private int _uploadedLightCount = 0;
+
         private enum RenderQueueType
         {
             Opaque = 0,
@@ -77,12 +144,14 @@ namespace LimitlessSquareEngine
             public string Id { get; }
             public float[] Vertices { get; }
             public PrimitiveType PrimitiveType { get; }
+            public int VertexStrideFloats { get; }
 
-            public MeshData(string id, float[] vertices, PrimitiveType primitiveType)
+            public MeshData(string id, float[] vertices, PrimitiveType primitiveType, int vertexStrideFloats)
             {
                 Id = id;
                 Vertices = vertices;
                 PrimitiveType = primitiveType;
+                VertexStrideFloats = vertexStrideFloats;
             }
         }
 
@@ -127,8 +196,88 @@ namespace LimitlessSquareEngine
             public RenderCullMode CullMode { get; init; } = RenderCullMode.Back;
         }
 
+        private static readonly Matrix4x4[] _reflectionCaptureViews = CreateReflectionCaptureViews();
+
+        private static Matrix4x4[] CreateReflectionCaptureViews()
+        {
+            return new[]
+            {
+                Matrix4x4.CreateLookAt(Vector3.Zero,  Vector3.UnitX,  -Vector3.UnitY), // +X
+                Matrix4x4.CreateLookAt(Vector3.Zero, -Vector3.UnitX,  -Vector3.UnitY), // -X
+                Matrix4x4.CreateLookAt(Vector3.Zero,  Vector3.UnitY,   Vector3.UnitZ), // +Y
+                Matrix4x4.CreateLookAt(Vector3.Zero, -Vector3.UnitY,  -Vector3.UnitZ), // -Y
+                Matrix4x4.CreateLookAt(Vector3.Zero,  Vector3.UnitZ,  -Vector3.UnitY), // +Z
+                Matrix4x4.CreateLookAt(Vector3.Zero, -Vector3.UnitZ,  -Vector3.UnitY), // -Z
+            };
+        }
+
         private SkyboxData _screenSkybox;
         private readonly Dictionary<string, SkyboxData> _cameraSkyboxes = new(StringComparer.Ordinal);
+
+        private void InitializeReflectionCaptureResources()
+        {
+            if (_reflectionCaptureInitialized)
+                return;
+
+            _reflectionSkyboxCube = _gl.GenTexture();
+            _gl.BindTexture(TextureTarget.TextureCubeMap, _reflectionSkyboxCube);
+
+            byte[] emptyFace = new byte[_reflectionSkyboxCubeSize * _reflectionSkyboxCubeSize * 4];
+
+            for (int face = 0; face < 6; face++)
+            {
+                TextureTarget faceTarget = (TextureTarget)((int)TextureTarget.TextureCubeMapPositiveX + face);
+
+                _gl.TexImage2D(
+                    faceTarget,
+                    0,
+                    InternalFormat.Rgba,
+                    (uint)_reflectionSkyboxCubeSize,
+                    (uint)_reflectionSkyboxCubeSize,
+                    0,
+                    PixelFormat.Rgba,
+                    PixelType.UnsignedByte,
+                    (ReadOnlySpan<byte>)emptyFace);
+            }
+
+            _gl.TexParameter(TextureTarget.TextureCubeMap, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.Linear);
+            _gl.TexParameter(TextureTarget.TextureCubeMap, TextureParameterName.TextureMagFilter, (int)TextureMagFilter.Linear);
+            _gl.TexParameter(TextureTarget.TextureCubeMap, TextureParameterName.TextureWrapS, (int)TextureWrapMode.ClampToEdge);
+            _gl.TexParameter(TextureTarget.TextureCubeMap, TextureParameterName.TextureWrapT, (int)TextureWrapMode.ClampToEdge);
+            _gl.TexParameter(TextureTarget.TextureCubeMap, TextureParameterName.TextureWrapR, (int)TextureWrapMode.ClampToEdge);
+            _gl.BindTexture(TextureTarget.TextureCubeMap, 0);
+
+            _reflectionDummyCubeTexture = _gl.GenTexture();
+            _gl.BindTexture(TextureTarget.TextureCubeMap, _reflectionDummyCubeTexture);
+
+            byte[] blackPixel = new byte[] { 0, 0, 0, 255 };
+            for (int face = 0; face < 6; face++)
+            {
+                TextureTarget faceTarget = (TextureTarget)((int)TextureTarget.TextureCubeMapPositiveX + face);
+
+                _gl.TexImage2D(
+                    faceTarget,
+                    0,
+                    InternalFormat.Rgba,
+                    1,
+                    1,
+                    0,
+                    PixelFormat.Rgba,
+                    PixelType.UnsignedByte,
+                    (ReadOnlySpan<byte>)blackPixel);
+            }
+
+            _gl.TexParameter(TextureTarget.TextureCubeMap, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.Nearest);
+            _gl.TexParameter(TextureTarget.TextureCubeMap, TextureParameterName.TextureMagFilter, (int)TextureMagFilter.Nearest);
+            _gl.TexParameter(TextureTarget.TextureCubeMap, TextureParameterName.TextureWrapS, (int)TextureWrapMode.ClampToEdge);
+            _gl.TexParameter(TextureTarget.TextureCubeMap, TextureParameterName.TextureWrapT, (int)TextureWrapMode.ClampToEdge);
+            _gl.TexParameter(TextureTarget.TextureCubeMap, TextureParameterName.TextureWrapR, (int)TextureWrapMode.ClampToEdge);
+            _gl.BindTexture(TextureTarget.TextureCubeMap, 0);
+
+            _reflectionCaptureFramebuffer = _gl.GenFramebuffer();
+
+            _reflectionCaptureInitialized = true;
+        }
 
         private readonly struct ActiveUniformInfo
         {
@@ -171,12 +320,80 @@ namespace LimitlessSquareEngine
             public bool Visible { get; init; }
         }
 
+        internal sealed class SceneRenderLightSnapshot
+        {
+            public string SceneId { get; init; } = "";
+            public string ObjectId { get; init; } = "";
+            public LightRenderSettings Settings { get; init; } = new();
+            public SceneWorldState World { get; init; }
+            public bool Active { get; init; }
+            public bool Visible { get; init; }
+        }
+
         private readonly Dictionary<string, Dictionary<string, SceneRenderObjectSnapshot>> _sceneObjectCache
             = new(StringComparer.Ordinal);
 
         private readonly Dictionary<string, List<SceneRenderCameraSnapshot>> _sceneCameraCache
             = new(StringComparer.Ordinal);
 
+        private readonly Dictionary<string, Dictionary<string, SceneRenderLightSnapshot>> _sceneLightCache
+            = new(StringComparer.Ordinal);
+
+        private enum LightKind
+        {
+            Point = 0,
+            Box = 1,
+            Spot = 2,
+            Directional = 3,
+            Area = 4,
+            Line = 5,
+            Ray = 6
+        }
+
+        private sealed class LightData
+        {
+            public string Id { get; init; } = "";
+            public LightKind Kind { get; init; } = LightKind.Point;
+            public bool Active { get; set; } = true;
+
+            public Vector3 Color { get; set; } = Vector3.One;
+            public float Intensity { get; set; } = 1f;
+
+            // 通用位置与方向
+            public Double3 Position { get; set; } = new Double3(0, 0, 0);
+            public Double3 Direction { get; set; } = new Double3(0, -1, 0);
+
+            // 点光源、盒状灯、聚光灯常用范围
+            public double Range { get; set; } = 1.0;
+
+            // 点光源、聚光灯、面光灯、线光灯的衰减曲线
+            // 0.5 = 线性衰减
+            // 越接近 0 = 前快后慢
+            // 越接近 1 = 前慢后快
+            public double AttenuationCurve { get; set; } = 0.5;
+
+            // 盒状灯：长方体尺寸
+            public Double3 BoxSize { get; set; } = new Double3(1, 1, 1);
+
+            // 聚光灯：内外角
+            public double InnerAngle { get; set; } = 15.0;
+            public double OuterAngle { get; set; } = 30.0;
+
+            // 面光灯：一个方形面
+            public Double3 AreaRight { get; set; } = new Double3(1, 0, 0);
+            public Double3 AreaUp { get; set; } = new Double3(0, 1, 0);
+            public double AreaWidth { get; set; } = 1.0;
+            public double AreaHeight { get; set; } = 1.0;
+
+            // 线光灯：一条线段
+            public Double3 LineDirection { get; set; } = new Double3(1, 0, 0);
+            public double LineLength { get; set; } = 1.0;
+
+            // 阴影预留
+            public bool CastShadow { get; set; } = false;
+        }
+
+        
         [MoonSharpHidden]
         public void UpsertSceneObject(SceneRenderObjectSnapshot snapshot)
         {
@@ -198,10 +415,23 @@ namespace LimitlessSquareEngine
         }
 
         [MoonSharpHidden]
+        public void UpsertSceneLight(SceneRenderLightSnapshot snapshot)
+        {
+            if (!_sceneLightCache.TryGetValue(snapshot.SceneId, out var map))
+            {
+                map = new Dictionary<string, SceneRenderLightSnapshot>(StringComparer.Ordinal);
+                _sceneLightCache[snapshot.SceneId] = map;
+            }
+
+            map[snapshot.ObjectId] = snapshot;
+        }
+
+        [MoonSharpHidden]
         public void RemoveSceneCache(string sceneId)
         {
             _sceneObjectCache.Remove(sceneId);
             _sceneCameraCache.Remove(sceneId);
+            _sceneLightCache.Remove(sceneId);
         }
 
         private bool TryGetActiveUniformExact(uint program, string uniformName, out ActiveUniformInfo uniform)
@@ -222,6 +452,7 @@ namespace LimitlessSquareEngine
         private struct RenderCommand
         {
             public float[] Vertices;
+            public int VertexStrideFloats;
             public PrimitiveType PrimitiveType;
             public uint Program;
             public bool UseTexture;
@@ -231,6 +462,12 @@ namespace LimitlessSquareEngine
             public Matrix4x4 Model;
             public Matrix4x4 View;
             public Matrix4x4 Projection;
+
+            public Vector3 CameraPosition;
+            public float ClusterNear;
+            public float ClusterFar;
+            public string SceneId;
+            public Double3 CameraWorldPosition;
 
             public RenderQueueType QueueType;
             public float SortDepth;
@@ -270,9 +507,9 @@ namespace LimitlessSquareEngine
 
             float[] vertices = (float[])cmd.Vertices.Clone();
 
-            // 每顶点 9 个 float:
-            // [x, y, z, r, g, b, a, u, v]
-            for (int i = 0; i + 8 < vertices.Length; i += 9)
+            // 两种支持格式都保持前 9 个 float 一致：
+            // [x, y, z, r, g, b, a, u, v, ...]
+            for (int i = 0; i + 8 < vertices.Length; i += cmd.VertexStrideFloats)
             {
                 if (needWhiteColor)
                 {
@@ -330,17 +567,20 @@ namespace LimitlessSquareEngine
         /// <param name="view"></param>
         /// <param name="renderSpace"></param>
         /// <returns></returns>
-        private float ComputeSortDepth(float[] vertices, Matrix4x4 model, Matrix4x4 view, RenderSpace renderSpace)
+        private float ComputeSortDepth(float[] vertices, int vertexStrideFloats, Matrix4x4 model, Matrix4x4 view, RenderSpace renderSpace)
         {
-            int vertexCount = vertices.Length / 9;
-            if (vertexCount == 0) return 0f;
+            int vertexCount = vertices.Length / vertexStrideFloats;
+            if (vertexCount == 0)
+                return 0f;
 
             Vector3 center = Vector3.Zero;
+
             for (int i = 0; i < vertexCount; i++)
             {
-                int idx = i * 9;
+                int idx = i * vertexStrideFloats;
                 center += new Vector3(vertices[idx], vertices[idx + 1], vertices[idx + 2]);
             }
+
             center /= vertexCount;
 
             if (renderSpace == RenderSpace.Canvas)
@@ -596,6 +836,663 @@ namespace LimitlessSquareEngine
             _window = window;
         }
 
+        private void InitializeLightingSupportResources()
+        {
+            if (_lightingSupportInitialized)
+                return;
+
+            _clusterLightBuffer = _gl.GenBuffer();
+            _gl.BindBuffer(BufferTargetARB.ShaderStorageBuffer, _clusterLightBuffer);
+            uint[] emptyLightBufferData = new uint[] { 0 };
+            _gl.BufferData(BufferTargetARB.ShaderStorageBuffer, (ReadOnlySpan<uint>)emptyLightBufferData, BufferUsageARB.DynamicDraw);
+
+            _clusterRangeBuffer = _gl.GenBuffer();
+            _gl.BindBuffer(BufferTargetARB.ShaderStorageBuffer, _clusterRangeBuffer);
+            uint[] emptyClusterRanges = new uint[_clusterGridSizeX * _clusterGridSizeY * _clusterGridSizeZ * 2];
+            _gl.BufferData(BufferTargetARB.ShaderStorageBuffer, (ReadOnlySpan<uint>)emptyClusterRanges, BufferUsageARB.DynamicDraw);
+
+            _clusterIndexBuffer = _gl.GenBuffer();
+            _gl.BindBuffer(BufferTargetARB.ShaderStorageBuffer, _clusterIndexBuffer);
+            uint[] emptyClusterIndices = new uint[] { 0 };
+            _gl.BufferData(BufferTargetARB.ShaderStorageBuffer, (ReadOnlySpan<uint>)emptyClusterIndices, BufferUsageARB.DynamicDraw);
+
+            _gl.BindBuffer(BufferTargetARB.ShaderStorageBuffer, 0);
+
+            _lightingDummyTexture = _gl.GenTexture();
+            _gl.BindTexture(TextureTarget.Texture2D, _lightingDummyTexture);
+
+            byte[] whitePixel = new byte[] { 255, 255, 255, 255 };
+            _gl.TexImage2D(
+                TextureTarget.Texture2D,
+                0,
+                InternalFormat.Rgba,
+                1,
+                1,
+                0,
+                PixelFormat.Rgba,
+                PixelType.UnsignedByte,
+                (ReadOnlySpan<byte>)whitePixel);
+
+            _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.Nearest);
+            _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMagFilter, (int)TextureMagFilter.Nearest);
+            _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapS, (int)TextureWrapMode.ClampToEdge);
+            _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapT, (int)TextureWrapMode.ClampToEdge);
+            _gl.BindTexture(TextureTarget.Texture2D, 0);
+
+            _lightingSupportInitialized = true;
+
+            InitializeReflectionCaptureResources();
+        }
+
+        private static bool TryGetMaterialProperty(MaterialData material, string name, out JsonElement value)
+        {
+            value = default;
+
+            if (material == null || material.Parameters.ValueKind != JsonValueKind.Object)
+                return false;
+
+            return material.Parameters.TryGetProperty(name, out value);
+        }
+
+        private static float ReadMaterialFloat(MaterialData material, string name, float defaultValue)
+        {
+            if (!TryGetMaterialProperty(material, name, out JsonElement value))
+                return defaultValue;
+
+            if (value.ValueKind == JsonValueKind.Number)
+                return Math.Max(0f, (float)value.GetDouble());
+
+            return defaultValue;
+        }
+
+        private static string ReadMaterialString(MaterialData material, string name, string defaultValue)
+        {
+            if (!TryGetMaterialProperty(material, name, out JsonElement value))
+                return defaultValue;
+
+            if (value.ValueKind == JsonValueKind.String)
+                return value.GetString() ?? defaultValue;
+
+            return defaultValue;
+        }
+
+        private int ReadReflectionSourceMode(MaterialData material)
+        {
+            string source = ReadMaterialString(material, "uReflectionSource", "Skybox");
+
+            if (string.Equals(source, "Texture", StringComparison.OrdinalIgnoreCase))
+                return 1;
+
+            return 0;
+        }
+
+        private bool TryGetReflectionMapTexture(MaterialData material, out TextureInfo texture)
+        {
+            texture = default;
+
+            string mapPath = ReadMaterialString(material, "uReflectionMap", "");
+            if (string.IsNullOrWhiteSpace(mapPath))
+                return false;
+
+            string fullPath = ResolveTexturePath(mapPath);
+            texture = LoadTexture(fullPath);
+            return texture.Id != 0;
+        }
+
+        private void UploadEmptyPointLightBuffer()
+        {
+            float[] emptyLight = new float[_gpuPointLightStrideFloats];
+
+            _gl.BindBuffer(BufferTargetARB.ShaderStorageBuffer, _clusterLightBuffer);
+            _gl.BufferData(
+                BufferTargetARB.ShaderStorageBuffer,
+                (ReadOnlySpan<float>)emptyLight,
+                BufferUsageARB.DynamicDraw);
+
+            uint[] emptyRanges = new uint[_clusterCount * 2];
+            _gl.BindBuffer(BufferTargetARB.ShaderStorageBuffer, _clusterRangeBuffer);
+            _gl.BufferData(
+                BufferTargetARB.ShaderStorageBuffer,
+                (ReadOnlySpan<uint>)emptyRanges,
+                BufferUsageARB.DynamicDraw);
+
+            uint[] emptyIndices = new uint[] { 0 };
+            _gl.BindBuffer(BufferTargetARB.ShaderStorageBuffer, _clusterIndexBuffer);
+            _gl.BufferData(
+                BufferTargetARB.ShaderStorageBuffer,
+                (ReadOnlySpan<uint>)emptyIndices,
+                BufferUsageARB.DynamicDraw);
+
+            _gl.BindBuffer(BufferTargetARB.ShaderStorageBuffer, 0);
+
+            _uploadedLightCount = 0;
+        }
+
+        private int UploadPointLightsForCommand(in RenderCommand cmd)
+        {
+            if (_uploadedLightingBatchId == cmd.BatchId)
+                return _uploadedLightCount;
+
+            _uploadedLightingBatchId = cmd.BatchId;
+            _uploadedLightCount = 0;
+
+            if (cmd.Pass != RenderPass.Scene ||
+                string.IsNullOrWhiteSpace(cmd.SceneId) ||
+                !_sceneLightCache.TryGetValue(cmd.SceneId, out var lightMap) ||
+                lightMap.Count == 0)
+            {
+                UploadEmptyPointLightBuffer();
+                return 0;
+            }
+
+            _gpuLightUploadScratch.Clear();
+
+            for (int i = 0; i < _clusterLightLists.Length; i++)
+                _clusterLightLists[i].Clear();
+
+            foreach (SceneRenderLightSnapshot light in lightMap.Values.OrderBy(l => l.ObjectId))
+            {
+                if (!light.Active || !light.Visible)
+                    continue;
+
+                // 当前只处理 Point
+                if (light.Settings.LightMode != 0)
+                    continue;
+
+                float range = (float)light.Settings.Range;
+                if (range <= 0.0001f)
+                    continue;
+
+                Double3 relativePosition = light.World.Position - cmd.CameraWorldPosition;
+                Vector3 relativePositionF = new(
+                    (float)relativePosition.X,
+                    (float)relativePosition.Y,
+                    (float)relativePosition.Z);
+
+                // 这里直接用 RenderCommand 里已经有的 View / Projection
+                Vector3 viewSpacePosition = TransformPosition(cmd.View, relativePositionF);
+
+                uint gpuLightIndex = (uint)_uploadedLightCount;
+
+                AppendGpuPointLight(_gpuLightUploadScratch, relativePositionF, light);
+
+                AssignLightToClustersXYZ(
+                    cmd.Projection,
+                    viewSpacePosition,
+                    range,
+                    cmd.ClusterNear,
+                    cmd.ClusterFar,
+                    gpuLightIndex,
+                    _clusterLightLists);
+
+                _uploadedLightCount++;
+            }
+
+            if (_uploadedLightCount == 0)
+            {
+                UploadEmptyPointLightBuffer();
+                return 0;
+            }
+
+            float[] gpuLightArray = _gpuLightUploadScratch.ToArray();
+
+            BuildClusterBuffers(
+                _clusterLightLists,
+                out uint[] clusterRanges,
+                out uint[] clusterIndices);
+
+            _gl.BindBuffer(BufferTargetARB.ShaderStorageBuffer, _clusterLightBuffer);
+            _gl.BufferData(
+                BufferTargetARB.ShaderStorageBuffer,
+                (ReadOnlySpan<float>)gpuLightArray,
+                BufferUsageARB.DynamicDraw);
+
+            _gl.BindBuffer(BufferTargetARB.ShaderStorageBuffer, _clusterRangeBuffer);
+            _gl.BufferData(
+                BufferTargetARB.ShaderStorageBuffer,
+                (ReadOnlySpan<uint>)clusterRanges,
+                BufferUsageARB.DynamicDraw);
+
+            _gl.BindBuffer(BufferTargetARB.ShaderStorageBuffer, _clusterIndexBuffer);
+            _gl.BufferData(
+                BufferTargetARB.ShaderStorageBuffer,
+                (ReadOnlySpan<uint>)clusterIndices,
+                BufferUsageARB.DynamicDraw);
+
+            _gl.BindBuffer(BufferTargetARB.ShaderStorageBuffer, 0);
+
+            return _uploadedLightCount;
+        }
+
+        private static void AppendGpuPointLight(
+    List<float> dst,
+    Vector3 relativePosition,
+    SceneRenderLightSnapshot light)
+        {
+            static void AddVec4(List<float> buffer, float x, float y, float z, float w)
+            {
+                buffer.Add(x);
+                buffer.Add(y);
+                buffer.Add(z);
+                buffer.Add(w);
+            }
+
+            static void AddIdentityMat4(List<float> buffer)
+            {
+                buffer.Add(1f); buffer.Add(0f); buffer.Add(0f); buffer.Add(0f);
+                buffer.Add(0f); buffer.Add(1f); buffer.Add(0f); buffer.Add(0f);
+                buffer.Add(0f); buffer.Add(0f); buffer.Add(1f); buffer.Add(0f);
+                buffer.Add(0f); buffer.Add(0f); buffer.Add(0f); buffer.Add(1f);
+            }
+
+            // Meta0: x=Kind, y=Intensity, z=CastShadow, w=AttenuationCurve
+            AddVec4(
+                dst,
+                0f,
+                (float)light.Settings.Intensity,
+                light.Settings.CastShadow ? 1f : 0f,
+                (float)light.Settings.AttenuationCurve);
+
+            // ColorRange: xyz=Color, w=Range
+            AddVec4(
+                dst,
+                (float)light.Settings.Color.X,
+                (float)light.Settings.Color.Y,
+                (float)light.Settings.Color.Z,
+                (float)light.Settings.Range);
+
+            // PositionInner: xyz=Position, w=InnerAngle
+            AddVec4(
+                dst,
+                relativePosition.X,
+                relativePosition.Y,
+                relativePosition.Z,
+                0f);
+
+            // DirectionOuter
+            AddVec4(dst, 0f, -1f, 0f, 0f);
+
+            // BoxSizeAreaWidth
+            AddVec4(dst, 0f, 0f, 0f, 0f);
+
+            // AreaRightAreaHeight
+            AddVec4(dst, 1f, 0f, 0f, 0f);
+
+            // AreaUpLineLength
+            AddVec4(dst, 0f, 1f, 0f, 0f);
+
+            // LineDirectionReserved
+            AddVec4(dst, 1f, 0f, 0f, 0f);
+
+            // ShadowAtlasRect
+            AddVec4(dst, 0f, 0f, 0f, 0f);
+
+            // ShadowMatrix
+            AddIdentityMat4(dst);
+        }
+
+        private void AssignLightToClustersXYZ(
+    Matrix4x4 projectionMatrix,
+    Vector3 viewSpacePosition,
+    float range,
+    float clusterNear,
+    float clusterFar,
+    uint lightIndex,
+    List<uint>[] clusterLightLists)
+        {
+            if (!TryGetProjectedTileBounds(
+                    projectionMatrix,
+                    viewSpacePosition,
+                    range,
+                    out int minTileX,
+                    out int maxTileX,
+                    out int minTileY,
+                    out int maxTileY))
+            {
+                minTileX = 0;
+                maxTileX = _clusterGridSizeX - 1;
+                minTileY = 0;
+                maxTileY = _clusterGridSizeY - 1;
+            }
+
+            if (!TryGetDepthSliceBounds(
+                    viewSpacePosition,
+                    range,
+                    clusterNear,
+                    clusterFar,
+                    out int minSliceZ,
+                    out int maxSliceZ))
+            {
+                return;
+            }
+
+            if (minTileX > maxTileX || minTileY > maxTileY || minSliceZ > maxSliceZ)
+                return;
+
+            for (int z = minSliceZ; z <= maxSliceZ; z++)
+            {
+                for (int y = minTileY; y <= maxTileY; y++)
+                {
+                    for (int x = minTileX; x <= maxTileX; x++)
+                    {
+                        int clusterIndex = GetClusterLinearIndex(x, y, z);
+                        clusterLightLists[clusterIndex].Add(lightIndex);
+                    }
+                }
+            }
+        }
+
+        private bool TryGetProjectedTileBounds(
+            Matrix4x4 projectionMatrix,
+            Vector3 viewSpacePosition,
+            float range,
+            out int minTileX,
+            out int maxTileX,
+            out int minTileY,
+            out int maxTileY)
+        {
+            minTileX = 0;
+            maxTileX = _clusterGridSizeX - 1;
+            minTileY = 0;
+            maxTileY = _clusterGridSizeY - 1;
+
+            float depth = -viewSpacePosition.Z;
+
+            if (depth + range <= 0f)
+            {
+                minTileX = 1;
+                maxTileX = 0;
+                minTileY = 1;
+                maxTileY = 0;
+                return true;
+            }
+
+            if (depth <= 0.001f || depth <= range)
+                return false;
+
+            Vector4 clip = Vector4.Transform(new Vector4(viewSpacePosition, 1f), projectionMatrix);
+
+            if (MathF.Abs(clip.W) <= 0.00001f)
+                return false;
+
+            float centerNdcX = clip.X / clip.W;
+            float centerNdcY = clip.Y / clip.W;
+
+            float radiusNdcX = MathF.Abs(projectionMatrix.M11) * range / depth;
+            float radiusNdcY = MathF.Abs(projectionMatrix.M22) * range / depth;
+
+            float minNdcX = centerNdcX - radiusNdcX;
+            float maxNdcX = centerNdcX + radiusNdcX;
+            float minNdcY = centerNdcY - radiusNdcY;
+            float maxNdcY = centerNdcY + radiusNdcY;
+
+            if (maxNdcX < -1f || minNdcX > 1f || maxNdcY < -1f || minNdcY > 1f)
+            {
+                minTileX = 1;
+                maxTileX = 0;
+                minTileY = 1;
+                maxTileY = 0;
+                return true;
+            }
+
+            minNdcX = Math.Clamp(minNdcX, -1f, 1f);
+            maxNdcX = Math.Clamp(maxNdcX, -1f, 1f);
+            minNdcY = Math.Clamp(minNdcY, -1f, 1f);
+            maxNdcY = Math.Clamp(maxNdcY, -1f, 1f);
+
+            minTileX = NdcToTileMin(minNdcX, _clusterGridSizeX);
+            maxTileX = NdcToTileMax(maxNdcX, _clusterGridSizeX);
+            minTileY = NdcToTileMin(minNdcY, _clusterGridSizeY);
+            maxTileY = NdcToTileMax(maxNdcY, _clusterGridSizeY);
+
+            return true;
+        }
+
+        private bool TryGetDepthSliceBounds(
+            Vector3 viewSpacePosition,
+            float range,
+            float clusterNear,
+            float clusterFar,
+            out int minSliceZ,
+            out int maxSliceZ)
+        {
+            minSliceZ = 0;
+            maxSliceZ = _clusterGridSizeZ - 1;
+
+            if (_clusterGridSizeZ <= 0)
+                return false;
+
+            if (clusterFar <= clusterNear)
+                return false;
+
+            // 你的约定里，相机前方是 -Z，所以正向视深度 = -viewZ
+            float centerDepth = -viewSpacePosition.Z;
+
+            // 灯球在视空间里的深度范围
+            float minDepth = centerDepth - range;
+            float maxDepth = centerDepth + range;
+
+            // 完全不在 cluster 深度范围内
+            if (maxDepth < clusterNear || minDepth > clusterFar)
+                return false;
+
+            // 裁到 cluster 深度区间
+            minDepth = Math.Clamp(minDepth, clusterNear, clusterFar);
+            maxDepth = Math.Clamp(maxDepth, clusterNear, clusterFar);
+
+            minSliceZ = DepthToClusterZMin(minDepth, clusterNear, clusterFar, _clusterGridSizeZ);
+            maxSliceZ = DepthToClusterZMax(maxDepth, clusterNear, clusterFar, _clusterGridSizeZ);
+
+            return minSliceZ <= maxSliceZ;
+        }
+
+        private static int DepthToClusterZMin(
+            float depth,
+            float clusterNear,
+            float clusterFar,
+            int sliceCount)
+        {
+            float normalized = (depth - clusterNear) / (clusterFar - clusterNear);
+            normalized = Math.Clamp(normalized, 0f, 1f);
+
+            int slice = (int)MathF.Floor(normalized * sliceCount);
+            return Math.Clamp(slice, 0, sliceCount - 1);
+        }
+
+        private static int DepthToClusterZMax(
+            float depth,
+            float clusterNear,
+            float clusterFar,
+            int sliceCount)
+        {
+            float normalized = (depth - clusterNear) / (clusterFar - clusterNear);
+            normalized = Math.Clamp(normalized, 0f, 1f);
+
+            int slice = (int)MathF.Ceiling(normalized * sliceCount) - 1;
+            return Math.Clamp(slice, 0, sliceCount - 1);
+        }
+
+        private static int NdcToTileMin(float ndc, int tileCount)
+        {
+            float normalized = ndc * 0.5f + 0.5f;
+            int tile = (int)MathF.Floor(normalized * tileCount);
+            return Math.Clamp(tile, 0, tileCount - 1);
+        }
+
+        private static int NdcToTileMax(float ndc, int tileCount)
+        {
+            float normalized = ndc * 0.5f + 0.5f;
+            int tile = (int)MathF.Ceiling(normalized * tileCount) - 1;
+            return Math.Clamp(tile, 0, tileCount - 1);
+        }
+
+        private static Vector3 TransformPosition(Matrix4x4 matrix, Vector3 position)
+        {
+            Vector4 result = Vector4.Transform(new Vector4(position, 1f), matrix);
+            return new Vector3(result.X, result.Y, result.Z);
+        }
+
+        private int GetClusterLinearIndex(int x, int y, int z)
+        {
+            return x + y * _clusterGridSizeX + z * _clusterGridSizeX * _clusterGridSizeY;
+        }
+
+        private void BuildClusterBuffers(
+            List<uint>[] clusterLightLists,
+            out uint[] clusterRanges,
+            out uint[] clusterIndices)
+        {
+            clusterRanges = new uint[_clusterCount * 2];
+
+            int totalIndexCount = 0;
+            for (int i = 0; i < clusterLightLists.Length; i++)
+                totalIndexCount += clusterLightLists[i].Count;
+
+            if (totalIndexCount == 0)
+            {
+                clusterIndices = new uint[] { 0 };
+                return;
+            }
+
+            clusterIndices = new uint[totalIndexCount];
+
+            uint writeCursor = 0;
+            for (int i = 0; i < clusterLightLists.Length; i++)
+            {
+                List<uint> list = clusterLightLists[i];
+
+                clusterRanges[i * 2 + 0] = writeCursor;
+                clusterRanges[i * 2 + 1] = (uint)list.Count;
+
+                for (int j = 0; j < list.Count; j++)
+                    clusterIndices[writeCursor++] = list[j];
+            }
+        }
+
+        private void ApplyLightingSupportUniforms(in RenderCommand cmd)
+        {
+            InitializeLightingSupportResources();
+
+            _gl.BindBufferBase(BufferTargetARB.ShaderStorageBuffer, _clusterLightBufferBinding, _clusterLightBuffer);
+            _gl.BindBufferBase(BufferTargetARB.ShaderStorageBuffer, _clusterRangeBufferBinding, _clusterRangeBuffer);
+            _gl.BindBufferBase(BufferTargetARB.ShaderStorageBuffer, _clusterIndexBufferBinding, _clusterIndexBuffer);
+
+            int cameraPosLoc = _gl.GetUniformLocation(_currentProgram, _uniformCameraPosition);
+            if (cameraPosLoc != -1)
+                _gl.Uniform3(cameraPosLoc, cmd.CameraPosition.X, cmd.CameraPosition.Y, cmd.CameraPosition.Z);
+
+            int ambientColorLoc = _gl.GetUniformLocation(_currentProgram, _uniformAmbientColor);
+            if (ambientColorLoc != -1)
+                _gl.Uniform3(ambientColorLoc, _ambientLightColor.X, _ambientLightColor.Y, _ambientLightColor.Z);
+
+            int ambientIntensityLoc = _gl.GetUniformLocation(_currentProgram, _uniformAmbientIntensity);
+            if (ambientIntensityLoc != -1)
+                _gl.Uniform1(ambientIntensityLoc, _ambientLightIntensity);
+
+            int viewportOriginLoc = _gl.GetUniformLocation(_currentProgram, _uniformViewportOrigin);
+            if (viewportOriginLoc != -1)
+                _gl.Uniform2(viewportOriginLoc, (float)cmd.ViewportX, (float)cmd.ViewportY);
+
+            int viewportSizeLoc = _gl.GetUniformLocation(_currentProgram, _uniformViewportSize);
+            if (viewportSizeLoc != -1)
+                _gl.Uniform2(viewportSizeLoc, (float)cmd.ViewportWidth, (float)cmd.ViewportHeight);
+
+            int clusterGridSizeLoc = _gl.GetUniformLocation(_currentProgram, _uniformClusterGridSize);
+            if (clusterGridSizeLoc != -1)
+                _gl.Uniform3(clusterGridSizeLoc, _clusterGridSizeX, _clusterGridSizeY, _clusterGridSizeZ);
+
+            int clusterNearLoc = _gl.GetUniformLocation(_currentProgram, _uniformClusterNear);
+            if (clusterNearLoc != -1)
+                _gl.Uniform1(clusterNearLoc, cmd.ClusterNear);
+
+            int clusterFarLoc = _gl.GetUniformLocation(_currentProgram, _uniformClusterFar);
+            if (clusterFarLoc != -1)
+                _gl.Uniform1(clusterFarLoc, cmd.ClusterFar);
+
+            int uploadedLightCount = UploadPointLightsForCommand(cmd);
+
+            int lightCountLoc = _gl.GetUniformLocation(_currentProgram, _uniformLightCount);
+            if (lightCountLoc != -1)
+                _gl.Uniform1(lightCountLoc, uploadedLightCount);
+
+            int shadowAtlasLoc = _gl.GetUniformLocation(_currentProgram, _uniformShadowAtlasTexture);
+            if (shadowAtlasLoc != -1)
+            {
+                const int shadowAtlasUnit = 13;
+                _gl.ActiveTexture((TextureUnit)((int)TextureUnit.Texture0 + shadowAtlasUnit));
+                _gl.BindTexture(TextureTarget.Texture2D, _lightingDummyTexture);
+                _gl.Uniform1(shadowAtlasLoc, shadowAtlasUnit);
+            }
+
+            int reflectionSourceMode = cmd.Material != null
+                ? ReadReflectionSourceMode(cmd.Material)
+                : 0;
+
+            float reflectionIntensity = cmd.Material != null
+                ? ReadMaterialFloat(cmd.Material, "uReflectionIntensity", 1f)
+                : 1f;
+
+            bool reflectionEnabled = false;
+
+            /* 反射源：2D 环境图 */
+            int reflectionTextureLoc = _gl.GetUniformLocation(_currentProgram, _uniformReflectionTexture);
+            if (reflectionTextureLoc != -1)
+            {
+                const int reflection2DUnit = 15;
+                _gl.ActiveTexture((TextureUnit)((int)TextureUnit.Texture0 + reflection2DUnit));
+
+                if (reflectionSourceMode == 1 && cmd.Material != null && TryGetReflectionMapTexture(cmd.Material, out TextureInfo reflectionMap))
+                {
+                    _gl.BindTexture(TextureTarget.Texture2D, reflectionMap.Id);
+                    reflectionEnabled = true;
+                }
+                else
+                {
+                    _gl.BindTexture(TextureTarget.Texture2D, _lightingDummyTexture);
+                }
+
+                _gl.Uniform1(reflectionTextureLoc, reflection2DUnit);
+            }
+
+            /* 反射源：天空盒 cubemap（保持清晰，不做模糊） */
+            int reflectionSkyboxCubeLoc = _gl.GetUniformLocation(_currentProgram, _uniformReflectionSkyboxCube);
+            if (reflectionSkyboxCubeLoc != -1)
+            {
+                const int reflectionCubeUnit = 16;
+                _gl.ActiveTexture((TextureUnit)((int)TextureUnit.Texture0 + reflectionCubeUnit));
+
+                if (reflectionSourceMode == 0 && _capturedSkyboxReflectionValid && _capturedReflectionBatchId == cmd.BatchId)
+                {
+                    _gl.BindTexture(TextureTarget.TextureCubeMap, _reflectionSkyboxCube);
+                    reflectionEnabled = true;
+                }
+                else
+                {
+                    _gl.BindTexture(TextureTarget.TextureCubeMap, _reflectionDummyCubeTexture);
+                }
+
+                _gl.Uniform1(reflectionSkyboxCubeLoc, reflectionCubeUnit);
+            }
+
+            int reflectionSourceLoc = _gl.GetUniformLocation(_currentProgram, _uniformReflectionSource);
+            if (reflectionSourceLoc != -1)
+                _gl.Uniform1(reflectionSourceLoc, reflectionSourceMode);
+
+            int reflectionEnabledLoc = _gl.GetUniformLocation(_currentProgram, _uniformReflectionEnabled);
+            if (reflectionEnabledLoc != -1)
+                _gl.Uniform1(reflectionEnabledLoc, reflectionEnabled ? 1 : 0);
+
+            int reflectionIntensityLoc = _gl.GetUniformLocation(_currentProgram, _uniformReflectionIntensity);
+            if (reflectionIntensityLoc != -1)
+                _gl.Uniform1(reflectionIntensityLoc, reflectionEnabled ? reflectionIntensity : 0f);
+
+            int useOutlineNormalLoc = _gl.GetUniformLocation(_currentProgram, _uniformUseOutlineNormal);
+            if (useOutlineNormalLoc != -1)
+                _gl.Uniform1(useOutlineNormalLoc, cmd.VertexStrideFloats >= 19 ? 1 : 0);
+
+            _gl.ActiveTexture(TextureUnit.Texture0);
+        }
+
         public void SetScreenSkybox(string shaderName, string parametersJson = "{}")
         {
             _screenSkybox = BuildSkyboxData("__screen__", shaderName, parametersJson);
@@ -681,6 +1578,7 @@ namespace LimitlessSquareEngine
 
             // _shaderProgram = CreateShaderProgram();
             LoadShaders();
+            InitializeLightingSupportResources();
             _gl.Enable(GLEnum.DepthTest);
             _gl.BlendFunc(GLEnum.SrcAlpha, GLEnum.OneMinusSrcAlpha);
             _gl.Enable(GLEnum.Blend);
@@ -924,12 +1822,18 @@ namespace LimitlessSquareEngine
                 Program = _currentProgram,
                 UseTexture = true,
                 TextureId = tex.Id,
+                SceneId = "",
+                CameraWorldPosition = Double3.Zero,
+                VertexStrideFloats = 9,
+                CameraPosition = Vector3.Zero,
+                ClusterNear = 0.1f,
+                ClusterFar = 1f,
                 RenderSpace = _activeRenderSpace,
                 Model = _activeModelMatrix,
                 View = _activeViewMatrix,
                 Projection = _activeProjectionMatrix,
                 QueueType = transparent ? RenderQueueType.Transparent : RenderQueueType.Opaque,
-                SortDepth = ComputeSortDepth(vertices, _activeModelMatrix, _activeViewMatrix, _activeRenderSpace),
+                SortDepth = ComputeSortDepth(vertices, 9, _activeModelMatrix, _activeViewMatrix, _activeRenderSpace),
                 SubmissionIndex = _submissionCounter++,
                 Pass = RenderPass.Canvas,
                 BatchId = -1,
@@ -990,12 +1894,18 @@ namespace LimitlessSquareEngine
                 Program = _currentProgram,
                 UseTexture = true,
                 TextureId = tex.Id,
+                SceneId = "",
+                CameraWorldPosition = Double3.Zero,
+                VertexStrideFloats = 9,
+                CameraPosition = Vector3.Zero,
+                ClusterNear = 0.1f,
+                ClusterFar = 1f,
                 RenderSpace = _activeRenderSpace,
                 Model = _activeModelMatrix,
                 View = _activeViewMatrix,
                 Projection = _activeProjectionMatrix,
                 QueueType = transparent ? RenderQueueType.Transparent : RenderQueueType.Opaque,
-                SortDepth = ComputeSortDepth(vertices, _activeModelMatrix, _activeViewMatrix, _activeRenderSpace),
+                SortDepth = ComputeSortDepth(vertices, 9, _activeModelMatrix, _activeViewMatrix, _activeRenderSpace),
                 SubmissionIndex = _submissionCounter++,
                 Pass = RenderPass.Canvas,
                 BatchId = -1,
@@ -1069,7 +1979,7 @@ namespace LimitlessSquareEngine
 
                     _gl.GenerateMipmap(TextureTarget.Texture2D);
 
-                    _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.Linear);
+                    _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.LinearMipmapLinear);
                     _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMagFilter, (int)TextureMagFilter.Linear);
                     _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapS, (int)TextureWrapMode.ClampToEdge);
                     _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapT, (int)TextureWrapMode.ClampToEdge);
@@ -1363,7 +2273,131 @@ namespace LimitlessSquareEngine
             return string.Equals(uniformName, "uRenderSpace", StringComparison.Ordinal) ||
                    string.Equals(uniformName, "uModel", StringComparison.Ordinal) ||
                    string.Equals(uniformName, "uView", StringComparison.Ordinal) ||
-                   string.Equals(uniformName, "uProjection", StringComparison.Ordinal);
+                   string.Equals(uniformName, "uProjection", StringComparison.Ordinal) ||
+                   string.Equals(uniformName, _uniformCameraPosition, StringComparison.Ordinal) ||
+                   string.Equals(uniformName, _uniformAmbientColor, StringComparison.Ordinal) ||
+                   string.Equals(uniformName, _uniformAmbientIntensity, StringComparison.Ordinal) ||
+                   string.Equals(uniformName, _uniformViewportOrigin, StringComparison.Ordinal) ||
+                   string.Equals(uniformName, _uniformViewportSize, StringComparison.Ordinal) ||
+                   string.Equals(uniformName, _uniformClusterGridSize, StringComparison.Ordinal) ||
+                   string.Equals(uniformName, _uniformClusterNear, StringComparison.Ordinal) ||
+                   string.Equals(uniformName, _uniformClusterFar, StringComparison.Ordinal) ||
+                   string.Equals(uniformName, _uniformLightCount, StringComparison.Ordinal) ||
+                   string.Equals(uniformName, _uniformShadowAtlasTexture, StringComparison.Ordinal) ||
+                   string.Equals(uniformName, _uniformReflectionTexture, StringComparison.Ordinal) ||
+                   string.Equals(uniformName, _uniformReflectionSkyboxCube, StringComparison.Ordinal) ||
+                   string.Equals(uniformName, _uniformReflectionEnabled, StringComparison.Ordinal) ||
+                   string.Equals(uniformName, _uniformReflectionSource, StringComparison.Ordinal) ||
+                   string.Equals(uniformName, _uniformReflectionIntensity, StringComparison.Ordinal) ||
+                   string.Equals(uniformName, _uniformOutlinePass, StringComparison.Ordinal) ||
+                   string.Equals(uniformName, _uniformUseOutlineNormal, StringComparison.Ordinal);
+        }
+
+        private void CaptureSkyboxReflectionForBatch(in RenderCommand batchCmd, SkyboxData skybox)
+        {
+            InitializeReflectionCaptureResources();
+
+            _capturedReflectionBatchId = batchCmd.BatchId;
+            _capturedSkyboxReflectionValid = false;
+
+            if (skybox == null)
+                return;
+
+            if (!_meshes.TryGetValue("builtin/cube_1x1x1", out MeshData skyboxMesh))
+                return;
+
+            uint previousProgram = _currentProgram;
+            RenderSpace previousRenderSpace = _activeRenderSpace;
+            Matrix4x4 previousModel = _activeModelMatrix;
+            Matrix4x4 previousView = _activeViewMatrix;
+            Matrix4x4 previousProjection = _activeProjectionMatrix;
+
+            Matrix4x4 captureProjection = CreatePerspective(MathF.PI / 2f, 1f, 0.1f, MathF.Max(1f, batchCmd.ClusterFar));
+            Matrix4x4 captureModel = Matrix4x4.CreateScale(MathF.Max(1f, batchCmd.ClusterFar * 0.5f));
+
+            var captureCmd = new RenderCommand
+            {
+                Vertices = skyboxMesh.Vertices,
+                PrimitiveType = skyboxMesh.PrimitiveType,
+                Program = skybox.Program,
+                UseTexture = false,
+                TextureId = 0,
+                VertexStrideFloats = skyboxMesh.VertexStrideFloats,
+                CameraPosition = Vector3.Zero,
+                ClusterNear = 0.1f,
+                ClusterFar = MathF.Max(1f, batchCmd.ClusterFar),
+                RenderSpace = RenderSpace.Camera,
+                Model = captureModel,
+                View = Matrix4x4.Identity,
+                Projection = captureProjection,
+                QueueType = RenderQueueType.Opaque,
+                SortDepth = 0f,
+                SubmissionIndex = 0,
+                Pass = RenderPass.Scene,
+                BatchId = batchCmd.BatchId,
+                BatchSubmissionOrder = batchCmd.BatchSubmissionOrder,
+                ViewportX = 0,
+                ViewportY = 0,
+                ViewportWidth = _reflectionSkyboxCubeSize,
+                ViewportHeight = _reflectionSkyboxCubeSize,
+                Material = null,
+                Skybox = skybox,
+                ForceWhiteVertexColor = true,
+                IsSkybox = true,
+                SceneId = batchCmd.SceneId,
+                CameraWorldPosition = Double3.Zero,
+                CullMode = skybox.CullMode
+            };
+
+            _gl.BindFramebuffer(FramebufferTarget.Framebuffer, _reflectionCaptureFramebuffer);
+            _gl.Viewport(0, 0, (uint)_reflectionSkyboxCubeSize, (uint)_reflectionSkyboxCubeSize);
+
+            _gl.Disable(GLEnum.ScissorTest);
+            _gl.Disable(GLEnum.Blend);
+            _gl.Disable(GLEnum.DepthTest);
+            _gl.DepthMask(false);
+
+            for (int face = 0; face < 6; face++)
+            {
+                TextureTarget faceTarget = (TextureTarget)((int)TextureTarget.TextureCubeMapPositiveX + face);
+
+                _gl.FramebufferTexture2D(
+                    FramebufferTarget.Framebuffer,
+                    FramebufferAttachment.ColorAttachment0,
+                    faceTarget,
+                    _reflectionSkyboxCube,
+                    0);
+
+                _gl.ClearColor(0f, 0f, 0f, 1f);
+                _gl.Clear(ClearBufferMask.ColorBufferBit);
+
+                _currentProgram = skybox.Program;
+                _gl.UseProgram(skybox.Program);
+
+                _activeRenderSpace = RenderSpace.Camera;
+                _activeModelMatrix = captureModel;
+                _activeViewMatrix = _reflectionCaptureViews[face];
+                _activeProjectionMatrix = captureProjection;
+
+                BindCommandGeometry(captureCmd);
+                ApplyCullMode(skybox.CullMode);
+                ApplySkybox(skybox);
+
+                _gl.DrawArrays(
+                    captureCmd.PrimitiveType,
+                    0,
+                    (uint)(captureCmd.Vertices.Length / captureCmd.VertexStrideFloats));
+            }
+
+            RestoreStateAfterReflectionCapture(
+                batchCmd,
+                previousProgram,
+                previousRenderSpace,
+                previousModel,
+                previousView,
+                previousProjection);
+
+            _capturedSkyboxReflectionValid = true;
         }
 
         private void ApplyCoreSceneUniforms()
@@ -1401,7 +2435,17 @@ namespace LimitlessSquareEngine
                 switch (uniform.Type)
                 {
                     case UniformType.Float:
-                        _gl.Uniform1(uniform.Location, 0f);
+                        if (string.Equals(uniform.Name, "uNormalStrength", StringComparison.Ordinal))
+                            _gl.Uniform1(uniform.Location, 1f);
+                        else if (string.Equals(uniform.Name, "uAmbientStrength", StringComparison.Ordinal))
+                            _gl.Uniform1(uniform.Location, 1f);
+                        else if (string.Equals(uniform.Name, "uAlphaCutoff", StringComparison.Ordinal))
+                            _gl.Uniform1(uniform.Location, 0.5f);
+                        else if (string.Equals(uniform.Name, "uSpecularRange", StringComparison.Ordinal) ||
+                                 string.Equals(uniform.Name, "uRimRange", StringComparison.Ordinal))
+                            _gl.Uniform1(uniform.Location, 0.5f);
+                        else
+                            _gl.Uniform1(uniform.Location, 0f);
                         break;
 
                     case UniformType.FloatVec2:
@@ -1413,12 +2457,24 @@ namespace LimitlessSquareEngine
                         break;
 
                     case UniformType.FloatVec4:
-                        _gl.Uniform4(uniform.Location, 0.5f, 0.5f, 0.5f, 1f);
+                        if (string.Equals(uniform.Name, "uColor", StringComparison.Ordinal))
+                            _gl.Uniform4(uniform.Location, 1f, 1f, 1f, 1f);
+                        else
+                            _gl.Uniform4(uniform.Location, 0.5f, 0.5f, 0.5f, 1f);
                         break;
 
                     case UniformType.Int:
                     case UniformType.Bool:
-                        _gl.Uniform1(uniform.Location, 0);
+                        if (string.Equals(uniform.Name, "uReceiveShadow", StringComparison.Ordinal) ||
+                            string.Equals(uniform.Name, "uCastShadow", StringComparison.Ordinal) ||
+                            string.Equals(uniform.Name, "uReceiveReflection", StringComparison.Ordinal))
+                        {
+                            _gl.Uniform1(uniform.Location, 1);
+                        }
+                        else
+                        {
+                            _gl.Uniform1(uniform.Location, 0);
+                        }
                         break;
 
                     case UniformType.IntVec2:
@@ -1721,21 +2777,55 @@ namespace LimitlessSquareEngine
             }
         }
 
-        private void ApplySceneMaterial(MaterialData material)
+        private void ApplySceneMaterial(MaterialData material, in RenderCommand cmd)
         {
             Dictionary<string, int> samplerUnits = ApplyMaterialDefaults(_currentProgram);
             ApplyCoreSceneUniforms();
+            ApplyLightingSupportUniforms(cmd);
 
-            if (material.Parameters.ValueKind != JsonValueKind.Object)
-                return;
-
-            foreach (JsonProperty prop in material.Parameters.EnumerateObject())
+            if (material.Parameters.ValueKind == JsonValueKind.Object)
             {
-                ApplyMaterialParameter(prop.Name, prop.Value, samplerUnits, material);
+                foreach (JsonProperty prop in material.Parameters.EnumerateObject())
+                {
+                    ApplyMaterialParameter(prop.Name, prop.Value, samplerUnits, material);
+                }
             }
 
             _gl.ActiveTexture(TextureUnit.Texture0);
         }
+
+        private bool ShouldRenderOutline(RenderCommand cmd)
+        {
+            if (cmd.Material == null)
+                return false;
+
+            if (cmd.Material.Parameters.ValueKind != JsonValueKind.Object)
+                return false;
+
+            if (!cmd.Material.Parameters.TryGetProperty("uEnableOutline", out JsonElement outlineElement))
+                return false;
+
+            bool enabled = outlineElement.ValueKind switch
+            {
+                JsonValueKind.True => true,
+                JsonValueKind.False => false,
+                JsonValueKind.Number => outlineElement.GetDouble() != 0.0,
+                _ => false
+            };
+
+            if (!enabled)
+                return false;
+
+            return TryGetActiveUniformExact(cmd.Program, _uniformOutlinePass, out _);
+        }
+
+        private void SetOutlinePassUniform(uint program, int passValue)
+        {
+            int loc = _gl.GetUniformLocation(program, _uniformOutlinePass);
+            if (loc != -1)
+                _gl.Uniform1(loc, passValue);
+        }
+
         private void ApplySkyboxParameter(string uniformName, JsonElement value, Dictionary<string, int> samplerUnits)
         {
             if (IsEngineManagedUniform(uniformName))
@@ -2053,6 +3143,10 @@ namespace LimitlessSquareEngine
                     Program = skybox.Program,
                     UseTexture = false,
                     TextureId = 0,
+                    VertexStrideFloats = skyboxMesh.VertexStrideFloats,
+                    CameraPosition = Vector3.Zero,
+                    ClusterNear = (float)cameraItem.Settings.NearClip,
+                    ClusterFar = (float)cameraItem.Settings.FarClip,
                     RenderSpace = RenderSpace.Camera,
                     Model = skyboxModel,
                     View = view,
@@ -2071,6 +3165,8 @@ namespace LimitlessSquareEngine
                     Skybox = skybox,
                     ForceWhiteVertexColor = true,
                     IsSkybox = true,
+                    SceneId = sceneId,
+                    CameraWorldPosition = cameraWorld.Position,
                     CullMode = skybox.CullMode
                 });
             }
@@ -2084,6 +3180,9 @@ namespace LimitlessSquareEngine
                     continue;
 
                 if (string.Equals(obj.Type, "Camera", StringComparison.Ordinal))
+                    continue;
+
+                if (string.Equals(obj.Type, "Light", StringComparison.Ordinal))
                     continue;
 
                 if (string.IsNullOrWhiteSpace(obj.Mesh))
@@ -2113,12 +3212,18 @@ namespace LimitlessSquareEngine
                     Program = material.Program,
                     UseTexture = false,
                     TextureId = 0,
+                    VertexStrideFloats = mesh.VertexStrideFloats,
+                    CameraPosition = Vector3.Zero,
+                    ClusterNear = (float)cameraItem.Settings.NearClip,
+                    ClusterFar = (float)cameraItem.Settings.FarClip,
+                    SceneId = sceneId,
+                    CameraWorldPosition = cameraWorld.Position,
                     RenderSpace = RenderSpace.Camera,
                     Model = model,
                     View = view,
                     Projection = projection,
                     QueueType = RenderQueueType.Opaque,
-                    SortDepth = ComputeSortDepth(mesh.Vertices, model, view, RenderSpace.Camera),
+                    SortDepth = ComputeSortDepth(mesh.Vertices, mesh.VertexStrideFloats, model, view, RenderSpace.Camera),
                     SubmissionIndex = _submissionCounter++,
                     Pass = RenderPass.Scene,
                     BatchId = batchId,
@@ -2284,7 +3389,8 @@ namespace LimitlessSquareEngine
 
             foreach (var batch in batches)
             {
-                RenderCommand first = batch.First();
+                List<RenderCommand> batchCommands = batch.ToList();
+                RenderCommand first = batchCommands.First();
 
                 int vpX = first.ViewportX;
                 int vpY = first.ViewportY;
@@ -2299,7 +3405,13 @@ namespace LimitlessSquareEngine
                 _gl.Clear(ClearBufferMask.ColorBufferBit | ClearBufferMask.DepthBufferBit);
                 _gl.Disable(GLEnum.ScissorTest);
 
-                ExecuteSortedCommands(batch.ToList());
+                SkyboxData batchSkybox = batchCommands
+                .Where(c => c.IsSkybox && c.Skybox != null)
+                .Select(c => c.Skybox)
+                .FirstOrDefault();
+
+                CaptureSkyboxReflectionForBatch(first, batchSkybox);
+                ExecuteSortedCommands(batchCommands);
             }
 
             // 场景结束后恢复整窗viewport并清一次深度
@@ -2324,14 +3436,40 @@ namespace LimitlessSquareEngine
             float[] uploadVertices = PrepareVerticesForCommand(cmd);
             _gl.BufferData(BufferTargetARB.ArrayBuffer, (ReadOnlySpan<float>)uploadVertices, BufferUsageARB.DynamicDraw);
 
-            _gl.VertexAttribPointer(0, 3, VertexAttribPointerType.Float, false, 9 * sizeof(float), 0);
+            uint strideBytes = (uint)(cmd.VertexStrideFloats * sizeof(float));
+
+            _gl.VertexAttribPointer(0, 3, VertexAttribPointerType.Float, false, strideBytes, 0);
             _gl.EnableVertexAttribArray(0);
 
-            _gl.VertexAttribPointer(1, 4, VertexAttribPointerType.Float, false, 9 * sizeof(float), 3 * sizeof(float));
+            _gl.VertexAttribPointer(1, 4, VertexAttribPointerType.Float, false, strideBytes, 3 * sizeof(float));
             _gl.EnableVertexAttribArray(1);
 
-            _gl.VertexAttribPointer(2, 2, VertexAttribPointerType.Float, false, 9 * sizeof(float), 7 * sizeof(float));
+            _gl.VertexAttribPointer(2, 2, VertexAttribPointerType.Float, false, strideBytes, 7 * sizeof(float));
             _gl.EnableVertexAttribArray(2);
+
+            if (cmd.VertexStrideFloats >= 16)
+            {
+                _gl.VertexAttribPointer(3, 3, VertexAttribPointerType.Float, false, strideBytes, 9 * sizeof(float));
+                _gl.EnableVertexAttribArray(3);
+
+                _gl.VertexAttribPointer(4, 4, VertexAttribPointerType.Float, false, strideBytes, 12 * sizeof(float));
+                _gl.EnableVertexAttribArray(4);
+            }
+            else
+            {
+                _gl.DisableVertexAttribArray(3);
+                _gl.DisableVertexAttribArray(4);
+            }
+
+            if (cmd.VertexStrideFloats >= 19)
+            {
+                _gl.VertexAttribPointer(5, 3, VertexAttribPointerType.Float, false, strideBytes, 16 * sizeof(float));
+                _gl.EnableVertexAttribArray(5);
+            }
+            else
+            {
+                _gl.DisableVertexAttribArray(5);
+            }
         }
 
         private void ExecuteSortedCommands(List<RenderCommand> commands)
@@ -2395,7 +3533,7 @@ namespace LimitlessSquareEngine
 
             ApplySkybox(cmd.Skybox);
 
-            _gl.DrawArrays(cmd.PrimitiveType, 0, (uint)(cmd.Vertices.Length / 9));
+            _gl.DrawArrays(cmd.PrimitiveType, 0, (uint)(cmd.Vertices.Length / cmd.VertexStrideFloats));
 
             _gl.DepthMask(true);
             _gl.Enable(GLEnum.DepthTest);
@@ -2417,11 +3555,18 @@ namespace LimitlessSquareEngine
             _activeProjectionMatrix = cmd.Projection;
 
             BindCommandGeometry(cmd);
+
+            bool hasOutline = ShouldRenderOutline(cmd);
+
+            // =========================
+            // 1) 本体 pass
+            // =========================
             ApplyCullMode(cmd.CullMode);
+            SetOutlinePassUniform(cmd.Program, 0);
 
             if (cmd.Material != null)
             {
-                ApplySceneMaterial(cmd.Material);
+                ApplySceneMaterial(cmd.Material, cmd);
             }
             else
             {
@@ -2443,7 +3588,35 @@ namespace LimitlessSquareEngine
                 }
             }
 
-            _gl.DrawArrays(cmd.PrimitiveType, 0, (uint)(cmd.Vertices.Length / 9));
+            _gl.DrawArrays(cmd.PrimitiveType, 0, (uint)(cmd.Vertices.Length / cmd.VertexStrideFloats));
+
+            // =========================
+            // 2) 描边 pass
+            // =========================
+            if (hasOutline)
+            {
+                SetOutlinePassUniform(cmd.Program, 1);
+
+                // 描边壳：剔正面，只留外扩后的背面轮廓
+                _gl.Enable(GLEnum.CullFace);
+                _gl.CullFace(TriangleFace.Front);
+
+                // 描边接收深度测试，但不写深度
+                _gl.DepthFunc(GLEnum.Lequal);
+                _gl.DepthMask(false);
+
+                if (cmd.Material != null)
+                    ApplySceneMaterial(cmd.Material, cmd);
+
+                _gl.DrawArrays(cmd.PrimitiveType, 0, (uint)(cmd.Vertices.Length / cmd.VertexStrideFloats));
+
+                // 恢复状态
+                _gl.DepthMask(true);
+                _gl.DepthFunc(GLEnum.Less);
+
+                ApplyCullMode(cmd.CullMode);
+                SetOutlinePassUniform(cmd.Program, 0);
+            }
 
             _gl.ActiveTexture(TextureUnit.Texture0);
             _gl.BindTexture(TextureTarget.Texture2D, 0);
@@ -2459,15 +3632,89 @@ namespace LimitlessSquareEngine
         /// <param name="primitiveType"></param>
         /// <exception cref="ArgumentException"></exception>
         [MoonSharpHidden]
-        public void RegisterMesh(string id, float[] vertices, PrimitiveType primitiveType = PrimitiveType.Triangles)
+        public void RegisterMesh(string id, float[] vertices, PrimitiveType primitiveType = PrimitiveType.Triangles, int vertexStrideFloats = 9)
         {
             if (string.IsNullOrWhiteSpace(id))
                 throw new ArgumentException("[X] Mesh id cannot be null or empty.", nameof(id));
 
-            if (vertices == null || vertices.Length == 0 || vertices.Length % 9 != 0)
-                throw new ArgumentException("[X] Mesh vertices must be non-empty and aligned to 9 floats per vertex.", nameof(vertices));
+            if (vertexStrideFloats != 9 && vertexStrideFloats != 16 && vertexStrideFloats != 19)
+                throw new ArgumentException("[X] Supported mesh vertex strides are 9, 16 and 19 floats.", nameof(vertexStrideFloats));
 
-            _meshes[id] = new MeshData(id, vertices, primitiveType);
+            if (vertices == null || vertices.Length == 0 || vertices.Length % vertexStrideFloats != 0)
+                throw new ArgumentException("[X] Mesh vertices must be non-empty and aligned to the declared vertex stride.", nameof(vertices));
+
+            if (vertexStrideFloats == 16 && primitiveType == PrimitiveType.Triangles)
+            {
+                vertices = BuildOutlineNormalAugmentedVertices(vertices);
+                vertexStrideFloats = 19;
+            }
+
+            _meshes[id] = new MeshData(id, vertices, primitiveType, vertexStrideFloats);
+        }
+
+        private float[] BuildOutlineNormalAugmentedVertices(float[] src)
+        {
+            int vertexCount = src.Length / 16;
+
+            static (long X, long Y, long Z) MakeKey(float x, float y, float z)
+            {
+                const float scale = 1000000f;
+                return ((long)MathF.Round(x * scale), (long)MathF.Round(y * scale), (long)MathF.Round(z * scale));
+            }
+
+            var accum = new Dictionary<(long X, long Y, long Z), Vector3>();
+
+            for (int i = 0; i < vertexCount; i += 3)
+            {
+                int ia = i * 16;
+                int ib = (i + 1) * 16;
+                int ic = (i + 2) * 16;
+
+                Vector3 a = new(src[ia + 0], src[ia + 1], src[ia + 2]);
+                Vector3 b = new(src[ib + 0], src[ib + 1], src[ib + 2]);
+                Vector3 c = new(src[ic + 0], src[ic + 1], src[ic + 2]);
+
+                Vector3 ab = b - a;
+                Vector3 ac = c - a;
+                Vector3 faceNormal = Vector3.Cross(ab, ac);
+
+                if (faceNormal.LengthSquared() <= 0.0000001f)
+                    continue;
+
+                var ka = MakeKey(a.X, a.Y, a.Z);
+                var kb = MakeKey(b.X, b.Y, b.Z);
+                var kc = MakeKey(c.X, c.Y, c.Z);
+
+                accum[ka] = accum.TryGetValue(ka, out var na) ? na + faceNormal : faceNormal;
+                accum[kb] = accum.TryGetValue(kb, out var nb) ? nb + faceNormal : faceNormal;
+                accum[kc] = accum.TryGetValue(kc, out var nc) ? nc + faceNormal : faceNormal;
+            }
+
+            float[] dst = new float[vertexCount * 19];
+
+            for (int i = 0; i < vertexCount; i++)
+            {
+                int s = i * 16;
+                int d = i * 19;
+
+                for (int k = 0; k < 16; k++)
+                    dst[d + k] = src[s + k];
+
+                Vector3 p = new(src[s + 0], src[s + 1], src[s + 2]);
+                var key = MakeKey(p.X, p.Y, p.Z);
+
+                Vector3 outlineNormal;
+                if (accum.TryGetValue(key, out var sum) && sum.LengthSquared() > 0.0000001f)
+                    outlineNormal = Vector3.Normalize(sum);
+                else
+                    outlineNormal = Vector3.Normalize(new Vector3(src[s + 9], src[s + 10], src[s + 11]));
+
+                dst[d + 16] = outlineNormal.X;
+                dst[d + 17] = outlineNormal.Y;
+                dst[d + 18] = outlineNormal.Z;
+            }
+
+            return dst;
         }
 
         private void RegisterBuiltInMeshes()
@@ -2475,7 +3722,7 @@ namespace LimitlessSquareEngine
             if (_meshes.ContainsKey("builtin/cube_1x1x1"))
                 return;
 
-            RegisterMesh("builtin/cube_1x1x1", CreateUnitCubeVertices(), PrimitiveType.Triangles);
+            RegisterMesh("builtin/cube_1x1x1", CreateUnitCubeVertices(), PrimitiveType.Triangles, 16);
         }
 
         /// <summary>
@@ -2484,36 +3731,56 @@ namespace LimitlessSquareEngine
         /// <returns></returns>
         private float[] CreateUnitCubeVertices()
         {
-            var data = new List<float>(36 * 9);
+            var data = new List<float>(36 * 16);
 
-            void AddVertex(float x, float y, float z, float u, float v)
+            void AddVertex(
+                float x, float y, float z,
+                float u, float v,
+                float nx, float ny, float nz,
+                float tx, float ty, float tz, float tw)
             {
+                // position
                 data.Add(x);
                 data.Add(y);
                 data.Add(z);
 
+                // color
                 data.Add(1f);
                 data.Add(1f);
                 data.Add(1f);
                 data.Add(1f);
 
+                // uv
                 data.Add(u);
                 data.Add(v);
+
+                // normal
+                data.Add(nx);
+                data.Add(ny);
+                data.Add(nz);
+
+                // tangent
+                data.Add(tx);
+                data.Add(ty);
+                data.Add(tz);
+                data.Add(tw);
             }
 
             void AddQuad(
                 float ax, float ay, float az, float au, float av,
                 float bx, float by, float bz, float bu, float bv,
                 float cx, float cy, float cz, float cu, float cv,
-                float dx, float dy, float dz, float du, float dv)
+                float dx, float dy, float dz, float du, float dv,
+                float nx, float ny, float nz,
+                float tx, float ty, float tz, float tw)
             {
-                AddVertex(ax, ay, az, au, av);
-                AddVertex(bx, by, bz, bu, bv);
-                AddVertex(cx, cy, cz, cu, cv);
+                AddVertex(ax, ay, az, au, av, nx, ny, nz, tx, ty, tz, tw);
+                AddVertex(bx, by, bz, bu, bv, nx, ny, nz, tx, ty, tz, tw);
+                AddVertex(cx, cy, cz, cu, cv, nx, ny, nz, tx, ty, tz, tw);
 
-                AddVertex(cx, cy, cz, cu, cv);
-                AddVertex(dx, dy, dz, du, dv);
-                AddVertex(ax, ay, az, au, av);
+                AddVertex(cx, cy, cz, cu, cv, nx, ny, nz, tx, ty, tz, tw);
+                AddVertex(dx, dy, dz, du, dv, nx, ny, nz, tx, ty, tz, tw);
+                AddVertex(ax, ay, az, au, av, nx, ny, nz, tx, ty, tz, tw);
             }
 
             float n = 0.5f;
@@ -2523,44 +3790,71 @@ namespace LimitlessSquareEngine
                 -n, -n, n, 0f, 0f,
                  n, -n, n, 1f, 0f,
                  n, n, n, 1f, 1f,
-                -n, n, n, 0f, 1f);
+                -n, n, n, 0f, 1f,
+                 0f, 0f, 1f,
+                 1f, 0f, 0f, 1f);
 
             // -Z
             AddQuad(
                  n, -n, -n, 0f, 0f,
                 -n, -n, -n, 1f, 0f,
                 -n, n, -n, 1f, 1f,
-                 n, n, -n, 0f, 1f);
+                 n, n, -n, 0f, 1f,
+                 0f, 0f, -1f,
+                -1f, 0f, 0f, 1f);
 
             // -X
             AddQuad(
                 -n, -n, -n, 0f, 0f,
                 -n, -n, n, 1f, 0f,
                 -n, n, n, 1f, 1f,
-                -n, n, -n, 0f, 1f);
+                -n, n, -n, 0f, 1f,
+                -1f, 0f, 0f,
+                 0f, 0f, 1f, 1f);
 
             // +X
             AddQuad(
                  n, -n, n, 0f, 0f,
                  n, -n, -n, 1f, 0f,
                  n, n, -n, 1f, 1f,
-                 n, n, n, 0f, 1f);
+                 n, n, n, 0f, 1f,
+                 1f, 0f, 0f,
+                 0f, 0f, -1f, 1f);
 
             // +Y
             AddQuad(
                 -n, n, n, 0f, 0f,
                  n, n, n, 1f, 0f,
                  n, n, -n, 1f, 1f,
-                -n, n, -n, 0f, 1f);
+                -n, n, -n, 0f, 1f,
+                 0f, 1f, 0f,
+                 1f, 0f, 0f, 1f);
 
             // -Y
             AddQuad(
                 -n, -n, -n, 0f, 0f,
                  n, -n, -n, 1f, 0f,
                  n, -n, n, 1f, 1f,
-                -n, -n, n, 0f, 1f);
+                -n, -n, n, 0f, 1f,
+                 0f, -1f, 0f,
+                 1f, 0f, 0f, 1f);
 
             return data.ToArray();
+        }
+
+        public void SetAmbientLight(float r, float g, float b, float intensity = 1.0f)
+        {
+            _ambientLightColor = new Vector3(
+                Math.Clamp(r, 0f, 1f),
+                Math.Clamp(g, 0f, 1f),
+                Math.Clamp(b, 0f, 1f));
+
+            _ambientLightIntensity = Math.Max(0f, intensity);
+        }
+
+        public void SetAmbientLightRGB(int r, int g, int b, float intensity = 1.0f)
+        {
+            SetAmbientLight(r / 255f, g / 255f, b / 255f, intensity);
         }
 
         /// <summary>
@@ -2599,12 +3893,18 @@ namespace LimitlessSquareEngine
                 Program = _currentProgram,
                 UseTexture = false,
                 TextureId = 0,
+                SceneId = "",
+                CameraWorldPosition = Double3.Zero,
+                VertexStrideFloats = 9,
+                CameraPosition = Vector3.Zero,
+                ClusterNear = 0.1f,
+                ClusterFar = 1f,
                 RenderSpace = _activeRenderSpace,
                 Model = _activeModelMatrix,
                 View = _activeViewMatrix,
                 Projection = _activeProjectionMatrix,
                 QueueType = transparent ? RenderQueueType.Transparent : RenderQueueType.Opaque,
-                SortDepth = ComputeSortDepth(vertices, _activeModelMatrix, _activeViewMatrix, _activeRenderSpace),
+                SortDepth = ComputeSortDepth(vertices, 9, _activeModelMatrix, _activeViewMatrix, _activeRenderSpace),
                 SubmissionIndex = _submissionCounter++,
                 Pass = RenderPass.Canvas,
                 BatchId = -1,
@@ -2623,6 +3923,42 @@ namespace LimitlessSquareEngine
             _renderQueue.Add(cmd);
         }
 
+        private void RestoreStateAfterReflectionCapture(in RenderCommand batchCmd, uint previousProgram, RenderSpace previousRenderSpace, Matrix4x4 previousModel, Matrix4x4 previousView, Matrix4x4 previousProjection)
+        {
+            _gl.BindFramebuffer(FramebufferTarget.Framebuffer, 0);
+
+            _gl.Viewport(
+                batchCmd.ViewportX,
+                batchCmd.ViewportY,
+                (uint)Math.Max(1, batchCmd.ViewportWidth),
+                (uint)Math.Max(1, batchCmd.ViewportHeight));
+
+            _gl.Disable(GLEnum.ScissorTest);
+
+            _gl.Enable(GLEnum.DepthTest);
+            _gl.DepthFunc(GLEnum.Less);
+            _gl.DepthMask(true);
+
+            _gl.Enable(GLEnum.Blend);
+            _gl.BlendFunc(GLEnum.SrcAlpha, GLEnum.OneMinusSrcAlpha);
+
+            ApplyCullMode(RenderCullMode.Front);
+
+            _currentProgram = previousProgram;
+            _gl.UseProgram(previousProgram);
+
+            _activeRenderSpace = previousRenderSpace;
+            _activeModelMatrix = previousModel;
+            _activeViewMatrix = previousView;
+            _activeProjectionMatrix = previousProjection;
+
+            _gl.ActiveTexture(TextureUnit.Texture0);
+            _gl.BindTexture(TextureTarget.Texture2D, 0);
+            _gl.BindTexture(TextureTarget.TextureCubeMap, 0);
+            _gl.BindBuffer(BufferTargetARB.ArrayBuffer, 0);
+            _gl.BindVertexArray(0);
+        }
+
         /// <summary>
         /// 清理资源
         /// </summary>
@@ -2635,6 +3971,64 @@ namespace LimitlessSquareEngine
                 _gl.DeleteBuffer(_vertexBufferObject);
                 _isInitialized = false;
             }
+
+            if (_quadInitialized)
+            {
+                _gl.DeleteVertexArray(_quadVAO);
+                _gl.DeleteBuffer(_quadVBO);
+                _quadInitialized = false;
+            }
+
+            if (_clusterLightBuffer != 0)
+            {
+                _gl.DeleteBuffer(_clusterLightBuffer);
+                _clusterLightBuffer = 0;
+            }
+
+            if (_clusterRangeBuffer != 0)
+            {
+                _gl.DeleteBuffer(_clusterRangeBuffer);
+                _clusterRangeBuffer = 0;
+            }
+
+            if (_clusterIndexBuffer != 0)
+            {
+                _gl.DeleteBuffer(_clusterIndexBuffer);
+                _clusterIndexBuffer = 0;
+            }
+
+            if (_lightingDummyTexture != 0)
+            {
+                _gl.DeleteTexture(_lightingDummyTexture);
+                _lightingDummyTexture = 0;
+            }
+
+            _lightingSupportInitialized = false;
+
+            _uploadedLightingBatchId = long.MinValue;
+            _uploadedLightCount = 0;
+
+            if (_reflectionSkyboxCube != 0)
+            {
+                _gl.DeleteTexture(_reflectionSkyboxCube);
+                _reflectionSkyboxCube = 0;
+            }
+
+            if (_reflectionDummyCubeTexture != 0)
+            {
+                _gl.DeleteTexture(_reflectionDummyCubeTexture);
+                _reflectionDummyCubeTexture = 0;
+            }
+
+            if (_reflectionCaptureFramebuffer != 0)
+            {
+                _gl.DeleteFramebuffer(_reflectionCaptureFramebuffer);
+                _reflectionCaptureFramebuffer = 0;
+            }
+
+            _reflectionCaptureInitialized = false;
+            _capturedReflectionBatchId = long.MinValue;
+            _capturedSkyboxReflectionValid = false;
         }
     }
 }

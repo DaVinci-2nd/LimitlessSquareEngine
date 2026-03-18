@@ -149,6 +149,22 @@ namespace LimitlessSquareEngine
         public bool IsMainCamera { get; set; } = false;
     }
 
+    /// <summary>
+    /// 灯光参数
+    /// </summary>
+    internal sealed class LightRenderSettings
+    {
+        // 0 = Point
+        public int LightMode { get; set; } = 0;
+
+        public Double3 Color { get; set; } = new Double3(1.0, 1.0, 1.0);
+        public double Intensity { get; set; } = 1.0;
+        public double Range { get; set; } = 1.0;
+        public double AttenuationCurve { get; set; } = 0.5;
+
+        public bool CastShadow { get; set; } = false;
+    }
+
     internal sealed class SceneCameraQueueItem
     {
         public string SceneId { get; init; } = "";
@@ -712,6 +728,28 @@ namespace LimitlessSquareEngine
                         WorldRotation = node.World.Rotation,
                         WorldScale = node.World.Scale
                     });
+
+                    if (string.Equals(node.Source.Type, "Light", StringComparison.Ordinal))
+                    {
+                        try
+                        {
+                            LightRenderSettings settings = ParseLightSettings(node.Source.Data, node.Source.Id);
+
+                            _boundGraphics.UpsertSceneLight(new Graphics.SceneRenderLightSnapshot
+                            {
+                                SceneId = sceneId,
+                                ObjectId = node.Source.Id,
+                                Settings = settings,
+                                World = node.World,
+                                Active = node.Source.Active,
+                                Visible = node.Source.Visible
+                            });
+                        }
+                        catch (Exception ex)
+                        {
+                            Console.WriteLine($"[!] Light '{node.Source.Id}' skipped while flushing to renderer: {ex.Message}");
+                        }
+                    }
                 }
 
                 if (runtime.CameraCacheDirty)
@@ -892,6 +930,40 @@ namespace LimitlessSquareEngine
             }
         }
 
+        internal static bool TryValidateLightDataString(string rawData, string objectId, out string reason)
+        {
+            reason = string.Empty;
+
+            if (string.IsNullOrWhiteSpace(rawData))
+                return true;
+
+            try
+            {
+                _ = ParseLightSettings(rawData, objectId);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                reason = ex.Message;
+                return false;
+            }
+        }
+
+        private static Double3 ParseStrictDouble3(JsonElement element, string fieldName)
+        {
+            if (element.ValueKind != JsonValueKind.Object)
+                throw new InvalidDataException($"[X] {fieldName} must be an object with lowercase x/y/z.");
+
+            try
+            {
+                return JsonSerializer.Deserialize<Double3>(element.GetRawText(), _jsonOptions);
+            }
+            catch (Exception)
+            {
+                throw new InvalidDataException($"[X] {fieldName} must be an object with lowercase x/y/z.");
+            }
+        }
+
         private static CameraRenderSettings ParseCameraSettings(string? rawData, string objectId)
         {
             var settings = new CameraRenderSettings();
@@ -951,6 +1023,95 @@ namespace LimitlessSquareEngine
 
             if (settings.FarClip <= settings.NearClip)
                 throw new InvalidDataException($"[X] Camera '{objectId}' data.farClip must be greater than data.nearClip.");
+
+            return settings;
+        }
+
+        private static LightRenderSettings ParseLightSettings(string? rawData, string objectId)
+        {
+            var settings = new LightRenderSettings();
+
+            if (string.IsNullOrWhiteSpace(rawData))
+                return settings;
+
+            using JsonDocument doc = JsonDocument.Parse(rawData);
+
+            if (doc.RootElement.ValueKind != JsonValueKind.Object)
+                throw new InvalidDataException($"[X] Light '{objectId}' data must be a JSON object string.");
+
+            foreach (JsonProperty prop in doc.RootElement.EnumerateObject())
+            {
+                switch (prop.Name)
+                {
+                    case "lightMode":
+                        if (prop.Value.ValueKind != JsonValueKind.Number ||
+                            !prop.Value.TryGetInt32(out int lightMode) ||
+                            lightMode != 0)
+                        {
+                            throw new InvalidDataException($"[X] Light '{objectId}' data.lightMode must be 0.");
+                        }
+                        settings.LightMode = lightMode;
+                        break;
+
+                    case "color":
+                        {
+                            Double3 color = ParseStrictDouble3(prop.Value, $"Light '{objectId}' data.color");
+
+                            if (color.X < 0.0 || color.X > 1.0 ||
+                                color.Y < 0.0 || color.Y > 1.0 ||
+                                color.Z < 0.0 || color.Z > 1.0)
+                            {
+                                throw new InvalidDataException($"[X] Light '{objectId}' data.color components must be between 0 and 1.");
+                            }
+
+                            settings.Color = color;
+                            break;
+                        }
+
+                    case "intensity":
+                        if (prop.Value.ValueKind != JsonValueKind.Number ||
+                            !prop.Value.TryGetDouble(out double intensity) ||
+                            intensity < 0.0)
+                        {
+                            throw new InvalidDataException($"[X] Light '{objectId}' data.intensity must be >= 0.");
+                        }
+                        settings.Intensity = intensity;
+                        break;
+
+                    case "range":
+                        if (prop.Value.ValueKind != JsonValueKind.Number ||
+                            !prop.Value.TryGetDouble(out double range) ||
+                            range <= 0.0)
+                        {
+                            throw new InvalidDataException($"[X] Light '{objectId}' data.range must be > 0.");
+                        }
+                        settings.Range = range;
+                        break;
+
+                    case "attenuationCurve":
+                        if (prop.Value.ValueKind != JsonValueKind.Number ||
+                            !prop.Value.TryGetDouble(out double attenuationCurve) ||
+                            attenuationCurve < 0.0 ||
+                            attenuationCurve > 1.0)
+                        {
+                            throw new InvalidDataException($"[X] Light '{objectId}' data.attenuationCurve must be between 0 and 1.");
+                        }
+                        settings.AttenuationCurve = attenuationCurve;
+                        break;
+
+                    case "castShadow":
+                        if (prop.Value.ValueKind != JsonValueKind.True &&
+                            prop.Value.ValueKind != JsonValueKind.False)
+                        {
+                            throw new InvalidDataException($"[X] Light '{objectId}' data.castShadow must be true or false.");
+                        }
+                        settings.CastShadow = prop.Value.GetBoolean();
+                        break;
+
+                    default:
+                        throw new InvalidDataException($"[X] Light '{objectId}' data contains unknown or wrong-cased property '{prop.Name}'.");
+                }
+            }
 
             return settings;
         }
