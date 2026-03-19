@@ -85,7 +85,6 @@ namespace LimitlessSquareEngine
         private const string _uniformReflectionIntensity = "uReflectionIntensity";
         private const string _uniformOutlinePass = "uOutlinePass";
         private const string _uniformUseOutlineNormal = "uUseOutlineNormal";
-        private const string _uniformFaceVisibilityMode = "uFaceVisibilityMode";
 
         private uint _clusterLightBuffer = 0;
         private uint _clusterRangeBuffer = 0;
@@ -99,6 +98,7 @@ namespace LimitlessSquareEngine
         private uint _reflectionSkyboxCube = 0;
         private uint _reflectionDummyCubeTexture = 0;
         private bool _reflectionCaptureInitialized = false;
+        private uint _reflectionPrefilteredCube = 0;
 
         private long _capturedReflectionBatchId = long.MinValue;
         private bool _capturedSkyboxReflectionValid = false;
@@ -247,6 +247,32 @@ namespace LimitlessSquareEngine
             _gl.TexParameter(TextureTarget.TextureCubeMap, TextureParameterName.TextureWrapR, (int)TextureWrapMode.ClampToEdge);
             _gl.BindTexture(TextureTarget.TextureCubeMap, 0);
 
+            _reflectionPrefilteredCube = _gl.GenTexture();
+            _gl.BindTexture(TextureTarget.TextureCubeMap, _reflectionPrefilteredCube);
+
+            for (int face = 0; face < 6; face++)
+            {
+                TextureTarget faceTarget = (TextureTarget)((int)TextureTarget.TextureCubeMapPositiveX + face);
+
+                _gl.TexImage2D(
+                    faceTarget,
+                    0,
+                    InternalFormat.Rgba,
+                    (uint)_reflectionSkyboxCubeSize,
+                    (uint)_reflectionSkyboxCubeSize,
+                    0,
+                    PixelFormat.Rgba,
+                    PixelType.UnsignedByte,
+                    (ReadOnlySpan<byte>)emptyFace);
+            }
+
+            _gl.TexParameter(TextureTarget.TextureCubeMap, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.LinearMipmapLinear);
+            _gl.TexParameter(TextureTarget.TextureCubeMap, TextureParameterName.TextureMagFilter, (int)TextureMagFilter.Linear);
+            _gl.TexParameter(TextureTarget.TextureCubeMap, TextureParameterName.TextureWrapS, (int)TextureWrapMode.ClampToEdge);
+            _gl.TexParameter(TextureTarget.TextureCubeMap, TextureParameterName.TextureWrapT, (int)TextureWrapMode.ClampToEdge);
+            _gl.TexParameter(TextureTarget.TextureCubeMap, TextureParameterName.TextureWrapR, (int)TextureWrapMode.ClampToEdge);
+            _gl.BindTexture(TextureTarget.TextureCubeMap, 0);
+
             _reflectionDummyCubeTexture = _gl.GenTexture();
             _gl.BindTexture(TextureTarget.TextureCubeMap, _reflectionDummyCubeTexture);
 
@@ -277,6 +303,36 @@ namespace LimitlessSquareEngine
             _reflectionCaptureFramebuffer = _gl.GenFramebuffer();
 
             _reflectionCaptureInitialized = true;
+        }
+
+        private void UpdatePrefilteredReflectionCube()
+        {
+            if (_reflectionSkyboxCube == 0 || _reflectionPrefilteredCube == 0)
+                return;
+
+            for (uint face = 0; face < 6; face++)
+            {
+                _gl.CopyImageSubData(
+                    _reflectionSkyboxCube,
+                    CopyImageSubDataTarget.TextureCubeMap,
+                    0,
+                    0,
+                    0,
+                    (int)face,
+                    _reflectionPrefilteredCube,
+                    CopyImageSubDataTarget.TextureCubeMap,
+                    0,
+                    0,
+                    0,
+                    (int)face,
+                    (uint)_reflectionSkyboxCubeSize,
+                    (uint)_reflectionSkyboxCubeSize,
+                    1);
+            }
+
+            _gl.BindTexture(TextureTarget.TextureCubeMap, _reflectionPrefilteredCube);
+            _gl.GenerateMipmap(TextureTarget.TextureCubeMap);
+            _gl.BindTexture(TextureTarget.TextureCubeMap, 0);
         }
 
         private readonly struct ActiveUniformInfo
@@ -507,7 +563,6 @@ namespace LimitlessSquareEngine
 
             float[] vertices = (float[])cmd.Vertices.Clone();
 
-            // 两种支持格式都保持前 9 个 float 一致：
             // [x, y, z, r, g, b, a, u, v, ...]
             for (int i = 0; i + 8 < vertices.Length; i += cmd.VertexStrideFloats)
             {
@@ -529,7 +584,6 @@ namespace LimitlessSquareEngine
             return vertices;
         }
 
-        // 给以后的相机/场景系统用
         private bool _cameraContextActive = false;
         private int _activeSceneId = -1;
 
@@ -1009,7 +1063,6 @@ namespace LimitlessSquareEngine
                     (float)relativePosition.Y,
                     (float)relativePosition.Z);
 
-                // 这里直接用 RenderCommand 里已经有的 View / Projection
                 Vector3 viewSpacePosition = TransformPosition(cmd.View, relativePositionF);
 
                 uint gpuLightIndex = (uint)_uploadedLightCount;
@@ -1264,8 +1317,6 @@ namespace LimitlessSquareEngine
 
             if (clusterFar <= clusterNear)
                 return false;
-
-            // 你的约定里，相机前方是 -Z，所以正向视深度 = -viewZ
             float centerDepth = -viewSpacePosition.Z;
 
             // 灯球在视空间里的深度范围
@@ -1454,7 +1505,6 @@ namespace LimitlessSquareEngine
                 _gl.Uniform1(reflectionTextureLoc, reflection2DUnit);
             }
 
-            /* 反射源：天空盒 cubemap（保持清晰，不做模糊） */
             int reflectionSkyboxCubeLoc = _gl.GetUniformLocation(_currentProgram, _uniformReflectionSkyboxCube);
             if (reflectionSkyboxCubeLoc != -1)
             {
@@ -1463,7 +1513,7 @@ namespace LimitlessSquareEngine
 
                 if (reflectionSourceMode == 0 && _capturedSkyboxReflectionValid && _capturedReflectionBatchId == cmd.BatchId)
                 {
-                    _gl.BindTexture(TextureTarget.TextureCubeMap, _reflectionSkyboxCube);
+                    _gl.BindTexture(TextureTarget.TextureCubeMap, _reflectionPrefilteredCube);
                     reflectionEnabled = true;
                 }
                 else
@@ -2388,6 +2438,8 @@ namespace LimitlessSquareEngine
                     0,
                     (uint)(captureCmd.Vertices.Length / captureCmd.VertexStrideFloats));
             }
+
+            UpdatePrefilteredReflectionCube();
 
             RestoreStateAfterReflectionCapture(
                 batchCmd,
@@ -3591,7 +3643,7 @@ namespace LimitlessSquareEngine
             _gl.DrawArrays(cmd.PrimitiveType, 0, (uint)(cmd.Vertices.Length / cmd.VertexStrideFloats));
 
             // =========================
-            // 2) 描边 pass
+            // 描边 pass
             // =========================
             if (hasOutline)
             {
@@ -4012,6 +4064,12 @@ namespace LimitlessSquareEngine
             {
                 _gl.DeleteTexture(_reflectionSkyboxCube);
                 _reflectionSkyboxCube = 0;
+            }
+
+            if (_reflectionPrefilteredCube != 0)
+            {
+                _gl.DeleteTexture(_reflectionPrefilteredCube);
+                _reflectionPrefilteredCube = 0;
             }
 
             if (_reflectionDummyCubeTexture != 0)
