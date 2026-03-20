@@ -4626,6 +4626,139 @@ namespace LimitlessSquareEngine
             _meshes[id] = new MeshData(id, vertices, primitiveType, vertexStrideFloats);
         }
 
+        [MoonSharpHidden]
+        public void RegisterObjMeshFromFile(string assetsRoot, string objFilePath)
+        {
+            if (string.IsNullOrWhiteSpace(assetsRoot))
+                throw new ArgumentException("[X] Assets root cannot be null or empty.", nameof(assetsRoot));
+
+            if (string.IsNullOrWhiteSpace(objFilePath))
+                throw new ArgumentException("[X] OBJ file path cannot be null or empty.", nameof(objFilePath));
+
+            if (!File.Exists(objFilePath))
+                throw new FileNotFoundException("[X] OBJ file not found.", objFilePath);
+
+            if (!string.Equals(Path.GetExtension(objFilePath), ".obj", StringComparison.OrdinalIgnoreCase))
+                return;
+
+            // mesh key: 以 Assets 为根，去掉 Assets 本身和 .obj 后缀
+            // 例如 Assets/Models/Props/Crate.obj -> Models/Props/Crate
+            string meshKey = Path.GetRelativePath(assetsRoot, objFilePath).Replace('\\', '/');
+            if (meshKey.EndsWith(".obj", StringComparison.OrdinalIgnoreCase))
+                meshKey = meshKey[..^4];
+
+            using var importer = new Assimp.AssimpContext();
+
+            Assimp.Scene importedScene = importer.ImportFile(
+                objFilePath,
+                Assimp.PostProcessSteps.Triangulate |
+                Assimp.PostProcessSteps.JoinIdenticalVertices |
+                Assimp.PostProcessSteps.SortByPrimitiveType |
+                Assimp.PostProcessSteps.GenerateSmoothNormals |
+                Assimp.PostProcessSteps.CalculateTangentSpace);
+
+            if (importedScene == null || importedScene.MeshCount == 0)
+                throw new InvalidDataException($"[X] OBJ '{objFilePath}' does not contain any importable mesh.");
+
+            float[] vertices = BuildObjVerticesFromAssimpScene(importedScene, objFilePath);
+
+            // 16 stride -> 你的 RegisterMesh 会在三角形时自动补 outline normal 成 19 stride
+            RegisterMesh(meshKey, vertices, PrimitiveType.Triangles, 16);
+
+            Console.WriteLine($"[i] Registered OBJ mesh: {meshKey} -> {objFilePath}");
+        }
+
+        [MoonSharpHidden]
+        public void RegisterObjMeshesFromAssets(string assetsRoot)
+        {
+            if (string.IsNullOrWhiteSpace(assetsRoot) || !Directory.Exists(assetsRoot))
+                return;
+
+            string[] objFiles = Directory.GetFiles(assetsRoot, "*.obj", SearchOption.AllDirectories);
+            Array.Sort(objFiles, StringComparer.OrdinalIgnoreCase);
+
+            foreach (string objFile in objFiles)
+            {
+                try
+                {
+                    RegisterObjMeshFromFile(assetsRoot, objFile);
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[!] Failed to import OBJ '{objFile}': {ex.Message}");
+                }
+            }
+        }
+
+        private float[] BuildObjVerticesFromAssimpScene(Assimp.Scene importedScene, string sourcePath)
+        {
+            var vertices = new List<float>(importedScene.MeshCount * 1024);
+
+            foreach (Assimp.Mesh mesh in importedScene.Meshes)
+            {
+                if (mesh == null || mesh.VertexCount == 0 || mesh.FaceCount == 0)
+                    continue;
+
+                for (int faceIndex = 0; faceIndex < mesh.FaceCount; faceIndex++)
+                {
+                    Assimp.Face face = mesh.Faces[faceIndex];
+
+                    if (face.IndexCount != 3)
+                        throw new InvalidDataException($"[X] OBJ '{sourcePath}' contains a non-triangle face after triangulation.");
+
+                    for (int i = 0; i < 3; i++)
+                    {
+                        int index = face.Indices[i];
+
+                        Assimp.Vector3D pos = mesh.Vertices[index];
+
+                        Assimp.Vector3D normal = mesh.HasNormals
+                            ? mesh.Normals[index]
+                            : new Assimp.Vector3D(0f, 0f, 1f);
+
+                        Assimp.Vector3D uv = mesh.HasTextureCoords(0)
+                            ? mesh.TextureCoordinateChannels[0][index]
+                            : new Assimp.Vector3D(0f, 0f, 0f);
+
+                        Assimp.Vector3D tangent = mesh.HasTangentBasis
+                            ? mesh.Tangents[index]
+                            : new Assimp.Vector3D(1f, 0f, 0f);
+
+                        // position
+                        vertices.Add(pos.X);
+                        vertices.Add(pos.Y);
+                        vertices.Add(pos.Z);
+
+                        // color -> 固定白色
+                        vertices.Add(1f);
+                        vertices.Add(1f);
+                        vertices.Add(1f);
+                        vertices.Add(1f);
+
+                        // uv
+                        vertices.Add(uv.X);
+                        vertices.Add(uv.Y);
+
+                        // normal
+                        vertices.Add(normal.X);
+                        vertices.Add(normal.Y);
+                        vertices.Add(normal.Z);
+
+                        // tangent + handedness
+                        vertices.Add(tangent.X);
+                        vertices.Add(tangent.Y);
+                        vertices.Add(tangent.Z);
+                        vertices.Add(1f);
+                    }
+                }
+            }
+
+            if (vertices.Count == 0)
+                throw new InvalidDataException($"[X] OBJ '{sourcePath}' did not produce any triangle vertices.");
+
+            return vertices.ToArray();
+        }
+
         private float[] BuildOutlineNormalAugmentedVertices(float[] src)
         {
             int vertexCount = src.Length / 16;

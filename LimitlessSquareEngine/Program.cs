@@ -546,6 +546,21 @@ namespace LimitlessSquareEngine
                             _texturePaths.Add(relativePath);
                             continue;
                         }
+
+                        // OBJ网格
+                        if (Path.GetExtension(file).Equals(".obj", StringComparison.OrdinalIgnoreCase))
+                        {
+                            try
+                            {
+                                graphics.RegisterObjMeshFromFile(assetsPath, file);
+                            }
+                            catch (Exception ex)
+                            {
+                                Console.WriteLine($"[!] Failed to scan OBJ mesh {file}: {ex.Message}");
+                            }
+
+                            continue;
+                        }
                     }
 
                     Console.WriteLine($"[i] Scene scan completed. Registered scenes: {_sceneFileRegistry.Count}, materials: {_materialFileRegistry.Count}");
