@@ -99,6 +99,20 @@ namespace LimitlessSquareEngine
         private uint _reflectionDummyCubeTexture = 0;
         private bool _reflectionCaptureInitialized = false;
         private uint _reflectionPrefilteredCube = 0;
+        private uint _reflectionEquirectToCubeProgram = 0;
+        private uint _reflectionPrefilterProgram = 0;
+
+        private sealed class ReflectionTextureEnvironmentCacheEntry
+        {
+            public string SourcePath { get; init; } = "";
+            public uint SourceCube { get; init; }
+            public uint PrefilteredCube { get; init; }
+            public int Width { get; init; }
+            public int Height { get; init; }
+            public long SourceLastWriteUtcTicks { get; init; }
+        }
+
+        private readonly Dictionary<string, ReflectionTextureEnvironmentCacheEntry> _reflectionTextureEnvironmentCache = new(StringComparer.Ordinal);
 
         private long _capturedReflectionBatchId = long.MinValue;
         private bool _capturedSkyboxReflectionValid = false;
@@ -216,62 +230,10 @@ namespace LimitlessSquareEngine
 
         private void InitializeReflectionCaptureResources()
         {
-            if (_reflectionCaptureInitialized)
-                return;
+            if (_reflectionCaptureInitialized) return;
 
-            _reflectionSkyboxCube = _gl.GenTexture();
-            _gl.BindTexture(TextureTarget.TextureCubeMap, _reflectionSkyboxCube);
-
-            byte[] emptyFace = new byte[_reflectionSkyboxCubeSize * _reflectionSkyboxCubeSize * 4];
-
-            for (int face = 0; face < 6; face++)
-            {
-                TextureTarget faceTarget = (TextureTarget)((int)TextureTarget.TextureCubeMapPositiveX + face);
-
-                _gl.TexImage2D(
-                    faceTarget,
-                    0,
-                    InternalFormat.Rgba,
-                    (uint)_reflectionSkyboxCubeSize,
-                    (uint)_reflectionSkyboxCubeSize,
-                    0,
-                    PixelFormat.Rgba,
-                    PixelType.UnsignedByte,
-                    (ReadOnlySpan<byte>)emptyFace);
-            }
-
-            _gl.TexParameter(TextureTarget.TextureCubeMap, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.Linear);
-            _gl.TexParameter(TextureTarget.TextureCubeMap, TextureParameterName.TextureMagFilter, (int)TextureMagFilter.Linear);
-            _gl.TexParameter(TextureTarget.TextureCubeMap, TextureParameterName.TextureWrapS, (int)TextureWrapMode.ClampToEdge);
-            _gl.TexParameter(TextureTarget.TextureCubeMap, TextureParameterName.TextureWrapT, (int)TextureWrapMode.ClampToEdge);
-            _gl.TexParameter(TextureTarget.TextureCubeMap, TextureParameterName.TextureWrapR, (int)TextureWrapMode.ClampToEdge);
-            _gl.BindTexture(TextureTarget.TextureCubeMap, 0);
-
-            _reflectionPrefilteredCube = _gl.GenTexture();
-            _gl.BindTexture(TextureTarget.TextureCubeMap, _reflectionPrefilteredCube);
-
-            for (int face = 0; face < 6; face++)
-            {
-                TextureTarget faceTarget = (TextureTarget)((int)TextureTarget.TextureCubeMapPositiveX + face);
-
-                _gl.TexImage2D(
-                    faceTarget,
-                    0,
-                    InternalFormat.Rgba,
-                    (uint)_reflectionSkyboxCubeSize,
-                    (uint)_reflectionSkyboxCubeSize,
-                    0,
-                    PixelFormat.Rgba,
-                    PixelType.UnsignedByte,
-                    (ReadOnlySpan<byte>)emptyFace);
-            }
-
-            _gl.TexParameter(TextureTarget.TextureCubeMap, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.LinearMipmapLinear);
-            _gl.TexParameter(TextureTarget.TextureCubeMap, TextureParameterName.TextureMagFilter, (int)TextureMagFilter.Linear);
-            _gl.TexParameter(TextureTarget.TextureCubeMap, TextureParameterName.TextureWrapS, (int)TextureWrapMode.ClampToEdge);
-            _gl.TexParameter(TextureTarget.TextureCubeMap, TextureParameterName.TextureWrapT, (int)TextureWrapMode.ClampToEdge);
-            _gl.TexParameter(TextureTarget.TextureCubeMap, TextureParameterName.TextureWrapR, (int)TextureWrapMode.ClampToEdge);
-            _gl.BindTexture(TextureTarget.TextureCubeMap, 0);
+            _reflectionSkyboxCube = CreateReflectionCubeTexture(withMipmaps: false);
+            _reflectionPrefilteredCube = CreateReflectionCubeTexture(withMipmaps: true);
 
             _reflectionDummyCubeTexture = _gl.GenTexture();
             _gl.BindTexture(TextureTarget.TextureCubeMap, _reflectionDummyCubeTexture);
@@ -280,7 +242,6 @@ namespace LimitlessSquareEngine
             for (int face = 0; face < 6; face++)
             {
                 TextureTarget faceTarget = (TextureTarget)((int)TextureTarget.TextureCubeMapPositiveX + face);
-
                 _gl.TexImage2D(
                     faceTarget,
                     0,
@@ -301,38 +262,10 @@ namespace LimitlessSquareEngine
             _gl.BindTexture(TextureTarget.TextureCubeMap, 0);
 
             _reflectionCaptureFramebuffer = _gl.GenFramebuffer();
+            _reflectionEquirectToCubeProgram = CreateReflectionEquirectToCubeProgram();
+            _reflectionPrefilterProgram = CreateReflectionPrefilterProgram();
 
             _reflectionCaptureInitialized = true;
-        }
-
-        private void UpdatePrefilteredReflectionCube()
-        {
-            if (_reflectionSkyboxCube == 0 || _reflectionPrefilteredCube == 0)
-                return;
-
-            for (uint face = 0; face < 6; face++)
-            {
-                _gl.CopyImageSubData(
-                    _reflectionSkyboxCube,
-                    CopyImageSubDataTarget.TextureCubeMap,
-                    0,
-                    0,
-                    0,
-                    (int)face,
-                    _reflectionPrefilteredCube,
-                    CopyImageSubDataTarget.TextureCubeMap,
-                    0,
-                    0,
-                    0,
-                    (int)face,
-                    (uint)_reflectionSkyboxCubeSize,
-                    (uint)_reflectionSkyboxCubeSize,
-                    1);
-            }
-
-            _gl.BindTexture(TextureTarget.TextureCubeMap, _reflectionPrefilteredCube);
-            _gl.GenerateMipmap(TextureTarget.TextureCubeMap);
-            _gl.BindTexture(TextureTarget.TextureCubeMap, 0);
         }
 
         private readonly struct ActiveUniformInfo
@@ -1475,37 +1408,66 @@ namespace LimitlessSquareEngine
                 _gl.Uniform1(shadowAtlasLoc, shadowAtlasUnit);
             }
 
-            int reflectionSourceMode = cmd.Material != null
-                ? ReadReflectionSourceMode(cmd.Material)
-                : 0;
 
-            float reflectionIntensity = cmd.Material != null
-                ? ReadMaterialFloat(cmd.Material, "uReflectionIntensity", 1f)
-                : 1f;
+            int reflectionSourceMode = cmd.Material != null ? ReadReflectionSourceMode(cmd.Material) : 0;
+            float reflectionIntensity = cmd.Material != null ? ReadMaterialFloat(cmd.Material, "uReflectionIntensity", 1f) : 1f;
 
             bool reflectionEnabled = false;
+            uint reflectionCubeToBind = _reflectionDummyCubeTexture;
+            TextureInfo reflectionMapTexture = default;
 
-            /* 反射源：2D 环境图 */
+            if (reflectionSourceMode == 1 && cmd.Material != null)
+            {
+                if (TryGetReflectionEnvironmentCube(cmd.Material, cmd, out uint textureReflectionCube, out reflectionMapTexture))
+                {
+                    reflectionCubeToBind = textureReflectionCube;
+                    reflectionEnabled = true;
+                }
+            }
+            else
+            {
+                if (_capturedSkyboxReflectionValid && _capturedReflectionBatchId == cmd.BatchId)
+                {
+                    reflectionCubeToBind = _reflectionPrefilteredCube;
+                    reflectionEnabled = true;
+                }
+            }
+
             int reflectionTextureLoc = _gl.GetUniformLocation(_currentProgram, _uniformReflectionTexture);
             if (reflectionTextureLoc != -1)
             {
                 const int reflection2DUnit = 15;
                 _gl.ActiveTexture((TextureUnit)((int)TextureUnit.Texture0 + reflection2DUnit));
 
-                if (reflectionSourceMode == 1 && cmd.Material != null && TryGetReflectionMapTexture(cmd.Material, out TextureInfo reflectionMap))
-                {
-                    _gl.BindTexture(TextureTarget.Texture2D, reflectionMap.Id);
-                    reflectionEnabled = true;
-                }
+                if (reflectionSourceMode == 1 && reflectionMapTexture.Id != 0)
+                    _gl.BindTexture(TextureTarget.Texture2D, reflectionMapTexture.Id);
                 else
-                {
                     _gl.BindTexture(TextureTarget.Texture2D, _lightingDummyTexture);
-                }
 
                 _gl.Uniform1(reflectionTextureLoc, reflection2DUnit);
             }
 
             int reflectionSkyboxCubeLoc = _gl.GetUniformLocation(_currentProgram, _uniformReflectionSkyboxCube);
+            if (reflectionSkyboxCubeLoc != -1)
+            {
+                const int reflectionCubeUnit = 16;
+                _gl.ActiveTexture((TextureUnit)((int)TextureUnit.Texture0 + reflectionCubeUnit));
+                _gl.BindTexture(TextureTarget.TextureCubeMap, reflectionCubeToBind);
+                _gl.Uniform1(reflectionSkyboxCubeLoc, reflectionCubeUnit);
+            }
+
+            int reflectionSourceLoc = _gl.GetUniformLocation(_currentProgram, _uniformReflectionSource);
+            if (reflectionSourceLoc != -1)
+                _gl.Uniform1(reflectionSourceLoc, reflectionSourceMode);
+
+            int reflectionEnabledLoc = _gl.GetUniformLocation(_currentProgram, _uniformReflectionEnabled);
+            if (reflectionEnabledLoc != -1)
+                _gl.Uniform1(reflectionEnabledLoc, reflectionEnabled ? 1 : 0);
+
+            int reflectionIntensityLoc = _gl.GetUniformLocation(_currentProgram, _uniformReflectionIntensity);
+            if (reflectionIntensityLoc != -1)
+                _gl.Uniform1(reflectionIntensityLoc, reflectionEnabled ? reflectionIntensity : 0f);
+
             if (reflectionSkyboxCubeLoc != -1)
             {
                 const int reflectionCubeUnit = 16;
@@ -1524,17 +1486,6 @@ namespace LimitlessSquareEngine
                 _gl.Uniform1(reflectionSkyboxCubeLoc, reflectionCubeUnit);
             }
 
-            int reflectionSourceLoc = _gl.GetUniformLocation(_currentProgram, _uniformReflectionSource);
-            if (reflectionSourceLoc != -1)
-                _gl.Uniform1(reflectionSourceLoc, reflectionSourceMode);
-
-            int reflectionEnabledLoc = _gl.GetUniformLocation(_currentProgram, _uniformReflectionEnabled);
-            if (reflectionEnabledLoc != -1)
-                _gl.Uniform1(reflectionEnabledLoc, reflectionEnabled ? 1 : 0);
-
-            int reflectionIntensityLoc = _gl.GetUniformLocation(_currentProgram, _uniformReflectionIntensity);
-            if (reflectionIntensityLoc != -1)
-                _gl.Uniform1(reflectionIntensityLoc, reflectionEnabled ? reflectionIntensity : 0f);
 
             int useOutlineNormalLoc = _gl.GetUniformLocation(_currentProgram, _uniformUseOutlineNormal);
             if (useOutlineNormalLoc != -1)
@@ -1629,6 +1580,8 @@ namespace LimitlessSquareEngine
             // _shaderProgram = CreateShaderProgram();
             LoadShaders();
             InitializeLightingSupportResources();
+            const GLEnum TextureCubeMapSeamless = (GLEnum)0x884F;
+            _gl.Enable(TextureCubeMapSeamless);
             _gl.Enable(GLEnum.DepthTest);
             _gl.BlendFunc(GLEnum.SrcAlpha, GLEnum.OneMinusSrcAlpha);
             _gl.Enable(GLEnum.Blend);
@@ -1639,6 +1592,577 @@ namespace LimitlessSquareEngine
             _gl.BindVertexArray(0);
 
             _isInitialized = true;
+        }
+
+        private int GetReflectionCubeMipCount()
+        {
+            return 1 + (int)MathF.Floor(MathF.Log2(_reflectionSkyboxCubeSize));
+        }
+
+        private uint CreateReflectionCubeTexture(bool withMipmaps)
+        {
+            int mipCount = withMipmaps ? GetReflectionCubeMipCount() : 1;
+
+            uint texture = _gl.GenTexture();
+            _gl.BindTexture(TextureTarget.TextureCubeMap, texture);
+
+            for (int mip = 0; mip < mipCount; mip++)
+            {
+                int mipSize = Math.Max(1, _reflectionSkyboxCubeSize >> mip);
+                float[] emptyFace = new float[mipSize * mipSize * 4];
+
+                for (int face = 0; face < 6; face++)
+                {
+                    TextureTarget faceTarget = (TextureTarget)((int)TextureTarget.TextureCubeMapPositiveX + face);
+                    _gl.TexImage2D(
+                        (GLEnum)faceTarget,
+                        mip,
+                        (int)InternalFormat.Rgba16f,
+                        (uint)mipSize,
+                        (uint)mipSize,
+                        0,
+                        (GLEnum)PixelFormat.Rgba,
+                        (GLEnum)PixelType.Float,
+                        in emptyFace[0]);
+                }
+            }
+
+            _gl.TexParameter(
+                TextureTarget.TextureCubeMap,
+                TextureParameterName.TextureMinFilter,
+                withMipmaps ? (int)TextureMinFilter.LinearMipmapLinear : (int)TextureMinFilter.Linear);
+
+            _gl.TexParameter(TextureTarget.TextureCubeMap, TextureParameterName.TextureMagFilter, (int)TextureMagFilter.Linear);
+            _gl.TexParameter(TextureTarget.TextureCubeMap, TextureParameterName.TextureWrapS, (int)TextureWrapMode.ClampToEdge);
+            _gl.TexParameter(TextureTarget.TextureCubeMap, TextureParameterName.TextureWrapT, (int)TextureWrapMode.ClampToEdge);
+            _gl.TexParameter(TextureTarget.TextureCubeMap, TextureParameterName.TextureWrapR, (int)TextureWrapMode.ClampToEdge);
+
+            _gl.BindTexture(TextureTarget.TextureCubeMap, 0);
+            return texture;
+        }
+
+        private uint CreateReflectionEquirectToCubeProgram()
+        {
+            string vertexSource = @"#version 430 core
+layout(location = 0) in vec3 aPos;
+uniform mat4 uView;
+uniform mat4 uProjection;
+out vec3 vLocalDir;
+void main()
+{
+    vLocalDir = aPos;
+    gl_Position = uProjection * uView * vec4(aPos, 1.0);
+}";
+
+            string fragmentSource = @"#version 430 core
+out vec4 FragColor;
+in vec3 vLocalDir;
+
+uniform sampler2D uEquirectTexture;
+
+const vec2 InvAtan = vec2(0.15915494309189535, 0.3183098861837907);
+
+vec2 SampleSphericalMap(vec3 v)
+{
+    vec3 d = normalize(v);
+    vec2 uv = vec2(atan(d.z, d.x), asin(clamp(d.y, -1.0, 1.0)));
+    uv *= InvAtan;
+    uv += 0.5;
+    return uv;
+}
+
+void main()
+{
+    vec2 uv = SampleSphericalMap(normalize(vLocalDir));
+    vec3 color = texture(uEquirectTexture, uv).rgb;
+    FragColor = vec4(color, 1.0);
+}";
+
+            uint vs = CompileShader(ShaderType.VertexShader, vertexSource);
+            uint fs = CompileShader(ShaderType.FragmentShader, fragmentSource);
+
+            uint program = _gl.CreateProgram();
+            _gl.AttachShader(program, vs);
+            _gl.AttachShader(program, fs);
+            _gl.LinkProgram(program);
+
+            _gl.GetProgram(program, ProgramPropertyARB.LinkStatus, out int success);
+            if (success == 0)
+            {
+                string infoLog = _gl.GetProgramInfoLog(program);
+                throw new Exception($"[X] Reflection equirect-to-cube shader link failed: {infoLog}");
+            }
+
+            _gl.DetachShader(program, vs);
+            _gl.DetachShader(program, fs);
+            _gl.DeleteShader(vs);
+            _gl.DeleteShader(fs);
+
+            return program;
+        }
+
+        private uint CreateReflectionPrefilterProgram()
+        {
+            string vertexSource = @"#version 430 core
+            layout(location = 0) in vec3 aPos;
+            uniform mat4 uView;
+            uniform mat4 uProjection;
+            out vec3 vLocalDir;
+            void main()
+            {
+                vLocalDir = aPos;
+                gl_Position = uProjection * uView * vec4(aPos, 1.0);
+            }";
+
+                        string fragmentSource = @"#version 430 core
+            out vec4 FragColor;
+            in vec3 vLocalDir;
+
+            uniform samplerCube uEnvironmentMap;
+            uniform float uRoughness;
+
+            const float PI = 3.1415926535897932384626433832795;
+
+            float RadicalInverse_VdC(uint bits)
+            {
+                bits = (bits << 16u) | (bits >> 16u);
+                bits = ((bits & 0x55555555u) << 1u) | ((bits & 0xAAAAAAAAu) >> 1u);
+                bits = ((bits & 0x33333333u) << 2u) | ((bits & 0xCCCCCCCCu) >> 2u);
+                bits = ((bits & 0x0F0F0F0Fu) << 4u) | ((bits & 0xF0F0F0F0u) >> 4u);
+                bits = ((bits & 0x00FF00FFu) << 8u) | ((bits & 0xFF00FF00u) >> 8u);
+                return float(bits) * 2.3283064365386963e-10;
+            }
+
+            vec2 Hammersley(uint i, uint N)
+            {
+                return vec2(float(i) / float(N), RadicalInverse_VdC(i));
+            }
+
+            vec3 ImportanceSampleGGX(vec2 Xi, vec3 N, float roughness)
+            {
+                float a = max(roughness * roughness, 0.001);
+                float phi = 2.0 * PI * Xi.x;
+                float cosTheta = sqrt((1.0 - Xi.y) / (1.0 + (a * a - 1.0) * Xi.y));
+                float sinTheta = sqrt(max(1.0 - cosTheta * cosTheta, 0.0));
+
+                vec3 H;
+                H.x = cos(phi) * sinTheta;
+                H.y = sin(phi) * sinTheta;
+                H.z = cosTheta;
+
+                vec3 up = abs(N.z) < 0.999 ? vec3(0.0, 0.0, 1.0) : vec3(1.0, 0.0, 0.0);
+                vec3 tangent = normalize(cross(up, N));
+                vec3 bitangent = cross(N, tangent);
+
+                vec3 sampleVec = tangent * H.x + bitangent * H.y + N * H.z;
+                return normalize(sampleVec);
+            }
+
+            void main()
+            {
+                vec3 N = normalize(vLocalDir);
+                vec3 R = N;
+                vec3 V = R;
+
+                if (uRoughness <= 0.0001)
+                {
+                    FragColor = vec4(texture(uEnvironmentMap, R).rgb, 1.0);
+                    return;
+                }
+
+                const uint SAMPLE_COUNT = 1024u;
+                vec3 prefilteredColor = vec3(0.0);
+                float totalWeight = 0.0;
+
+                for (uint i = 0u; i < SAMPLE_COUNT; ++i)
+                {
+                    vec2 Xi = Hammersley(i, SAMPLE_COUNT);
+                    vec3 H = ImportanceSampleGGX(Xi, N, uRoughness);
+                    vec3 L = normalize(2.0 * dot(V, H) * H - V);
+
+                    float NdotL = max(dot(N, L), 0.0);
+                    if (NdotL > 0.0)
+                    {
+                        prefilteredColor += texture(uEnvironmentMap, L).rgb * NdotL;
+                        totalWeight += NdotL;
+                    }
+                }
+
+                prefilteredColor /= max(totalWeight, 0.0001);
+                FragColor = vec4(prefilteredColor, 1.0);
+            }";
+            uint vs = CompileShader(ShaderType.VertexShader, vertexSource);
+            uint fs = CompileShader(ShaderType.FragmentShader, fragmentSource);
+
+            uint program = _gl.CreateProgram();
+            _gl.AttachShader(program, vs);
+            _gl.AttachShader(program, fs);
+            _gl.LinkProgram(program);
+
+            _gl.GetProgram(program, ProgramPropertyARB.LinkStatus, out int success);
+            if (success == 0)
+            {
+                string infoLog = _gl.GetProgramInfoLog(program);
+                throw new Exception($"[X] Reflection prefilter shader link failed: {infoLog}");
+            }
+
+            _gl.DetachShader(program, vs);
+            _gl.DetachShader(program, fs);
+            _gl.DeleteShader(vs);
+            _gl.DeleteShader(fs);
+
+            return program;
+        }
+
+        private void RenderEquirectTextureToCube(uint equirectTextureId, uint targetCube)
+        {
+            if (equirectTextureId == 0 || targetCube == 0) return;
+            if (!_meshes.TryGetValue("builtin/cube_1x1x1", out MeshData cubeMesh)) return;
+
+            Matrix4x4 captureProjection = CreatePerspective(MathF.PI / 2f, 1f, 0.1f, 1f);
+
+            var renderCmd = new RenderCommand
+            {
+                Vertices = cubeMesh.Vertices,
+                PrimitiveType = cubeMesh.PrimitiveType,
+                Program = _reflectionEquirectToCubeProgram,
+                UseTexture = false,
+                TextureId = 0,
+                VertexStrideFloats = cubeMesh.VertexStrideFloats,
+                CameraPosition = Vector3.Zero,
+                ClusterNear = 0.1f,
+                ClusterFar = 1f,
+                RenderSpace = RenderSpace.Camera,
+                Model = Matrix4x4.Identity,
+                View = Matrix4x4.Identity,
+                Projection = captureProjection,
+                QueueType = RenderQueueType.Opaque,
+                SortDepth = 0f,
+                SubmissionIndex = 0,
+                Pass = RenderPass.Scene,
+                BatchId = -1,
+                BatchSubmissionOrder = -1,
+                ViewportX = 0,
+                ViewportY = 0,
+                ViewportWidth = _reflectionSkyboxCubeSize,
+                ViewportHeight = _reflectionSkyboxCubeSize,
+                Material = null,
+                Skybox = null,
+                ForceWhiteVertexColor = true,
+                IsSkybox = true,
+                SceneId = "",
+                CameraWorldPosition = Double3.Zero,
+                CullMode = RenderCullMode.Both
+            };
+
+            _gl.BindFramebuffer(FramebufferTarget.Framebuffer, _reflectionCaptureFramebuffer);
+            _gl.Viewport(0, 0, (uint)_reflectionSkyboxCubeSize, (uint)_reflectionSkyboxCubeSize);
+            _gl.Disable(GLEnum.ScissorTest);
+            _gl.Disable(GLEnum.Blend);
+            _gl.Disable(GLEnum.DepthTest);
+            _gl.DepthMask(false);
+            _gl.Disable(GLEnum.CullFace);
+
+            _currentProgram = _reflectionEquirectToCubeProgram;
+            _gl.UseProgram(_reflectionEquirectToCubeProgram);
+
+            int texLoc = _gl.GetUniformLocation(_reflectionEquirectToCubeProgram, "uEquirectTexture");
+            int viewLoc = _gl.GetUniformLocation(_reflectionEquirectToCubeProgram, "uView");
+            int projLoc = _gl.GetUniformLocation(_reflectionEquirectToCubeProgram, "uProjection");
+
+            _gl.ActiveTexture(TextureUnit.Texture0);
+            _gl.BindTexture(TextureTarget.Texture2D, equirectTextureId);
+            if (texLoc != -1) _gl.Uniform1(texLoc, 0);
+            if (projLoc != -1) SetMatrixUniform(projLoc, captureProjection);
+
+            for (int face = 0; face < 6; face++)
+            {
+                TextureTarget faceTarget = (TextureTarget)((int)TextureTarget.TextureCubeMapPositiveX + face);
+                _gl.FramebufferTexture2D(
+                    FramebufferTarget.Framebuffer,
+                    FramebufferAttachment.ColorAttachment0,
+                    faceTarget,
+                    targetCube,
+                    0);
+
+                _gl.ClearColor(0f, 0f, 0f, 1f);
+                _gl.Clear(ClearBufferMask.ColorBufferBit);
+
+                if (viewLoc != -1) SetMatrixUniform(viewLoc, _reflectionCaptureViews[face]);
+
+                _activeRenderSpace = RenderSpace.Camera;
+                _activeModelMatrix = Matrix4x4.Identity;
+                _activeViewMatrix = _reflectionCaptureViews[face];
+                _activeProjectionMatrix = captureProjection;
+
+                BindCommandGeometry(renderCmd);
+                _gl.DrawArrays(
+                    renderCmd.PrimitiveType,
+                    0,
+                    (uint)(renderCmd.Vertices.Length / renderCmd.VertexStrideFloats));
+            }
+
+            _gl.ActiveTexture(TextureUnit.Texture0);
+            _gl.BindTexture(TextureTarget.Texture2D, 0);
+        }
+
+        private void PrefilterReflectionCube(uint sourceCube, uint targetCube)
+        {
+            if (sourceCube == 0 || targetCube == 0) return;
+            if (!_meshes.TryGetValue("builtin/cube_1x1x1", out MeshData cubeMesh)) return;
+
+            int mipLevels = GetReflectionCubeMipCount();
+
+            for (uint face = 0; face < 6; face++)
+            {
+                _gl.CopyImageSubData(
+                    sourceCube,
+                    CopyImageSubDataTarget.TextureCubeMap,
+                    0,
+                    0,
+                    0,
+                    (int)face,
+                    targetCube,
+                    CopyImageSubDataTarget.TextureCubeMap,
+                    0,
+                    0,
+                    0,
+                    (int)face,
+                    (uint)_reflectionSkyboxCubeSize,
+                    (uint)_reflectionSkyboxCubeSize,
+                    1);
+            }
+
+            Matrix4x4 captureProjection = CreatePerspective(MathF.PI / 2f, 1f, 0.1f, 1f);
+
+            var renderCmd = new RenderCommand
+            {
+                Vertices = cubeMesh.Vertices,
+                PrimitiveType = cubeMesh.PrimitiveType,
+                Program = _reflectionPrefilterProgram,
+                UseTexture = false,
+                TextureId = 0,
+                VertexStrideFloats = cubeMesh.VertexStrideFloats,
+                CameraPosition = Vector3.Zero,
+                ClusterNear = 0.1f,
+                ClusterFar = 1f,
+                RenderSpace = RenderSpace.Camera,
+                Model = Matrix4x4.Identity,
+                View = Matrix4x4.Identity,
+                Projection = captureProjection,
+                QueueType = RenderQueueType.Opaque,
+                SortDepth = 0f,
+                SubmissionIndex = 0,
+                Pass = RenderPass.Scene,
+                BatchId = -1,
+                BatchSubmissionOrder = -1,
+                ViewportX = 0,
+                ViewportY = 0,
+                ViewportWidth = _reflectionSkyboxCubeSize,
+                ViewportHeight = _reflectionSkyboxCubeSize,
+                Material = null,
+                Skybox = null,
+                ForceWhiteVertexColor = true,
+                IsSkybox = true,
+                SceneId = "",
+                CameraWorldPosition = Double3.Zero,
+                CullMode = RenderCullMode.Both
+            };
+
+            _gl.BindFramebuffer(FramebufferTarget.Framebuffer, _reflectionCaptureFramebuffer);
+            _gl.Disable(GLEnum.ScissorTest);
+            _gl.Disable(GLEnum.Blend);
+            _gl.Disable(GLEnum.DepthTest);
+            _gl.DepthMask(false);
+            _gl.Disable(GLEnum.CullFace);
+
+            _currentProgram = _reflectionPrefilterProgram;
+            _gl.UseProgram(_reflectionPrefilterProgram);
+
+            int envLoc = _gl.GetUniformLocation(_reflectionPrefilterProgram, "uEnvironmentMap");
+            int roughnessLoc = _gl.GetUniformLocation(_reflectionPrefilterProgram, "uRoughness");
+            int viewLoc = _gl.GetUniformLocation(_reflectionPrefilterProgram, "uView");
+            int projLoc = _gl.GetUniformLocation(_reflectionPrefilterProgram, "uProjection");
+
+            _gl.ActiveTexture(TextureUnit.Texture0);
+            _gl.BindTexture(TextureTarget.TextureCubeMap, sourceCube);
+            if (envLoc != -1) _gl.Uniform1(envLoc, 0);
+            if (projLoc != -1) SetMatrixUniform(projLoc, captureProjection);
+
+            for (int mip = 1; mip < mipLevels; mip++)
+            {
+                int mipSize = Math.Max(1, _reflectionSkyboxCubeSize >> mip);
+                float mipT = mip / (float)(mipLevels - 1);
+                float roughness = mipT * mipT;
+
+                _gl.Viewport(0, 0, (uint)mipSize, (uint)mipSize);
+                if (roughnessLoc != -1) _gl.Uniform1(roughnessLoc, roughness);
+
+                for (int face = 0; face < 6; face++)
+                {
+                    TextureTarget faceTarget = (TextureTarget)((int)TextureTarget.TextureCubeMapPositiveX + face);
+                    _gl.FramebufferTexture2D(
+                        (GLEnum)FramebufferTarget.Framebuffer,
+                        (GLEnum)FramebufferAttachment.ColorAttachment0,
+                        (GLEnum)faceTarget,
+                        targetCube,
+                        mip);
+
+                    _gl.ClearColor(0f, 0f, 0f, 1f);
+                    _gl.Clear(ClearBufferMask.ColorBufferBit);
+
+                    if (viewLoc != -1) SetMatrixUniform(viewLoc, _reflectionCaptureViews[face]);
+
+                    _activeRenderSpace = RenderSpace.Camera;
+                    _activeModelMatrix = Matrix4x4.Identity;
+                    _activeViewMatrix = _reflectionCaptureViews[face];
+                    _activeProjectionMatrix = captureProjection;
+
+                    BindCommandGeometry(renderCmd);
+                    _gl.DrawArrays(
+                        renderCmd.PrimitiveType,
+                        0,
+                        (uint)(renderCmd.Vertices.Length / renderCmd.VertexStrideFloats));
+                }
+            }
+
+            _gl.ActiveTexture(TextureUnit.Texture0);
+            _gl.BindTexture(TextureTarget.TextureCubeMap, 0);
+        }
+
+        private void RestoreStateAfterReflectionUtility(
+    in RenderCommand cmd,
+    uint previousProgram,
+    RenderSpace previousRenderSpace,
+    Matrix4x4 previousModel,
+    Matrix4x4 previousView,
+    Matrix4x4 previousProjection)
+        {
+            _gl.BindFramebuffer(FramebufferTarget.Framebuffer, 0);
+            _gl.Viewport(
+                cmd.ViewportX,
+                cmd.ViewportY,
+                (uint)Math.Max(1, cmd.ViewportWidth),
+                (uint)Math.Max(1, cmd.ViewportHeight));
+
+            _gl.Disable(GLEnum.ScissorTest);
+            _gl.Enable(GLEnum.DepthTest);
+            _gl.DepthFunc(GLEnum.Less);
+            _gl.DepthMask(true);
+            _gl.Enable(GLEnum.Blend);
+            _gl.BlendFunc(GLEnum.SrcAlpha, GLEnum.OneMinusSrcAlpha);
+
+            _currentProgram = previousProgram;
+            _gl.UseProgram(previousProgram);
+
+            _activeRenderSpace = previousRenderSpace;
+            _activeModelMatrix = previousModel;
+            _activeViewMatrix = previousView;
+            _activeProjectionMatrix = previousProjection;
+
+            ApplyCullMode(cmd.CullMode);
+
+            _gl.ActiveTexture(TextureUnit.Texture0);
+            _gl.BindTexture(TextureTarget.Texture2D, 0);
+            _gl.BindTexture(TextureTarget.TextureCubeMap, 0);
+
+            BindCommandGeometry(cmd);
+        }
+
+        private bool TryGetReflectionEnvironmentCube(
+            MaterialData material,
+            in RenderCommand cmd,
+            out uint prefilteredCube,
+            out TextureInfo sourceTexture)
+        {
+            prefilteredCube = 0;
+            sourceTexture = default;
+
+            if (material == null)
+                return false;
+
+            string mapPath = ReadMaterialString(material, "uReflectionMap", "");
+            if (string.IsNullOrWhiteSpace(mapPath))
+                return false;
+
+            string fullPath = ResolveTexturePath(mapPath);
+            if (!File.Exists(fullPath))
+                return false;
+
+            long sourceLastWriteUtcTicks = File.GetLastWriteTimeUtc(fullPath).Ticks;
+
+            if (_reflectionTextureEnvironmentCache.TryGetValue(fullPath, out ReflectionTextureEnvironmentCacheEntry cached))
+            {
+                if (cached.SourceLastWriteUtcTicks == sourceLastWriteUtcTicks)
+                {
+                    sourceTexture = LoadTexture(fullPath);
+                    prefilteredCube = cached.PrefilteredCube;
+                    return prefilteredCube != 0;
+                }
+
+                InvalidateReflectionTextureEnvironmentCache(fullPath);
+            }
+
+            sourceTexture = LoadTexture(fullPath);
+            if (sourceTexture.Id == 0)
+                return false;
+
+            InitializeReflectionCaptureResources();
+
+            uint previousProgram = _currentProgram;
+            RenderSpace previousRenderSpace = _activeRenderSpace;
+            Matrix4x4 previousModel = _activeModelMatrix;
+            Matrix4x4 previousView = _activeViewMatrix;
+            Matrix4x4 previousProjection = _activeProjectionMatrix;
+
+            uint sourceCube = CreateReflectionCubeTexture(withMipmaps: false);
+            uint targetPrefilteredCube = CreateReflectionCubeTexture(withMipmaps: true);
+
+            RenderEquirectTextureToCube(sourceTexture.Id, sourceCube);
+            PrefilterReflectionCube(sourceCube, targetPrefilteredCube);
+
+            RestoreStateAfterReflectionUtility(
+                cmd,
+                previousProgram,
+                previousRenderSpace,
+                previousModel,
+                previousView,
+                previousProjection);
+
+            _reflectionTextureEnvironmentCache[fullPath] = new ReflectionTextureEnvironmentCacheEntry
+            {
+                SourcePath = fullPath,
+                SourceCube = sourceCube,
+                PrefilteredCube = targetPrefilteredCube,
+                Width = sourceTexture.Width,
+                Height = sourceTexture.Height,
+                SourceLastWriteUtcTicks = sourceLastWriteUtcTicks
+            };
+
+            prefilteredCube = targetPrefilteredCube;
+            return true;
+        }
+
+        private void InvalidateReflectionTextureEnvironmentCache(string fullPath)
+        {
+            if (_reflectionTextureEnvironmentCache.TryGetValue(fullPath, out ReflectionTextureEnvironmentCacheEntry entry))
+            {
+                if (entry.SourceCube != 0)
+                    _gl.DeleteTexture(entry.SourceCube);
+
+                if (entry.PrefilteredCube != 0)
+                    _gl.DeleteTexture(entry.PrefilteredCube);
+
+                _reflectionTextureEnvironmentCache.Remove(fullPath);
+            }
+
+            if (_textures.TryGetValue(fullPath, out TextureInfo texture))
+            {
+                if (texture.Id != 0)
+                    _gl.DeleteTexture(texture.Id);
+
+                _textures.Remove(fullPath);
+            }
         }
 
         /// <summary>
@@ -2450,6 +2974,12 @@ namespace LimitlessSquareEngine
                 previousProjection);
 
             _capturedSkyboxReflectionValid = true;
+        }
+
+        private void UpdatePrefilteredReflectionCube()
+        {
+            if (_reflectionSkyboxCube == 0 || _reflectionPrefilteredCube == 0) return;
+            PrefilterReflectionCube(_reflectionSkyboxCube, _reflectionPrefilteredCube);
         }
 
         private void ApplyCoreSceneUniforms()
@@ -4082,6 +4612,48 @@ namespace LimitlessSquareEngine
             {
                 _gl.DeleteFramebuffer(_reflectionCaptureFramebuffer);
                 _reflectionCaptureFramebuffer = 0;
+            }
+            if (_reflectionSkyboxCube != 0)
+            {
+                _gl.DeleteTexture(_reflectionSkyboxCube);
+                _reflectionSkyboxCube = 0;
+            }
+
+            if (_reflectionPrefilteredCube != 0)
+            {
+                _gl.DeleteTexture(_reflectionPrefilteredCube);
+                _reflectionPrefilteredCube = 0;
+            }
+
+            if (_reflectionDummyCubeTexture != 0)
+            {
+                _gl.DeleteTexture(_reflectionDummyCubeTexture);
+                _reflectionDummyCubeTexture = 0;
+            }
+
+            foreach (ReflectionTextureEnvironmentCacheEntry entry in _reflectionTextureEnvironmentCache.Values)
+            {
+                if (entry.SourceCube != 0) _gl.DeleteTexture(entry.SourceCube);
+                if (entry.PrefilteredCube != 0) _gl.DeleteTexture(entry.PrefilteredCube);
+            }
+            _reflectionTextureEnvironmentCache.Clear();
+
+            if (_reflectionCaptureFramebuffer != 0)
+            {
+                _gl.DeleteFramebuffer(_reflectionCaptureFramebuffer);
+                _reflectionCaptureFramebuffer = 0;
+            }
+
+            if (_reflectionEquirectToCubeProgram != 0)
+            {
+                _gl.DeleteProgram(_reflectionEquirectToCubeProgram);
+                _reflectionEquirectToCubeProgram = 0;
+            }
+
+            if (_reflectionPrefilterProgram != 0)
+            {
+                _gl.DeleteProgram(_reflectionPrefilterProgram);
+                _reflectionPrefilterProgram = 0;
             }
 
             _reflectionCaptureInitialized = false;

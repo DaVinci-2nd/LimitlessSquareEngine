@@ -142,7 +142,7 @@ namespace LimitlessSquareEngine
     internal sealed class CameraRenderSettings
     {
         public int RenderMode { get; set; } = 0;
-        public double FovOrSize { get; set; } = 90.0;
+        public double FovOrSize { get; set; } = 75.0;
         public double NearClip { get; set; } = 0.01;
         public double FarClip { get; set; } = 1000.0;
         public int ProjectionType { get; set; } = 0;
