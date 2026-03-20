@@ -175,12 +175,39 @@ namespace LimitlessSquareEngine
             Both = 2
         }
 
+        private readonly struct MeshSurfaceData
+        {
+            public string Id { get; }
+            public float[] Vertices { get; }
+            public PrimitiveType PrimitiveType { get; }
+            public int VertexStrideFloats { get; }
+            public int MaterialSlot { get; }
+            public string? DefaultMaterialKey { get; }
+
+            public MeshSurfaceData(
+                string id,
+                float[] vertices,
+                PrimitiveType primitiveType,
+                int vertexStrideFloats,
+                int materialSlot,
+                string? defaultMaterialKey = null)
+            {
+                Id = id;
+                Vertices = vertices;
+                PrimitiveType = primitiveType;
+                VertexStrideFloats = vertexStrideFloats;
+                MaterialSlot = materialSlot;
+                DefaultMaterialKey = defaultMaterialKey;
+            }
+        }
+
         private readonly struct MeshData
         {
             public string Id { get; }
             public float[] Vertices { get; }
             public PrimitiveType PrimitiveType { get; }
             public int VertexStrideFloats { get; }
+            public MeshSurfaceData[] Surfaces { get; }
 
             public MeshData(string id, float[] vertices, PrimitiveType primitiveType, int vertexStrideFloats)
             {
@@ -188,6 +215,23 @@ namespace LimitlessSquareEngine
                 Vertices = vertices;
                 PrimitiveType = primitiveType;
                 VertexStrideFloats = vertexStrideFloats;
+                Surfaces = new[]
+                {
+                    new MeshSurfaceData(id, vertices, primitiveType, vertexStrideFloats, 0, null)
+                };
+            }
+
+            public MeshData(string id, MeshSurfaceData[] surfaces)
+            {
+                if (surfaces == null || surfaces.Length == 0)
+                    throw new ArgumentException("[X] Mesh surfaces cannot be null or empty.", nameof(surfaces));
+
+                Id = id;
+                Surfaces = surfaces;
+
+                Vertices = surfaces[0].Vertices;
+                PrimitiveType = surfaces[0].PrimitiveType;
+                VertexStrideFloats = surfaces[0].VertexStrideFloats;
             }
         }
 
@@ -649,7 +693,7 @@ namespace LimitlessSquareEngine
             public bool Active { get; init; }
             public bool Visible { get; init; }
             public string? Mesh { get; init; }
-            public string? Material { get; init; }
+            public List<string>? Materials { get; init; }
             public string RenderTag { get; init; } = "";
 
             public Double3 WorldPosition { get; init; }
@@ -2874,9 +2918,6 @@ namespace LimitlessSquareEngine
             if (key.StartsWith("Assets/", StringComparison.OrdinalIgnoreCase))
                 key = key["Assets/".Length..];
 
-            if (key.StartsWith("Materials/", StringComparison.OrdinalIgnoreCase))
-                key = key["Materials/".Length..];
-
             if (key.EndsWith(".json", StringComparison.OrdinalIgnoreCase))
                 key = key[..^5];
 
@@ -3029,27 +3070,12 @@ namespace LimitlessSquareEngine
             return GetFallbackProgram();
         }
 
-        private bool TryLoadMaterial(string materialKey, out MaterialData material)
+        private bool TryBuildMaterialDataFromJson(string materialKey, string json, out MaterialData material)
         {
             material = null;
 
-            string key = NormalizeMaterialKey(materialKey);
-
-            if (_materialCache.TryGetValue(key, out MaterialData cached))
-            {
-                material = cached;
-                return true;
-            }
-
-            if (!Program._materialFileRegistry.TryGetValue(key, out string filePath))
-                return false;
-
-            if (!File.Exists(filePath))
-                return false;
-
             try
             {
-                string json = File.ReadAllText(filePath);
                 using JsonDocument doc = JsonDocument.Parse(json);
 
                 JsonElement root = doc.RootElement;
@@ -3076,13 +3102,58 @@ namespace LimitlessSquareEngine
 
                 material = new MaterialData
                 {
-                    Id = key,
+                    Id = materialKey,
                     Program = ResolveShaderProgramOrFallback(shaderKey),
                     Parameters = parameters,
                     TextureUV = textureUV,
                     TextureWrap = textureWrap,
                     CullMode = cullMode
                 };
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[!] Failed to parse material '{materialKey}': {ex.Message}");
+                return false;
+            }
+        }
+
+        private bool TryLoadMaterial(string materialKey, out MaterialData material)
+        {
+            material = null;
+
+            string key = NormalizeMaterialKey(materialKey);
+
+            if (_materialCache.TryGetValue(key, out MaterialData cached))
+            {
+                material = cached;
+                return true;
+            }
+
+            if (Program._generatedMaterialJsonRegistry.TryGetValue(key, out string generatedJson))
+            {
+                if (TryBuildMaterialDataFromJson(key, generatedJson, out material))
+                {
+                    _materialCache[key] = material;
+                    return true;
+                }
+
+                return false;
+            }
+
+            if (!Program._materialFileRegistry.TryGetValue(key, out string filePath))
+                return false;
+
+            if (!File.Exists(filePath))
+                return false;
+
+            try
+            {
+                string json = File.ReadAllText(filePath);
+
+                if (!TryBuildMaterialDataFromJson(key, json, out material))
+                    return false;
 
                 _materialCache[key] = material;
                 return true;
@@ -3094,12 +3165,329 @@ namespace LimitlessSquareEngine
             }
         }
 
-        private MaterialData ResolveSceneMaterial(SceneObject obj)
+        private sealed class ParsedMtlMaterial
         {
-            if (!string.IsNullOrWhiteSpace(obj.Material) &&
-                TryLoadMaterial(obj.Material, out MaterialData material))
+            public string Name { get; set; } = "";
+            public Vector3 DiffuseColor { get; set; } = Vector3.One;
+            public Vector3 SpecularColor { get; set; } = Vector3.One;
+            public Vector3 AmbientColor { get; set; } = Vector3.One;
+            public float Alpha { get; set; } = 1f;
+            public float Shininess { get; set; } = 0f;
+
+            public string? DiffuseMapRaw { get; set; }
+            public string? NormalMapRaw { get; set; }
+        }
+
+        private static bool TryParseMtlFloat(string raw, out float value)
+        {
+            return float.TryParse(raw, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out value);
+        }
+
+        private static bool TryParseMtlVec3(string raw, out Vector3 value)
+        {
+            value = Vector3.One;
+
+            string[] parts = raw.Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
+            if (parts.Length < 3)
+                return false;
+
+            if (!TryParseMtlFloat(parts[0], out float x)) return false;
+            if (!TryParseMtlFloat(parts[1], out float y)) return false;
+            if (!TryParseMtlFloat(parts[2], out float z)) return false;
+
+            value = new Vector3(x, y, z);
+            return true;
+        }
+
+        private Dictionary<string, ParsedMtlMaterial> ParseMtlFile(string mtlFilePath)
+        {
+            var result = new Dictionary<string, ParsedMtlMaterial>(StringComparer.Ordinal);
+            ParsedMtlMaterial? current = null;
+
+            foreach (string rawLine in File.ReadAllLines(mtlFilePath))
             {
-                return material;
+                string line = rawLine.Trim();
+
+                if (string.IsNullOrWhiteSpace(line) || line.StartsWith("#", StringComparison.Ordinal))
+                    continue;
+
+                int split = line.IndexOfAny(new[] { ' ', '\t' });
+                string keyword = split >= 0 ? line[..split] : line;
+                string rest = split >= 0 ? line[(split + 1)..].Trim() : "";
+
+                switch (keyword)
+                {
+                    case "newmtl":
+                        if (!string.IsNullOrWhiteSpace(rest))
+                        {
+                            current = new ParsedMtlMaterial { Name = rest };
+                            result[current.Name] = current;
+                        }
+                        break;
+
+                    case "Kd":
+                        if (current != null && TryParseMtlVec3(rest, out Vector3 kd))
+                            current.DiffuseColor = kd;
+                        break;
+
+                    case "Ka":
+                        if (current != null && TryParseMtlVec3(rest, out Vector3 ka))
+                            current.AmbientColor = ka;
+                        break;
+
+                    case "Ks":
+                        if (current != null && TryParseMtlVec3(rest, out Vector3 ks))
+                            current.SpecularColor = ks;
+                        break;
+
+                    case "Ns":
+                        if (current != null && TryParseMtlFloat(rest, out float ns))
+                            current.Shininess = ns;
+                        break;
+
+                    case "d":
+                        if (current != null && TryParseMtlFloat(rest, out float d))
+                            current.Alpha = Math.Clamp(d, 0f, 1f);
+                        break;
+
+                    case "Tr":
+                        if (current != null && TryParseMtlFloat(rest, out float tr))
+                            current.Alpha = Math.Clamp(1f - tr, 0f, 1f);
+                        break;
+
+                    case "map_Kd":
+                        if (current != null)
+                            current.DiffuseMapRaw = ExtractMtlTexturePath(rest);
+                        break;
+
+                    case "map_Bump":
+                    case "map_bump":
+                    case "bump":
+                    case "norm":
+                        if (current != null)
+                            current.NormalMapRaw = ExtractMtlTexturePath(rest);
+                        break;
+                }
+            }
+
+            return result;
+        }
+
+        private string? TryResolveMtlTextureToAssetRelative(string assetsRoot, string mtlFilePath, string? rawTexturePath)
+        {
+            if (string.IsNullOrWhiteSpace(rawTexturePath))
+                return null;
+
+            string assetsRootFull = Path.GetFullPath(assetsRoot);
+            string mtlDir = Path.GetDirectoryName(mtlFilePath) ?? assetsRoot;
+
+            string fullPath = rawTexturePath!;
+            if (!Path.IsPathRooted(fullPath))
+                fullPath = Path.GetFullPath(Path.Combine(mtlDir, fullPath));
+
+            if (File.Exists(fullPath))
+            {
+                string fullNormalized = Path.GetFullPath(fullPath);
+
+                if (fullNormalized.StartsWith(assetsRootFull, StringComparison.OrdinalIgnoreCase))
+                {
+                    return Path.GetRelativePath(assetsRoot, fullNormalized).Replace('\\', '/');
+                }
+            }
+
+            string fallback = rawTexturePath!.Replace('\\', '/').Trim();
+            if (fallback.StartsWith("Assets/", StringComparison.OrdinalIgnoreCase))
+                fallback = fallback["Assets/".Length..];
+
+            return fallback;
+        }
+
+        private string BuildLitMaterialJsonFromMtl(string assetsRoot, string mtlFilePath, ParsedMtlMaterial src)
+        {
+            var parameters = new Dictionary<string, object?>();
+
+            parameters["uColor"] = new[]
+            {
+        src.DiffuseColor.X,
+        src.DiffuseColor.Y,
+        src.DiffuseColor.Z,
+        src.Alpha
+    };
+
+            if (!string.IsNullOrWhiteSpace(src.DiffuseMapRaw))
+            {
+                parameters["uUseTexture"] = 1;
+                parameters["uTexture"] = TryResolveMtlTextureToAssetRelative(assetsRoot, mtlFilePath, src.DiffuseMapRaw) ?? "";
+                parameters["uTextureUV"] = new[] { 1.0f, 1.0f };
+                parameters["uTextureWrap"] = "Repeat";
+            }
+
+            if (!string.IsNullOrWhiteSpace(src.NormalMapRaw))
+            {
+                parameters["uUseNormalTexture"] = 1;
+                parameters["uNormalTexture"] = TryResolveMtlTextureToAssetRelative(assetsRoot, mtlFilePath, src.NormalMapRaw) ?? "";
+                parameters["uNormalStrength"] = 1.0f;
+            }
+
+            float ambientStrength = Math.Clamp(
+                (src.AmbientColor.X + src.AmbientColor.Y + src.AmbientColor.Z) / 3f,
+                0f,
+                1f);
+
+            parameters["uAmbientStrength"] = ambientStrength;
+
+            float specularIntensity = Math.Clamp(
+                (src.SpecularColor.X + src.SpecularColor.Y + src.SpecularColor.Z) / 3f,
+                0f,
+                1f);
+
+            parameters["uSpecularIntensity"] = specularIntensity;
+            parameters["uSpecularColor"] = new[]
+            {
+                src.SpecularColor.X,
+                src.SpecularColor.Y,
+                src.SpecularColor.Z
+            };
+
+            float smoothness = Math.Clamp(src.Shininess / 1000f, 0f, 1f);
+            parameters["uSmoothness"] = smoothness;
+
+            var root = new Dictionary<string, object?>
+            {
+                ["assetType"] = "Material",
+                ["shader"] = "Lit",
+                ["parameters"] = parameters
+            };
+
+            return JsonSerializer.Serialize(root, new JsonSerializerOptions
+            {
+                WriteIndented = true
+            });
+        }
+
+        private string BuildGeneratedMtlMaterialKey(string assetsRoot, string mtlFilePath, string materialName)
+        {
+            string relMtl = Path.GetRelativePath(assetsRoot, mtlFilePath).Replace('\\', '/');
+            return $"{relMtl}::{materialName}";
+        }
+
+        private Dictionary<int, string> RegisterGeneratedMaterialsFromMtl(
+            string assetsRoot,
+            string objFilePath,
+            Assimp.Scene importedScene)
+        {
+            var result = new Dictionary<int, string>();
+
+            string mtlFilePath = Path.ChangeExtension(objFilePath, ".mtl");
+            if (!File.Exists(mtlFilePath))
+                return result;
+
+            Dictionary<string, ParsedMtlMaterial> parsed = ParseMtlFile(mtlFilePath);
+            if (parsed.Count == 0)
+                return result;
+
+            List<ParsedMtlMaterial> parsedInOrder = parsed.Values.ToList();
+
+            for (int i = 0; i < importedScene.MaterialCount; i++)
+            {
+                Assimp.Material? assimpMaterial = importedScene.Materials[i];
+                string assimpName = assimpMaterial?.Name?.Trim() ?? "";
+
+                ParsedMtlMaterial? src = null;
+
+                if (!string.IsNullOrWhiteSpace(assimpName) &&
+                    parsed.TryGetValue(assimpName, out ParsedMtlMaterial namedMatch))
+                {
+                    src = namedMatch;
+                }
+                else if (i >= 0 && i < parsedInOrder.Count)
+                {
+                    src = parsedInOrder[i];
+                }
+
+                if (src == null)
+                    continue;
+
+                string key = BuildGeneratedMtlMaterialKey(assetsRoot, mtlFilePath, src.Name);
+                string json = BuildLitMaterialJsonFromMtl(assetsRoot, mtlFilePath, src);
+
+                Program._generatedMaterialJsonRegistry[key] = json;
+                result[i] = key;
+
+                Console.WriteLine($"[i] Registered generated MTL material: {key}");
+            }
+
+            return result;
+        }
+
+        private static string ExtractMtlTexturePath(string raw)
+        {
+            string text = raw.Trim();
+
+            if (string.IsNullOrWhiteSpace(text))
+                return "";
+
+            int firstQuote = text.IndexOf('"');
+            int lastQuote = text.LastIndexOf('"');
+            if (firstQuote >= 0 && lastQuote > firstQuote)
+                return text.Substring(firstQuote + 1, lastQuote - firstQuote - 1);
+
+            if (!text.StartsWith("-", StringComparison.Ordinal))
+                return text;
+
+            string[] parts = text.Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
+            if (parts.Length == 0)
+                return "";
+
+            return parts[^1];
+        }
+
+        private float[] NormalizeRegisteredMeshVertices(float[] vertices, PrimitiveType primitiveType, ref int vertexStrideFloats)
+        {
+            if (vertexStrideFloats != 9 && vertexStrideFloats != 16 && vertexStrideFloats != 19)
+                throw new ArgumentException("[X] Supported mesh vertex strides are 9, 16 and 19 floats.", nameof(vertexStrideFloats));
+
+            if (vertices == null || vertices.Length == 0 || vertices.Length % vertexStrideFloats != 0)
+                throw new ArgumentException("[X] Mesh vertices must be non-empty and aligned to the declared vertex stride.", nameof(vertices));
+
+            if (vertexStrideFloats == 16 && primitiveType == PrimitiveType.Triangles)
+            {
+                vertices = BuildOutlineNormalAugmentedVertices(vertices);
+                vertexStrideFloats = 19;
+            }
+
+            return vertices;
+        }
+
+        private string? ResolveSceneMaterialKey(SceneRenderObjectSnapshot obj, MeshSurfaceData surface)
+        {
+            if (obj.Materials != null && obj.Materials.Count > 0)
+            {
+                if (surface.MaterialSlot >= 0 &&
+                    surface.MaterialSlot < obj.Materials.Count &&
+                    !string.IsNullOrWhiteSpace(obj.Materials[surface.MaterialSlot]))
+                {
+                    return obj.Materials[surface.MaterialSlot];
+                }
+
+                if (!string.IsNullOrWhiteSpace(obj.Materials[0]))
+                    return obj.Materials[0];
+            }
+
+            if (!string.IsNullOrWhiteSpace(surface.DefaultMaterialKey))
+                return surface.DefaultMaterialKey;
+
+            return null;
+        }
+
+        private MaterialData ResolveSceneMaterial(SceneRenderObjectSnapshot obj, MeshSurfaceData surface)
+        {
+            string? materialKey = ResolveSceneMaterialKey(obj, surface);
+
+            if (!string.IsNullOrWhiteSpace(materialKey) &&
+                TryLoadMaterial(materialKey, out MaterialData loaded))
+            {
+                return loaded;
             }
 
             return GetFallbackMaterial();
@@ -3527,17 +3915,25 @@ namespace LimitlessSquareEngine
 
         private string ResolveTexturePath(string rawPath)
         {
-            string normalized = rawPath.Replace('\\', '/');
+            string normalized = rawPath.Replace('\\', '/').Trim();
 
             if (Path.IsPathRooted(normalized))
                 return normalized;
 
             string assetsRoot = Path.Combine(AppContext.BaseDirectory, "Assets");
 
-            if (normalized.StartsWith("Textures/", StringComparison.OrdinalIgnoreCase))
-                return Path.Combine(assetsRoot, normalized.Replace('/', Path.DirectorySeparatorChar));
+            if (normalized.StartsWith("Assets/", StringComparison.OrdinalIgnoreCase))
+                normalized = normalized["Assets/".Length..];
 
-            return Path.Combine(assetsRoot, "Textures", normalized.Replace('/', Path.DirectorySeparatorChar));
+            string directUnderAssets = Path.Combine(assetsRoot, normalized.Replace('/', Path.DirectorySeparatorChar));
+            if (File.Exists(directUnderAssets))
+                return directUnderAssets;
+
+            string legacyUnderTextures = Path.Combine(assetsRoot, "Textures", normalized.Replace('/', Path.DirectorySeparatorChar));
+            if (File.Exists(legacyUnderTextures))
+                return legacyUnderTextures;
+
+            return directUnderAssets;
         }
 
         private bool TryReadNumericArray(JsonElement element, out double[] values)
@@ -4216,43 +4612,44 @@ namespace LimitlessSquareEngine
                     Matrix4x4.CreateFromQuaternion(obj.WorldRotation.ToSingle()) *
                     Matrix4x4.CreateTranslation((float)relativePosition.X, (float)relativePosition.Y, (float)relativePosition.Z);
 
-                MaterialData material = !string.IsNullOrWhiteSpace(obj.Material) && TryLoadMaterial(obj.Material, out var loaded)
-                    ? loaded
-                    : GetFallbackMaterial();
-
-                _renderQueue.Add(new RenderCommand
+                foreach (MeshSurfaceData surface in mesh.Surfaces)
                 {
-                    Vertices = mesh.Vertices,
-                    PrimitiveType = mesh.PrimitiveType,
-                    Program = material.Program,
-                    UseTexture = false,
-                    TextureId = 0,
-                    VertexStrideFloats = mesh.VertexStrideFloats,
-                    CameraPosition = Vector3.Zero,
-                    ClusterNear = (float)cameraItem.Settings.NearClip,
-                    ClusterFar = (float)cameraItem.Settings.FarClip,
-                    SceneId = sceneId,
-                    CameraWorldPosition = cameraWorld.Position,
-                    RenderSpace = RenderSpace.Camera,
-                    Model = model,
-                    View = view,
-                    Projection = projection,
-                    QueueType = RenderQueueType.Opaque,
-                    SortDepth = ComputeSortDepth(mesh.Vertices, mesh.VertexStrideFloats, model, view, RenderSpace.Camera),
-                    SubmissionIndex = _submissionCounter++,
-                    Pass = RenderPass.Scene,
-                    BatchId = batchId,
-                    BatchSubmissionOrder = cameraItem.SubmissionOrder,
-                    ViewportX = viewport.X,
-                    ViewportY = viewport.Y,
-                    ViewportWidth = viewport.Width,
-                    ViewportHeight = viewport.Height,
-                    Material = material,
-                    Skybox = null,
-                    ForceWhiteVertexColor = true,
-                    IsSkybox = false,
-                    CullMode = material.CullMode
-                });
+                    MaterialData material = ResolveSceneMaterial(obj, surface);
+
+                    _renderQueue.Add(new RenderCommand
+                    {
+                        Vertices = surface.Vertices,
+                        PrimitiveType = surface.PrimitiveType,
+                        Program = material.Program,
+                        UseTexture = false,
+                        TextureId = 0,
+                        VertexStrideFloats = surface.VertexStrideFloats,
+                        CameraPosition = Vector3.Zero,
+                        ClusterNear = (float)cameraItem.Settings.NearClip,
+                        ClusterFar = (float)cameraItem.Settings.FarClip,
+                        SceneId = sceneId,
+                        CameraWorldPosition = cameraWorld.Position,
+                        RenderSpace = RenderSpace.Camera,
+                        Model = model,
+                        View = view,
+                        Projection = projection,
+                        QueueType = RenderQueueType.Opaque,
+                        SortDepth = ComputeSortDepth(surface.Vertices, surface.VertexStrideFloats, model, view, RenderSpace.Camera),
+                        SubmissionIndex = _submissionCounter++,
+                        Pass = RenderPass.Scene,
+                        BatchId = batchId,
+                        BatchSubmissionOrder = cameraItem.SubmissionOrder,
+                        ViewportX = viewport.X,
+                        ViewportY = viewport.Y,
+                        ViewportWidth = viewport.Width,
+                        ViewportHeight = viewport.Height,
+                        Material = material,
+                        Skybox = null,
+                        ForceWhiteVertexColor = true,
+                        IsSkybox = false,
+                        CullMode = material.CullMode
+                    });
+                }
             }
         }
 
@@ -4611,17 +5008,7 @@ namespace LimitlessSquareEngine
             if (string.IsNullOrWhiteSpace(id))
                 throw new ArgumentException("[X] Mesh id cannot be null or empty.", nameof(id));
 
-            if (vertexStrideFloats != 9 && vertexStrideFloats != 16 && vertexStrideFloats != 19)
-                throw new ArgumentException("[X] Supported mesh vertex strides are 9, 16 and 19 floats.", nameof(vertexStrideFloats));
-
-            if (vertices == null || vertices.Length == 0 || vertices.Length % vertexStrideFloats != 0)
-                throw new ArgumentException("[X] Mesh vertices must be non-empty and aligned to the declared vertex stride.", nameof(vertices));
-
-            if (vertexStrideFloats == 16 && primitiveType == PrimitiveType.Triangles)
-            {
-                vertices = BuildOutlineNormalAugmentedVertices(vertices);
-                vertexStrideFloats = 19;
-            }
+            vertices = NormalizeRegisteredMeshVertices(vertices, primitiveType, ref vertexStrideFloats);
 
             _meshes[id] = new MeshData(id, vertices, primitiveType, vertexStrideFloats);
         }
@@ -4641,8 +5028,6 @@ namespace LimitlessSquareEngine
             if (!string.Equals(Path.GetExtension(objFilePath), ".obj", StringComparison.OrdinalIgnoreCase))
                 return;
 
-            // mesh key: 以 Assets 为根，去掉 Assets 本身和 .obj 后缀
-            // 例如 Assets/Models/Props/Crate.obj -> Models/Props/Crate
             string meshKey = Path.GetRelativePath(assetsRoot, objFilePath).Replace('\\', '/');
             if (meshKey.EndsWith(".obj", StringComparison.OrdinalIgnoreCase))
                 meshKey = meshKey[..^4];
@@ -4660,12 +5045,17 @@ namespace LimitlessSquareEngine
             if (importedScene == null || importedScene.MeshCount == 0)
                 throw new InvalidDataException($"[X] OBJ '{objFilePath}' does not contain any importable mesh.");
 
-            float[] vertices = BuildObjVerticesFromAssimpScene(importedScene, objFilePath);
+            Dictionary<int, string> generatedMaterialKeysByIndex =
+                RegisterGeneratedMaterialsFromMtl(assetsRoot, objFilePath, importedScene);
 
-            // 16 stride -> 你的 RegisterMesh 会在三角形时自动补 outline normal 成 19 stride
-            RegisterMesh(meshKey, vertices, PrimitiveType.Triangles, 16);
+            List<MeshSurfaceData> surfaces = BuildObjSurfacesFromAssimpScene(
+                importedScene,
+                objFilePath,
+                generatedMaterialKeysByIndex);
 
-            Console.WriteLine($"[i] Registered OBJ mesh: {meshKey} -> {objFilePath}");
+            _meshes[meshKey] = new MeshData(meshKey, surfaces.ToArray());
+
+            Console.WriteLine($"[i] Registered OBJ mesh: {meshKey} -> {objFilePath} ({surfaces.Count} surfaces)");
         }
 
         [MoonSharpHidden]
@@ -4690,14 +5080,21 @@ namespace LimitlessSquareEngine
             }
         }
 
-        private float[] BuildObjVerticesFromAssimpScene(Assimp.Scene importedScene, string sourcePath)
+        private List<MeshSurfaceData> BuildObjSurfacesFromAssimpScene(
+            Assimp.Scene importedScene,
+            string sourcePath,
+            Dictionary<int, string> generatedMaterialKeysByIndex)
         {
-            var vertices = new List<float>(importedScene.MeshCount * 1024);
+            var surfaces = new List<MeshSurfaceData>(importedScene.MeshCount);
 
-            foreach (Assimp.Mesh mesh in importedScene.Meshes)
+            for (int meshIndex = 0; meshIndex < importedScene.MeshCount; meshIndex++)
             {
+                Assimp.Mesh mesh = importedScene.Meshes[meshIndex];
+
                 if (mesh == null || mesh.VertexCount == 0 || mesh.FaceCount == 0)
                     continue;
+
+                var vertices = new List<float>(mesh.FaceCount * 3 * 16);
 
                 for (int faceIndex = 0; faceIndex < mesh.FaceCount; faceIndex++)
                 {
@@ -4751,12 +5148,37 @@ namespace LimitlessSquareEngine
                         vertices.Add(1f);
                     }
                 }
+
+                if (vertices.Count == 0)
+                    continue;
+
+                float[] surfaceVertices = vertices.ToArray();
+                int vertexStrideFloats = 16;
+
+                surfaceVertices = NormalizeRegisteredMeshVertices(
+                    surfaceVertices,
+                    PrimitiveType.Triangles,
+                    ref vertexStrideFloats);
+
+                string surfaceId = string.IsNullOrWhiteSpace(mesh.Name)
+                    ? $"surface_{meshIndex}"
+                    : mesh.Name;
+
+                generatedMaterialKeysByIndex.TryGetValue(mesh.MaterialIndex, out string? defaultMaterialKey);
+
+                surfaces.Add(new MeshSurfaceData(
+                    surfaceId,
+                    surfaceVertices,
+                    PrimitiveType.Triangles,
+                    vertexStrideFloats,
+                    mesh.MaterialIndex,
+                    defaultMaterialKey));
             }
 
-            if (vertices.Count == 0)
-                throw new InvalidDataException($"[X] OBJ '{sourcePath}' did not produce any triangle vertices.");
+            if (surfaces.Count == 0)
+                throw new InvalidDataException($"[X] OBJ '{sourcePath}' did not produce any triangle surfaces.");
 
-            return vertices.ToArray();
+            return surfaces;
         }
 
         private float[] BuildOutlineNormalAugmentedVertices(float[] src)

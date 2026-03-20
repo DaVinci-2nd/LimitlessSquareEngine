@@ -101,6 +101,8 @@ namespace LimitlessSquareEngine
         internal static Dictionary<string, string> _sceneFileRegistry = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         // 材质文件注册表
         internal static Dictionary<string, string> _materialFileRegistry = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        // 材质注册表
+        internal static Dictionary<string, string> _generatedMaterialJsonRegistry = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         // 场景文件验证信息
         static Dictionary<string, string> _sceneFileDisplayName = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         // 输入系统
@@ -422,11 +424,11 @@ namespace LimitlessSquareEngine
                     string uiBasePath = Path.Combine(assetsPath, "UI");
                     string texturesBasePath = Path.Combine(assetsPath, "Textures");
                     string sceneBasePath = Path.Combine(assetsPath, "Scene");
-                    string materialsBasePath = Path.Combine(assetsPath, "Materials");
 
                     _sceneFileRegistry.Clear();
                     _sceneFileDisplayName.Clear();
                     _materialFileRegistry.Clear();
+                    _generatedMaterialJsonRegistry.Clear();
 
                     _sceneFileRegistry.Clear();
                     _sceneFileDisplayName.Clear();
@@ -509,32 +511,28 @@ namespace LimitlessSquareEngine
                         }
 
                         // 材质文件
-                        if (directory.StartsWith(materialsBasePath, StringComparison.OrdinalIgnoreCase) &&
-                            Path.GetExtension(file).Equals(".json", StringComparison.OrdinalIgnoreCase))
+                        if (Path.GetExtension(file).Equals(".json", StringComparison.OrdinalIgnoreCase))
                         {
                             try
                             {
-                                if (!TryValidateMaterialFile(file, out string reason))
+                                if (TryValidateMaterialFile(file, out _))
                                 {
-                                    Console.WriteLine($"[!] Invalid material file skipped: {file} | Reason: {reason}");
+                                    string key = Path.GetRelativePath(assetsPath, file)
+                                        .Replace('\\', '/');
+
+                                    if (key.EndsWith(".json", StringComparison.OrdinalIgnoreCase))
+                                        key = key[..^5];
+
+                                    _materialFileRegistry[key] = file;
+                                    Console.WriteLine($"[i] Registered material: {key} -> {file}");
                                     continue;
                                 }
-
-                                string key = Path.GetRelativePath(materialsBasePath, file)
-                                    .Replace('\\', '/');
-
-                                if (key.EndsWith(".json", StringComparison.OrdinalIgnoreCase))
-                                    key = key[..^5];
-
-                                _materialFileRegistry[key] = file;
-                                Console.WriteLine($"[i] Registered material: {key} -> {file}");
                             }
                             catch (Exception ex)
                             {
                                 Console.WriteLine($"[!] Failed to scan material file {file}: {ex.Message}");
+                                continue;
                             }
-
-                            continue;
                         }
 
                         // 纹理文件

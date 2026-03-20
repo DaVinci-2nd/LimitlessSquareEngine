@@ -194,7 +194,7 @@ namespace LimitlessSquareEngine
         public string? Mesh { get; set; }
         public bool Visible { get; set; } = true;
         public string RenderTag { get; set; } = "";
-        public string? Material { get; set; }
+        public List<string>? Materials { get; set; }
     }
 
     public class SceneData
@@ -722,7 +722,7 @@ namespace LimitlessSquareEngine
                         Active = node.Source.Active,
                         Visible = node.Source.Visible,
                         Mesh = node.Source.Mesh,
-                        Material = node.Source.Material,
+                        Materials = node.Source.Materials,
                         RenderTag = node.Source.RenderTag,
                         WorldPosition = node.World.Position,
                         WorldRotation = node.World.Rotation,
