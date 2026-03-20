@@ -103,6 +103,8 @@ namespace LimitlessSquareEngine
         internal static Dictionary<string, string> _materialFileRegistry = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         // 材质注册表
         internal static Dictionary<string, string> _generatedMaterialJsonRegistry = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        // 纹理文件注册表
+        internal static Dictionary<string, string> _textureFileRegistry = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         // 场景文件验证信息
         static Dictionary<string, string> _sceneFileDisplayName = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         // 输入系统
@@ -153,10 +155,10 @@ namespace LimitlessSquareEngine
                 // 图标设置
                 byte[]? iconBytes = null;
                 // 搜索图标文件夹
-                string iconFolder = Path.Combine(AppContext.BaseDirectory, "Assets", "Textures", "Icon");
-                if (Directory.Exists(iconFolder))
+                string gameIconPath = Path.Combine(AppContext.BaseDirectory, "icon.png");
+                if (Directory.Exists(gameIconPath))
                 {
-                    var iconFiles = Directory.GetFiles(iconFolder, "*.*", SearchOption.TopDirectoryOnly)
+                    var iconFiles = Directory.GetFiles(gameIconPath, "*.*", SearchOption.TopDirectoryOnly)
                         .Where(f => f.EndsWith(".ico", StringComparison.OrdinalIgnoreCase) ||
                                     f.EndsWith(".png", StringComparison.OrdinalIgnoreCase))
                         .OrderBy(f => f)
@@ -281,7 +283,7 @@ namespace LimitlessSquareEngine
                         // 注入图形对象
                         instance.LuaScript.Globals["graphics"] = graphics;
                         // 注入打印输出
-                        instance.LuaScript.Globals["print"] = (Action<object>)((obj) => Console.WriteLine(obj));
+                        instance.LuaScript.Globals["print"] = (Action<object>)((obj) => Console.Write(obj));
                         // 注入纹理目录
                         Table textureTable = new Table(instance.LuaScript);
                         foreach (var path in _texturePaths)
@@ -422,13 +424,14 @@ namespace LimitlessSquareEngine
                     };
 
                     string uiBasePath = Path.Combine(assetsPath, "UI");
-                    string texturesBasePath = Path.Combine(assetsPath, "Textures");
                     string sceneBasePath = Path.Combine(assetsPath, "Scene");
 
                     _sceneFileRegistry.Clear();
                     _sceneFileDisplayName.Clear();
                     _materialFileRegistry.Clear();
                     _generatedMaterialJsonRegistry.Clear();
+                    _textureFileRegistry.Clear();
+                    _texturePaths.Clear();
 
                     _sceneFileRegistry.Clear();
                     _sceneFileDisplayName.Clear();
@@ -536,12 +539,18 @@ namespace LimitlessSquareEngine
                         }
 
                         // 纹理文件
-                        if (file.StartsWith(texturesBasePath, StringComparison.OrdinalIgnoreCase) &&
-                            Path.GetExtension(file).Equals(".png", StringComparison.OrdinalIgnoreCase))
+                        string ext = Path.GetExtension(file);
+
+                        if (ext.Equals(".png", StringComparison.OrdinalIgnoreCase) ||
+                            ext.Equals(".jpg", StringComparison.OrdinalIgnoreCase) ||
+                            ext.Equals(".jpeg", StringComparison.OrdinalIgnoreCase))
                         {
-                            string relativePath = file.Substring(texturesBasePath.Length + 1);
-                            relativePath = relativePath.Replace('\\', '/');
-                            _texturePaths.Add(relativePath);
+                            string key = Path.GetRelativePath(assetsPath, file).Replace('\\', '/');
+
+                            _textureFileRegistry[key] = file;
+                            _texturePaths.Add(key);
+
+                            Console.WriteLine($"[i] Registered texture: {key} -> {file}");
                             continue;
                         }
 

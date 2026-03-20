@@ -25,6 +25,14 @@ namespace LimitlessSquareEngine
         private float[] _dynamicGeometryScratch = Array.Empty<float>();
         private readonly Dictionary<string, MeshData> _meshes = new(StringComparer.Ordinal);
 
+        private sealed class MeshSurfaceGpuResource
+        {
+            public uint Vao { get; init; }
+            public uint Vbo { get; init; }
+        }
+
+        private readonly Dictionary<string, MeshSurfaceGpuResource> _meshSurfaceGpuCache = new(StringComparer.Ordinal);
+
         private long _sceneBatchCounter = 0;
 
         // 渲染区域
@@ -183,6 +191,8 @@ namespace LimitlessSquareEngine
             public int VertexStrideFloats { get; }
             public int MaterialSlot { get; }
             public string? DefaultMaterialKey { get; }
+            public Vector3 LocalCenter { get; }
+            public bool VertexColorsAreWhite { get; }
 
             public MeshSurfaceData(
                 string id,
@@ -190,7 +200,9 @@ namespace LimitlessSquareEngine
                 PrimitiveType primitiveType,
                 int vertexStrideFloats,
                 int materialSlot,
-                string? defaultMaterialKey = null)
+                string? defaultMaterialKey = null,
+                Vector3 localCenter = default,
+                bool vertexColorsAreWhite = false)
             {
                 Id = id;
                 Vertices = vertices;
@@ -198,6 +210,8 @@ namespace LimitlessSquareEngine
                 VertexStrideFloats = vertexStrideFloats;
                 MaterialSlot = materialSlot;
                 DefaultMaterialKey = defaultMaterialKey;
+                LocalCenter = localCenter;
+                VertexColorsAreWhite = vertexColorsAreWhite;
             }
         }
 
@@ -215,9 +229,21 @@ namespace LimitlessSquareEngine
                 Vertices = vertices;
                 PrimitiveType = primitiveType;
                 VertexStrideFloats = vertexStrideFloats;
+
+                Vector3 localCenter = Graphics.ComputeMeshLocalCenter(vertices, vertexStrideFloats);
+                bool vertexColorsAreWhite = Graphics.AreMeshVertexColorsWhite(vertices, vertexStrideFloats);
+
                 Surfaces = new[]
                 {
-                    new MeshSurfaceData(id, vertices, primitiveType, vertexStrideFloats, 0, null)
+                    new MeshSurfaceData(
+                        id,
+                        vertices,
+                        primitiveType,
+                        vertexStrideFloats,
+                        0,
+                        null,
+                        localCenter,
+                        vertexColorsAreWhite)
                 };
             }
 
@@ -432,6 +458,166 @@ namespace LimitlessSquareEngine
                 19 => _dynamicGeometryVAO19,
                 _ => throw new InvalidOperationException($"[X] Unsupported vertex stride: {vertexStrideFloats}")
             };
+        }
+
+        private static string BuildMeshSurfaceGpuKey(string meshId, string surfaceId)
+        {
+            return meshId + "::" + surfaceId;
+        }
+
+        private static Vector3 ComputeMeshLocalCenter(float[] vertices, int vertexStrideFloats)
+        {
+            int vertexCount = vertices.Length / vertexStrideFloats;
+            if (vertexCount <= 0)
+                return Vector3.Zero;
+
+            Vector3 center = Vector3.Zero;
+
+            for (int i = 0; i < vertexCount; i++)
+            {
+                int idx = i * vertexStrideFloats;
+                center += new Vector3(vertices[idx + 0], vertices[idx + 1], vertices[idx + 2]);
+            }
+
+            return center / vertexCount;
+        }
+
+        private static bool AreMeshVertexColorsWhite(float[] vertices, int vertexStrideFloats)
+        {
+            const float eps = 0.0001f;
+
+            for (int i = 0; i + 6 < vertices.Length; i += vertexStrideFloats)
+            {
+                if (MathF.Abs(vertices[i + 3] - 1f) > eps ||
+                    MathF.Abs(vertices[i + 4] - 1f) > eps ||
+                    MathF.Abs(vertices[i + 5] - 1f) > eps ||
+                    MathF.Abs(vertices[i + 6] - 1f) > eps)
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        private uint CreateStaticMeshSurfaceVAO(uint vbo, int vertexStrideFloats)
+        {
+            uint vao = _gl.GenVertexArray();
+
+            _gl.BindVertexArray(vao);
+            _gl.BindBuffer(BufferTargetARB.ArrayBuffer, vbo);
+
+            uint strideBytes = (uint)(vertexStrideFloats * sizeof(float));
+
+            _gl.VertexAttribPointer(0, 3, VertexAttribPointerType.Float, false, strideBytes, 0);
+            _gl.EnableVertexAttribArray(0);
+
+            _gl.VertexAttribPointer(1, 4, VertexAttribPointerType.Float, false, strideBytes, 3 * sizeof(float));
+            _gl.EnableVertexAttribArray(1);
+
+            _gl.VertexAttribPointer(2, 2, VertexAttribPointerType.Float, false, strideBytes, 7 * sizeof(float));
+            _gl.EnableVertexAttribArray(2);
+
+            if (vertexStrideFloats >= 16)
+            {
+                _gl.VertexAttribPointer(3, 3, VertexAttribPointerType.Float, false, strideBytes, 9 * sizeof(float));
+                _gl.EnableVertexAttribArray(3);
+
+                _gl.VertexAttribPointer(4, 4, VertexAttribPointerType.Float, false, strideBytes, 12 * sizeof(float));
+                _gl.EnableVertexAttribArray(4);
+            }
+
+            if (vertexStrideFloats >= 19)
+            {
+                _gl.VertexAttribPointer(5, 3, VertexAttribPointerType.Float, false, strideBytes, 16 * sizeof(float));
+                _gl.EnableVertexAttribArray(5);
+            }
+
+            _gl.BindBuffer(BufferTargetARB.ArrayBuffer, 0);
+            _gl.BindVertexArray(0);
+
+            return vao;
+        }
+
+        private MeshSurfaceGpuResource GetOrCreateMeshSurfaceGpuResource(
+            string meshId,
+            string surfaceId,
+            float[] vertices,
+            int vertexStrideFloats)
+        {
+            string key = BuildMeshSurfaceGpuKey(meshId, surfaceId);
+
+            if (_meshSurfaceGpuCache.TryGetValue(key, out MeshSurfaceGpuResource cached))
+                return cached;
+
+            uint vbo = _gl.GenBuffer();
+            _gl.BindBuffer(BufferTargetARB.ArrayBuffer, vbo);
+            _gl.BufferData(BufferTargetARB.ArrayBuffer, (ReadOnlySpan<float>)vertices, BufferUsageARB.StaticDraw);
+            _gl.BindBuffer(BufferTargetARB.ArrayBuffer, 0);
+
+            uint vao = CreateStaticMeshSurfaceVAO(vbo, vertexStrideFloats);
+
+            MeshSurfaceGpuResource resource = new MeshSurfaceGpuResource
+            {
+                Vao = vao,
+                Vbo = vbo
+            };
+
+            _meshSurfaceGpuCache[key] = resource;
+            return resource;
+        }
+
+        private void DeleteMeshSurfaceGpuResource(MeshSurfaceGpuResource resource)
+        {
+            if (resource.Vao != 0)
+                _gl.DeleteVertexArray(resource.Vao);
+
+            if (resource.Vbo != 0)
+                _gl.DeleteBuffer(resource.Vbo);
+        }
+
+        private void InvalidateMeshGpuResources(string meshId)
+        {
+            if (string.IsNullOrWhiteSpace(meshId))
+                return;
+
+            string prefix = meshId + "::";
+
+            List<string> keys = _meshSurfaceGpuCache.Keys
+                .Where(k => k.StartsWith(prefix, StringComparison.Ordinal))
+                .ToList();
+
+            foreach (string key in keys)
+            {
+                DeleteMeshSurfaceGpuResource(_meshSurfaceGpuCache[key]);
+                _meshSurfaceGpuCache.Remove(key);
+            }
+        }
+
+        private bool TryBindStaticCommandGeometry(in RenderCommand cmd)
+        {
+            if (string.IsNullOrWhiteSpace(cmd.MeshId) || string.IsNullOrWhiteSpace(cmd.MeshSurfaceId))
+                return false;
+
+            Vector2 uvScale = cmd.Material != null ? cmd.Material.TextureUV : Vector2.One;
+            bool needScaleUv =
+                MathF.Abs(uvScale.X - 1f) > 0.0001f ||
+                MathF.Abs(uvScale.Y - 1f) > 0.0001f;
+
+            if (needScaleUv)
+                return false;
+
+            if (cmd.ForceWhiteVertexColor && !cmd.MeshVertexColorsAreWhite)
+                return false;
+
+            MeshSurfaceGpuResource resource = GetOrCreateMeshSurfaceGpuResource(
+                cmd.MeshId,
+                cmd.MeshSurfaceId,
+                cmd.Vertices,
+                cmd.VertexStrideFloats);
+
+            _gl.BindVertexArray(resource.Vao);
+            return true;
         }
 
         private void UploadDynamicGeometry(ReadOnlySpan<float> vertices)
@@ -871,6 +1057,10 @@ namespace LimitlessSquareEngine
             public bool IsSkybox;
 
             public RenderCullMode CullMode;
+
+            public string MeshId;
+            public string MeshSurfaceId;
+            public bool MeshVertexColorsAreWhite;
         }
         private readonly List<RenderCommand> _renderQueue = new();
         private long _submissionCounter = 0;
@@ -991,6 +1181,19 @@ namespace LimitlessSquareEngine
             }
 
             Vector4 world = Vector4.Transform(new Vector4(center, 1f), model);
+            Vector4 viewPos = Vector4.Transform(world, view);
+            return -viewPos.Z;
+        }
+
+        private float ComputeSortDepth(Vector3 localCenter, Matrix4x4 model, Matrix4x4 view, RenderSpace renderSpace)
+        {
+            if (renderSpace == RenderSpace.Canvas)
+            {
+                Vector4 canvasPos = Vector4.Transform(new Vector4(localCenter, 1f), model);
+                return -canvasPos.Z;
+            }
+
+            Vector4 world = Vector4.Transform(new Vector4(localCenter, 1f), model);
             Vector4 viewPos = Vector4.Transform(world, view);
             return -viewPos.Z;
         }
@@ -2418,7 +2621,9 @@ namespace LimitlessSquareEngine
             if (string.IsNullOrWhiteSpace(mapPath))
                 return false;
 
-            string fullPath = ResolveTexturePath(mapPath);
+            if (!TryResolveTexturePath(mapPath, out string fullPath))
+                return false;
+
             if (!File.Exists(fullPath))
                 return false;
 
@@ -2699,7 +2904,12 @@ namespace LimitlessSquareEngine
                 return;
             }
 
-            string fullPath = Path.Combine(AppContext.BaseDirectory, "Assets", "Textures", texturePath);
+            if (!TryResolveTexturePath(texturePath, out string fullPath))
+            {
+                Console.WriteLine($"[X] Texture not indexed: {texturePath}");
+                return;
+            }
+
             TextureInfo tex = LoadTexture(fullPath);
             if (tex.Id == 0)
             {
@@ -2751,7 +2961,10 @@ namespace LimitlessSquareEngine
                 Skybox = null,
                 ForceWhiteVertexColor = false,
                 IsSkybox = false,
-                CullMode = _currentCullMode
+                CullMode = _currentCullMode,
+                MeshId = "",
+                MeshSurfaceId = "",
+                MeshVertexColorsAreWhite = false
             };
 
             _renderQueue.Add(cmd);
@@ -2771,7 +2984,12 @@ namespace LimitlessSquareEngine
                 return;
             }
 
-            string fullPath = Path.Combine(AppContext.BaseDirectory, "Assets", "Textures", texturePath);
+            if (!TryResolveTexturePath(texturePath, out string fullPath))
+            {
+                Console.WriteLine($"[X] Texture not indexed: {texturePath}");
+                return;
+            }
+
             TextureInfo tex = LoadTexture(fullPath);
             if (tex.Id == 0)
             {
@@ -2823,7 +3041,10 @@ namespace LimitlessSquareEngine
                 Skybox = null,
                 ForceWhiteVertexColor = false,
                 IsSkybox = false,
-                CullMode = _currentCullMode
+                CullMode = _currentCullMode,
+                MeshId = "",
+                MeshSurfaceId = "",
+                MeshVertexColorsAreWhite = false
             };
 
             _renderQueue.Add(cmd);
@@ -3176,6 +3397,7 @@ namespace LimitlessSquareEngine
 
             public string? DiffuseMapRaw { get; set; }
             public string? NormalMapRaw { get; set; }
+            public string? SpecularMapRaw { get; set; }
         }
 
         private static bool TryParseMtlFloat(string raw, out float value)
@@ -3260,6 +3482,11 @@ namespace LimitlessSquareEngine
                             current.DiffuseMapRaw = ExtractMtlTexturePath(rest);
                         break;
 
+                    case "map_Ks":
+                        if (current != null)
+                            current.SpecularMapRaw = ExtractMtlTexturePath(rest);
+                        break;
+
                     case "map_Bump":
                     case "map_bump":
                     case "bump":
@@ -3285,21 +3512,49 @@ namespace LimitlessSquareEngine
             if (!Path.IsPathRooted(fullPath))
                 fullPath = Path.GetFullPath(Path.Combine(mtlDir, fullPath));
 
-            if (File.Exists(fullPath))
-            {
-                string fullNormalized = Path.GetFullPath(fullPath);
+            if (!File.Exists(fullPath))
+                return null;
 
-                if (fullNormalized.StartsWith(assetsRootFull, StringComparison.OrdinalIgnoreCase))
-                {
-                    return Path.GetRelativePath(assetsRoot, fullNormalized).Replace('\\', '/');
-                }
-            }
+            string fullNormalized = Path.GetFullPath(fullPath);
 
-            string fallback = rawTexturePath!.Replace('\\', '/').Trim();
-            if (fallback.StartsWith("Assets/", StringComparison.OrdinalIgnoreCase))
-                fallback = fallback["Assets/".Length..];
+            if (!fullNormalized.StartsWith(assetsRootFull, StringComparison.Ordinal))
+                return null;
 
-            return fallback;
+            return Path.GetRelativePath(assetsRoot, fullNormalized).Replace('\\', '/');
+        }
+
+        private static bool IsLikelyNormalMapPath(string? rawPath)
+        {
+            if (string.IsNullOrWhiteSpace(rawPath))
+                return false;
+
+            string name = Path.GetFileNameWithoutExtension(rawPath)
+                .Replace('\\', '/')
+                .ToLowerInvariant();
+
+            return name.Contains("_nor") ||
+                   name.Contains("_nrm") ||
+                   name.Contains("_normal") ||
+                   name.EndsWith("nor") ||
+                   name.EndsWith("nrm") ||
+                   name.Contains("normal");
+        }
+
+        private static bool IsLikelyColorMapPath(string? rawPath)
+        {
+            if (string.IsNullOrWhiteSpace(rawPath))
+                return false;
+
+            string name = Path.GetFileNameWithoutExtension(rawPath)
+                .Replace('\\', '/')
+                .ToLowerInvariant();
+
+            return name.Contains("_col") ||
+                   name.Contains("_basecolor") ||
+                   name.Contains("basecolor") ||
+                   name.Contains("albedo") ||
+                   name.Contains("diffuse") ||
+                   name.EndsWith("col");
         }
 
         private string BuildLitMaterialJsonFromMtl(string assetsRoot, string mtlFilePath, ParsedMtlMaterial src)
@@ -3314,18 +3569,42 @@ namespace LimitlessSquareEngine
         src.Alpha
     };
 
-            if (!string.IsNullOrWhiteSpace(src.DiffuseMapRaw))
+            string? chosenDiffuseRaw = src.DiffuseMapRaw;
+            bool diffuseLooksNormal = IsLikelyNormalMapPath(chosenDiffuseRaw);
+            bool normalLooksNormal = IsLikelyNormalMapPath(src.NormalMapRaw);
+
+            if (diffuseLooksNormal)
+            {
+                if (IsLikelyColorMapPath(src.SpecularMapRaw))
+                    chosenDiffuseRaw = src.SpecularMapRaw;
+                else if (normalLooksNormal &&
+                         !string.IsNullOrWhiteSpace(src.NormalMapRaw) &&
+                         string.Equals(
+                             Path.GetFileName(src.DiffuseMapRaw ?? ""),
+                             Path.GetFileName(src.NormalMapRaw ?? ""),
+                             StringComparison.OrdinalIgnoreCase))
+                    chosenDiffuseRaw = null;
+            }
+
+            string? diffuseTextureKey = TryResolveMtlTextureToAssetRelative(assetsRoot, mtlFilePath, chosenDiffuseRaw);
+            if (!string.IsNullOrWhiteSpace(diffuseTextureKey))
             {
                 parameters["uUseTexture"] = 1;
-                parameters["uTexture"] = TryResolveMtlTextureToAssetRelative(assetsRoot, mtlFilePath, src.DiffuseMapRaw) ?? "";
+                parameters["uTexture"] = diffuseTextureKey;
                 parameters["uTextureUV"] = new[] { 1.0f, 1.0f };
                 parameters["uTextureWrap"] = "Repeat";
             }
 
-            if (!string.IsNullOrWhiteSpace(src.NormalMapRaw))
+            string? normalTextureRaw = src.NormalMapRaw;
+
+            if (string.IsNullOrWhiteSpace(normalTextureRaw) && IsLikelyNormalMapPath(src.DiffuseMapRaw))
+                normalTextureRaw = src.DiffuseMapRaw;
+
+            string? normalTextureKey = TryResolveMtlTextureToAssetRelative(assetsRoot, mtlFilePath, normalTextureRaw);
+            if (!string.IsNullOrWhiteSpace(normalTextureKey))
             {
                 parameters["uUseNormalTexture"] = 1;
-                parameters["uNormalTexture"] = TryResolveMtlTextureToAssetRelative(assetsRoot, mtlFilePath, src.NormalMapRaw) ?? "";
+                parameters["uNormalTexture"] = normalTextureKey;
                 parameters["uNormalStrength"] = 1.0f;
             }
 
@@ -3913,27 +4192,35 @@ namespace LimitlessSquareEngine
             return cache.SamplerUnits;
         }
 
-        private string ResolveTexturePath(string rawPath)
+        private bool TryResolveTexturePath(string rawPath, out string fullPath)
         {
-            string normalized = rawPath.Replace('\\', '/').Trim();
+            fullPath = string.Empty;
 
-            if (Path.IsPathRooted(normalized))
-                return normalized;
+            if (string.IsNullOrWhiteSpace(rawPath))
+                return false;
+
+            string key = rawPath.Replace('\\', '/').Trim();
+
+            while (key.StartsWith("/"))
+                key = key[1..];
+
+            if (key.StartsWith("Assets/", StringComparison.OrdinalIgnoreCase))
+                key = key["Assets/".Length..];
+
+            if (Program._textureFileRegistry.TryGetValue(key, out fullPath))
+                return true;
 
             string assetsRoot = Path.Combine(AppContext.BaseDirectory, "Assets");
+            string candidate = Path.GetFullPath(
+                Path.Combine(assetsRoot, key.Replace('/', Path.DirectorySeparatorChar)));
 
-            if (normalized.StartsWith("Assets/", StringComparison.OrdinalIgnoreCase))
-                normalized = normalized["Assets/".Length..];
+            if (File.Exists(candidate))
+            {
+                fullPath = candidate;
+                return true;
+            }
 
-            string directUnderAssets = Path.Combine(assetsRoot, normalized.Replace('/', Path.DirectorySeparatorChar));
-            if (File.Exists(directUnderAssets))
-                return directUnderAssets;
-
-            string legacyUnderTextures = Path.Combine(assetsRoot, "Textures", normalized.Replace('/', Path.DirectorySeparatorChar));
-            if (File.Exists(legacyUnderTextures))
-                return legacyUnderTextures;
-
-            return directUnderAssets;
+            return false;
         }
 
         private bool TryReadNumericArray(JsonElement element, out double[] values)
@@ -4134,7 +4421,14 @@ namespace LimitlessSquareEngine
                 case JsonValueKind.String:
                     if (samplerUnits.TryGetValue(uniformName, out int unit))
                     {
-                        string texturePath = ResolveTexturePath(value.GetString() ?? "");
+                        string requestedPath = value.GetString() ?? "";
+
+                        if (!TryResolveTexturePath(requestedPath, out string texturePath))
+                        {
+                            Console.WriteLine($"[X] Texture not indexed: {requestedPath}");
+                            return;
+                        }
+
                         TextureInfo tex = LoadTexture(texturePath);
 
                         if (tex.Id != 0)
@@ -4299,7 +4593,14 @@ namespace LimitlessSquareEngine
                     {
                         if (samplerUnits.TryGetValue(uniformName, out int unit))
                         {
-                            string texturePath = ResolveTexturePath(value.GetString() ?? "");
+                            string requestedPath = value.GetString() ?? "";
+
+                            if (!TryResolveTexturePath(requestedPath, out string texturePath))
+                            {
+                                Console.WriteLine($"[X] Texture not indexed: {requestedPath}");
+                                return;
+                            }
+
                             TextureInfo tex = LoadTexture(texturePath);
 
                             if (tex.Id != 0)
@@ -4430,7 +4731,15 @@ namespace LimitlessSquareEngine
                 case UIElementType.Image:
                     if (!string.IsNullOrEmpty(element.ImageSource))
                     {
-                        string fullPath = Path.Combine(AppContext.BaseDirectory, "Assets", element.ImageSource);
+                        if (!TryResolveTexturePath(element.ImageSource, out string fullPath))
+                        {
+                            SetColor(element.BackgroundColor.X, element.BackgroundColor.Y, element.BackgroundColor.Z, element.BackgroundColor.W);
+                            (float x1, float y1) = PixelToNDC(element.X, element.Y);
+                            (float x2, float y2) = PixelToNDC(element.X + element.Width, element.Y + element.Height);
+                            DrawQuad(x1, y1, 0, x2, y1, 0, x2, y2, 0, x1, y2, 0);
+                            break;
+                        }
+
                         TextureInfo tex = LoadTexture(fullPath);
                         uint texId = tex.Id;
                         if (texId != 0)
@@ -4544,17 +4853,19 @@ namespace LimitlessSquareEngine
                 if (!_meshes.TryGetValue("builtin/cube_1x1x1", out MeshData skyboxMesh))
                     throw new Exception("[X] Builtin skybox cube mesh not found.");
 
+                MeshSurfaceData skyboxSurface = skyboxMesh.Surfaces[0];
+
                 float skyboxScale = MathF.Max(1f, (float)cameraItem.Settings.FarClip * 0.5f);
                 Matrix4x4 skyboxModel = Matrix4x4.CreateScale(skyboxScale);
 
                 _renderQueue.Add(new RenderCommand
                 {
-                    Vertices = skyboxMesh.Vertices,
-                    PrimitiveType = skyboxMesh.PrimitiveType,
+                    Vertices = skyboxSurface.Vertices,
+                    PrimitiveType = skyboxSurface.PrimitiveType,
                     Program = skybox.Program,
                     UseTexture = false,
                     TextureId = 0,
-                    VertexStrideFloats = skyboxMesh.VertexStrideFloats,
+                    VertexStrideFloats = skyboxSurface.VertexStrideFloats,
                     CameraPosition = Vector3.Zero,
                     ClusterNear = (float)cameraItem.Settings.NearClip,
                     ClusterFar = (float)cameraItem.Settings.FarClip,
@@ -4578,7 +4889,10 @@ namespace LimitlessSquareEngine
                     IsSkybox = true,
                     SceneId = sceneId,
                     CameraWorldPosition = cameraWorld.Position,
-                    CullMode = skybox.CullMode
+                    CullMode = skybox.CullMode,
+                    MeshId = skyboxMesh.Id,
+                    MeshSurfaceId = skyboxSurface.Id,
+                    MeshVertexColorsAreWhite = skyboxSurface.VertexColorsAreWhite
                 });
             }
 
@@ -4634,7 +4948,7 @@ namespace LimitlessSquareEngine
                         View = view,
                         Projection = projection,
                         QueueType = RenderQueueType.Opaque,
-                        SortDepth = ComputeSortDepth(surface.Vertices, surface.VertexStrideFloats, model, view, RenderSpace.Camera),
+                        SortDepth = ComputeSortDepth(surface.LocalCenter, model, view, RenderSpace.Camera),
                         SubmissionIndex = _submissionCounter++,
                         Pass = RenderPass.Scene,
                         BatchId = batchId,
@@ -4647,7 +4961,10 @@ namespace LimitlessSquareEngine
                         Skybox = null,
                         ForceWhiteVertexColor = true,
                         IsSkybox = false,
-                        CullMode = material.CullMode
+                        CullMode = material.CullMode,
+                        MeshId = obj.Mesh ?? "",
+                        MeshSurfaceId = surface.Id,
+                        MeshVertexColorsAreWhite = surface.VertexColorsAreWhite
                     });
                 }
             }
@@ -4838,6 +5155,9 @@ namespace LimitlessSquareEngine
 
         private void BindCommandGeometry(RenderCommand cmd)
         {
+            if (TryBindStaticCommandGeometry(cmd))
+                return;
+
             InitializeDynamicGeometryResources();
 
             ReadOnlySpan<float> uploadVertices = PrepareVerticesForUpload(cmd);
@@ -5010,7 +5330,22 @@ namespace LimitlessSquareEngine
 
             vertices = NormalizeRegisteredMeshVertices(vertices, primitiveType, ref vertexStrideFloats);
 
-            _meshes[id] = new MeshData(id, vertices, primitiveType, vertexStrideFloats);
+            InvalidateMeshGpuResources(id);
+
+            Vector3 localCenter = ComputeMeshLocalCenter(vertices, vertexStrideFloats);
+            bool vertexColorsAreWhite = AreMeshVertexColorsWhite(vertices, vertexStrideFloats);
+
+            MeshSurfaceData surface = new MeshSurfaceData(
+                id,
+                vertices,
+                primitiveType,
+                vertexStrideFloats,
+                0,
+                null,
+                localCenter,
+                vertexColorsAreWhite);
+
+            _meshes[id] = new MeshData(id, new[] { surface });
         }
 
         [MoonSharpHidden]
@@ -5053,6 +5388,7 @@ namespace LimitlessSquareEngine
                 objFilePath,
                 generatedMaterialKeysByIndex);
 
+            InvalidateMeshGpuResources(meshKey);
             _meshes[meshKey] = new MeshData(meshKey, surfaces.ToArray());
 
             Console.WriteLine($"[i] Registered OBJ mesh: {meshKey} -> {objFilePath} ({surfaces.Count} surfaces)");
@@ -5166,13 +5502,18 @@ namespace LimitlessSquareEngine
 
                 generatedMaterialKeysByIndex.TryGetValue(mesh.MaterialIndex, out string? defaultMaterialKey);
 
+                Vector3 localCenter = ComputeMeshLocalCenter(surfaceVertices, vertexStrideFloats);
+                bool vertexColorsAreWhite = AreMeshVertexColorsWhite(surfaceVertices, vertexStrideFloats);
+
                 surfaces.Add(new MeshSurfaceData(
                     surfaceId,
                     surfaceVertices,
                     PrimitiveType.Triangles,
                     vertexStrideFloats,
                     mesh.MaterialIndex,
-                    defaultMaterialKey));
+                    defaultMaterialKey,
+                    localCenter,
+                    vertexColorsAreWhite));
             }
 
             if (surfaces.Count == 0)
@@ -5446,7 +5787,10 @@ namespace LimitlessSquareEngine
                 Skybox = null,
                 ForceWhiteVertexColor = false,
                 IsSkybox = false,
-                CullMode = _currentCullMode
+                CullMode = _currentCullMode,
+                MeshId = "",
+                MeshSurfaceId = "",
+                MeshVertexColorsAreWhite = false
             };
 
             _renderQueue.Add(cmd);
@@ -5644,6 +5988,12 @@ namespace LimitlessSquareEngine
                 _gl.DeleteBuffer(_dynamicGeometryVBO);
                 _dynamicGeometryVBO = 0;
             }
+
+            foreach (MeshSurfaceGpuResource resource in _meshSurfaceGpuCache.Values)
+            {
+                DeleteMeshSurfaceGpuResource(resource);
+            }
+            _meshSurfaceGpuCache.Clear();
 
             _dynamicGeometryCapacityBytes = 0;
             _dynamicGeometryScratch = Array.Empty<float>();
