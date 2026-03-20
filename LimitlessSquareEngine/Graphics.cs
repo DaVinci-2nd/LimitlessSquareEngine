@@ -17,6 +17,12 @@ namespace LimitlessSquareEngine
         private uint _quadVAO;
         private uint _quadVBO;
         private bool _quadInitialized = false;
+        private uint _dynamicGeometryVBO = 0;
+        private uint _dynamicGeometryVAO9 = 0;
+        private uint _dynamicGeometryVAO16 = 0;
+        private uint _dynamicGeometryVAO19 = 0;
+        private nuint _dynamicGeometryCapacityBytes = 0;
+        private float[] _dynamicGeometryScratch = Array.Empty<float>();
         private readonly Dictionary<string, MeshData> _meshes = new(StringComparer.Ordinal);
 
         private long _sceneBatchCounter = 0;
@@ -42,6 +48,8 @@ namespace LimitlessSquareEngine
         private uint _currentProgram;
         private readonly Dictionary<string, MaterialData> _materialCache = new(StringComparer.Ordinal);
         private readonly Dictionary<uint, List<ActiveUniformInfo>> _programUniformCache = new();
+        private readonly Dictionary<uint, ProgramUniformLocationCache> _programLocationCache = new();
+        private readonly Dictionary<uint, ProgramMaterialDefaultsCache> _programMaterialDefaultsCache = new();
         private static readonly JsonElement _emptyJsonObject = JsonDocument.Parse("{}").RootElement.Clone();
         private MaterialData _fallbackMaterial;
 
@@ -101,20 +109,34 @@ namespace LimitlessSquareEngine
         private uint _reflectionPrefilteredCube = 0;
         private uint _reflectionEquirectToCubeProgram = 0;
         private uint _reflectionPrefilterProgram = 0;
+        private const int _reflectionPrefilterSampleCount = 256;
+
+        private uint _reflectionCubeVAO = 0;
+        private uint _reflectionCubeVBO = 0;
+        private int _reflectionCubeVertexCount = 0;
+
+        private uint _reflectionHammersleyLutTexture = 0;
+
+        private int _reflectionEquirectTextureLoc = -1;
+        private int _reflectionEquirectViewsLoc = -1;
+        private int _reflectionEquirectProjectionLoc = -1;
+
+        private int _reflectionPrefilterEnvironmentLoc = -1;
+        private int _reflectionPrefilterHammersleyLoc = -1;
+        private int _reflectionPrefilterRoughnessLoc = -1;
+        private int _reflectionPrefilterViewsLoc = -1;
+        private int _reflectionPrefilterProjectionLoc = -1;
 
         private sealed class ReflectionTextureEnvironmentCacheEntry
         {
             public string SourcePath { get; init; } = "";
             public uint SourceCube { get; init; }
             public uint PrefilteredCube { get; init; }
-            public int Width { get; init; }
-            public int Height { get; init; }
             public long SourceLastWriteUtcTicks { get; init; }
         }
 
         private readonly Dictionary<string, ReflectionTextureEnvironmentCacheEntry> _reflectionTextureEnvironmentCache = new(StringComparer.Ordinal);
 
-        private long _capturedReflectionBatchId = long.MinValue;
         private bool _capturedSkyboxReflectionValid = false;
 
         private const int _gpuPointLightStrideFloats = 52;
@@ -225,6 +247,246 @@ namespace LimitlessSquareEngine
             };
         }
 
+        private void SetMatrixUniformArray(int location, Matrix4x4[] matrices)
+        {
+            if (location == -1 || matrices == null || matrices.Length == 0)
+                return;
+
+            float[] values = new float[matrices.Length * 16];
+            int offset = 0;
+
+            for (int i = 0; i < matrices.Length; i++)
+            {
+                Matrix4x4 m = matrices[i];
+
+                values[offset++] = m.M11; values[offset++] = m.M12; values[offset++] = m.M13; values[offset++] = m.M14;
+                values[offset++] = m.M21; values[offset++] = m.M22; values[offset++] = m.M23; values[offset++] = m.M24;
+                values[offset++] = m.M31; values[offset++] = m.M32; values[offset++] = m.M33; values[offset++] = m.M34;
+                values[offset++] = m.M41; values[offset++] = m.M42; values[offset++] = m.M43; values[offset++] = m.M44;
+            }
+
+            _gl.UniformMatrix4(location, (uint)matrices.Length, false, values);
+        }
+        private void InitializeReflectionCubeGeometry()
+        {
+            if (_reflectionCubeVAO != 0)
+                return;
+
+            if (!_meshes.TryGetValue("builtin/cube_1x1x1", out MeshData cubeMesh))
+                throw new Exception("[X] Builtin reflection cube mesh not found.");
+
+            _reflectionCubeVertexCount = cubeMesh.Vertices.Length / cubeMesh.VertexStrideFloats;
+
+            _reflectionCubeVAO = _gl.GenVertexArray();
+            _reflectionCubeVBO = _gl.GenBuffer();
+
+            _gl.BindVertexArray(_reflectionCubeVAO);
+            _gl.BindBuffer(BufferTargetARB.ArrayBuffer, _reflectionCubeVBO);
+            _gl.BufferData(BufferTargetARB.ArrayBuffer, (ReadOnlySpan<float>)cubeMesh.Vertices, BufferUsageARB.StaticDraw);
+
+            uint strideBytes = (uint)(cubeMesh.VertexStrideFloats * sizeof(float));
+
+            _gl.VertexAttribPointer(0, 3, VertexAttribPointerType.Float, false, strideBytes, 0);
+            _gl.EnableVertexAttribArray(0);
+
+            _gl.VertexAttribPointer(1, 4, VertexAttribPointerType.Float, false, strideBytes, 3 * sizeof(float));
+            _gl.EnableVertexAttribArray(1);
+
+            _gl.VertexAttribPointer(2, 2, VertexAttribPointerType.Float, false, strideBytes, 7 * sizeof(float));
+            _gl.EnableVertexAttribArray(2);
+
+            if (cubeMesh.VertexStrideFloats >= 16)
+            {
+                _gl.VertexAttribPointer(3, 3, VertexAttribPointerType.Float, false, strideBytes, 9 * sizeof(float));
+                _gl.EnableVertexAttribArray(3);
+
+                _gl.VertexAttribPointer(4, 4, VertexAttribPointerType.Float, false, strideBytes, 12 * sizeof(float));
+                _gl.EnableVertexAttribArray(4);
+            }
+
+            if (cubeMesh.VertexStrideFloats >= 19)
+            {
+                _gl.VertexAttribPointer(5, 3, VertexAttribPointerType.Float, false, strideBytes, 16 * sizeof(float));
+                _gl.EnableVertexAttribArray(5);
+            }
+
+            _gl.BindBuffer(BufferTargetARB.ArrayBuffer, 0);
+            _gl.BindVertexArray(0);
+        }
+
+        private void BindReflectionCubeGeometry()
+        {
+            _gl.BindVertexArray(_reflectionCubeVAO);
+        }
+
+        private void InitializeDynamicGeometryResources()
+        {
+            if (_dynamicGeometryVBO != 0)
+                return;
+
+            _dynamicGeometryVBO = _gl.GenBuffer();
+
+            _dynamicGeometryVAO9 = CreateDynamicGeometryVAO(9);
+            _dynamicGeometryVAO16 = CreateDynamicGeometryVAO(16);
+            _dynamicGeometryVAO19 = CreateDynamicGeometryVAO(19);
+        }
+
+        private uint CreateDynamicGeometryVAO(int vertexStrideFloats)
+        {
+            uint vao = _gl.GenVertexArray();
+
+            _gl.BindVertexArray(vao);
+            _gl.BindBuffer(BufferTargetARB.ArrayBuffer, _dynamicGeometryVBO);
+
+            uint strideBytes = (uint)(vertexStrideFloats * sizeof(float));
+
+            _gl.VertexAttribPointer(0, 3, VertexAttribPointerType.Float, false, strideBytes, 0);
+            _gl.EnableVertexAttribArray(0);
+
+            _gl.VertexAttribPointer(1, 4, VertexAttribPointerType.Float, false, strideBytes, 3 * sizeof(float));
+            _gl.EnableVertexAttribArray(1);
+
+            _gl.VertexAttribPointer(2, 2, VertexAttribPointerType.Float, false, strideBytes, 7 * sizeof(float));
+            _gl.EnableVertexAttribArray(2);
+
+            if (vertexStrideFloats >= 16)
+            {
+                _gl.VertexAttribPointer(3, 3, VertexAttribPointerType.Float, false, strideBytes, 9 * sizeof(float));
+                _gl.EnableVertexAttribArray(3);
+
+                _gl.VertexAttribPointer(4, 4, VertexAttribPointerType.Float, false, strideBytes, 12 * sizeof(float));
+                _gl.EnableVertexAttribArray(4);
+            }
+            else
+            {
+                _gl.DisableVertexAttribArray(3);
+                _gl.DisableVertexAttribArray(4);
+            }
+
+            if (vertexStrideFloats >= 19)
+            {
+                _gl.VertexAttribPointer(5, 3, VertexAttribPointerType.Float, false, strideBytes, 16 * sizeof(float));
+                _gl.EnableVertexAttribArray(5);
+            }
+            else
+            {
+                _gl.DisableVertexAttribArray(5);
+            }
+
+            _gl.BindBuffer(BufferTargetARB.ArrayBuffer, 0);
+            _gl.BindVertexArray(0);
+
+            return vao;
+        }
+
+        private uint GetDynamicGeometryVAO(int vertexStrideFloats)
+        {
+            return vertexStrideFloats switch
+            {
+                9 => _dynamicGeometryVAO9,
+                16 => _dynamicGeometryVAO16,
+                19 => _dynamicGeometryVAO19,
+                _ => throw new InvalidOperationException($"[X] Unsupported vertex stride: {vertexStrideFloats}")
+            };
+        }
+
+        private void UploadDynamicGeometry(ReadOnlySpan<float> vertices)
+        {
+            nuint requiredBytes = (nuint)(vertices.Length * sizeof(float));
+
+            _gl.BindBuffer(BufferTargetARB.ArrayBuffer, _dynamicGeometryVBO);
+
+            if (requiredBytes > _dynamicGeometryCapacityBytes)
+            {
+                _gl.BufferData(BufferTargetARB.ArrayBuffer, vertices, BufferUsageARB.DynamicDraw);
+                _dynamicGeometryCapacityBytes = requiredBytes;
+            }
+            else
+            {
+                _gl.BufferSubData(BufferTargetARB.ArrayBuffer, 0, vertices);
+            }
+        }
+
+        private static float RadicalInverseVdC(uint bits)
+        {
+            bits = (bits << 16) | (bits >> 16);
+            bits = ((bits & 0x55555555u) << 1) | ((bits & 0xAAAAAAAAu) >> 1);
+            bits = ((bits & 0x33333333u) << 2) | ((bits & 0xCCCCCCCCu) >> 2);
+            bits = ((bits & 0x0F0F0F0Fu) << 4) | ((bits & 0xF0F0F0F0u) >> 4);
+            bits = ((bits & 0x00FF00FFu) << 8) | ((bits & 0xFF00FF00u) >> 8);
+            return bits * 2.3283064365386963e-10f;
+        }
+
+        private float[] BuildReflectionHammersleyLutData()
+        {
+            float[] data = new float[_reflectionPrefilterSampleCount * 2];
+
+            for (uint i = 0; i < _reflectionPrefilterSampleCount; i++)
+            {
+                int idx = (int)i * 2;
+                data[idx + 0] = i / (float)_reflectionPrefilterSampleCount;
+                data[idx + 1] = RadicalInverseVdC(i);
+            }
+
+            return data;
+        }
+
+        private void InitializeReflectionHammersleyLut()
+        {
+            if (_reflectionHammersleyLutTexture != 0)
+                return;
+
+            float[] data = BuildReflectionHammersleyLutData();
+
+            _reflectionHammersleyLutTexture = _gl.GenTexture();
+            _gl.BindTexture(TextureTarget.Texture1D, _reflectionHammersleyLutTexture);
+
+            const int GL_RG32F = 0x8230;
+            const int GL_RG = 0x8227;
+
+            _gl.TexImage1D(
+                TextureTarget.Texture1D,
+                0,
+                (InternalFormat)GL_RG32F,
+                (uint)_reflectionPrefilterSampleCount,
+                0,
+                (PixelFormat)GL_RG,
+                PixelType.Float,
+                (ReadOnlySpan<float>)data);
+
+            _gl.TexParameter(TextureTarget.Texture1D, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.Nearest);
+            _gl.TexParameter(TextureTarget.Texture1D, TextureParameterName.TextureMagFilter, (int)TextureMagFilter.Nearest);
+            _gl.TexParameter(TextureTarget.Texture1D, TextureParameterName.TextureWrapS, (int)TextureWrapMode.ClampToEdge);
+
+            _gl.BindTexture(TextureTarget.Texture1D, 0);
+        }
+        private void CacheReflectionProgramUniformLocations()
+        {
+            _reflectionEquirectTextureLoc = _gl.GetUniformLocation(_reflectionEquirectToCubeProgram, "uEquirectTexture");
+            _reflectionEquirectViewsLoc = _gl.GetUniformLocation(_reflectionEquirectToCubeProgram, "uViews[0]");
+            _reflectionEquirectProjectionLoc = _gl.GetUniformLocation(_reflectionEquirectToCubeProgram, "uProjection");
+
+            _reflectionPrefilterEnvironmentLoc = _gl.GetUniformLocation(_reflectionPrefilterProgram, "uEnvironmentMap");
+            _reflectionPrefilterHammersleyLoc = _gl.GetUniformLocation(_reflectionPrefilterProgram, "uHammersleyLut");
+            _reflectionPrefilterRoughnessLoc = _gl.GetUniformLocation(_reflectionPrefilterProgram, "uRoughness");
+            _reflectionPrefilterViewsLoc = _gl.GetUniformLocation(_reflectionPrefilterProgram, "uViews[0]");
+            _reflectionPrefilterProjectionLoc = _gl.GetUniformLocation(_reflectionPrefilterProgram, "uProjection");
+        }
+        private void ApplySkyboxParametersOnly(SkyboxData skybox)
+        {
+            Dictionary<string, int> samplerUnits = ApplyMaterialDefaults(_currentProgram);
+
+            if (skybox.Parameters.ValueKind == JsonValueKind.Object)
+            {
+                foreach (JsonProperty prop in skybox.Parameters.EnumerateObject())
+                {
+                    ApplySkyboxParameter(prop.Name, prop.Value, samplerUnits);
+                }
+            }
+
+            _gl.ActiveTexture(TextureUnit.Texture0);
+        }
+
         private SkyboxData _screenSkybox;
         private readonly Dictionary<string, SkyboxData> _cameraSkyboxes = new(StringComparer.Ordinal);
 
@@ -265,6 +527,10 @@ namespace LimitlessSquareEngine
             _reflectionEquirectToCubeProgram = CreateReflectionEquirectToCubeProgram();
             _reflectionPrefilterProgram = CreateReflectionPrefilterProgram();
 
+            InitializeReflectionCubeGeometry();
+            InitializeReflectionHammersleyLut();
+            CacheReflectionProgramUniformLocations();
+
             _reflectionCaptureInitialized = true;
         }
 
@@ -280,6 +546,99 @@ namespace LimitlessSquareEngine
                 Location = location;
                 Type = type;
             }
+        }
+
+        private sealed class ProgramUniformLocationCache
+        {
+            public Dictionary<string, ActiveUniformInfo> ByName { get; } = new(StringComparer.Ordinal);
+
+            public int RenderSpace = -1;
+            public int UseTexture = -1;
+            public int Color = -1;
+            public int Model = -1;
+            public int View = -1;
+            public int Projection = -1;
+
+            public int CameraPosition = -1;
+            public int AmbientColor = -1;
+            public int AmbientIntensity = -1;
+            public int ViewportOrigin = -1;
+            public int ViewportSize = -1;
+            public int ClusterGridSize = -1;
+            public int ClusterNear = -1;
+            public int ClusterFar = -1;
+            public int LightCount = -1;
+            public int ShadowAtlasTexture = -1;
+            public int ReflectionTexture = -1;
+            public int ReflectionEnabled = -1;
+            public int ReflectionSkyboxCube = -1;
+            public int ReflectionSource = -1;
+            public int ReflectionIntensity = -1;
+            public int OutlinePass = -1;
+            public int UseOutlineNormal = -1;
+
+            public int Texture = -1;
+        }
+
+        private enum MaterialDefaultCommandKind
+        {
+            Float1 = 0,
+            Float2 = 1,
+            Float3 = 2,
+            Float4 = 3,
+            Int1 = 4,
+            Int2 = 5,
+            Int3 = 6,
+            Int4 = 7,
+            Mat4Identity = 8,
+            Sampler2D = 9
+        }
+
+        private readonly struct MaterialDefaultCommand
+        {
+            public MaterialDefaultCommandKind Kind { get; }
+            public int Location { get; }
+            public float X { get; }
+            public float Y { get; }
+            public float Z { get; }
+            public float W { get; }
+            public int IX { get; }
+            public int IY { get; }
+            public int IZ { get; }
+            public int IW { get; }
+            public int TextureUnit { get; }
+
+            public MaterialDefaultCommand(
+                MaterialDefaultCommandKind kind,
+                int location,
+                float x = 0f,
+                float y = 0f,
+                float z = 0f,
+                float w = 0f,
+                int ix = 0,
+                int iy = 0,
+                int iz = 0,
+                int iw = 0,
+                int textureUnit = -1)
+            {
+                Kind = kind;
+                Location = location;
+                X = x;
+                Y = y;
+                Z = z;
+                W = w;
+                IX = ix;
+                IY = iy;
+                IZ = iz;
+                IW = iw;
+                TextureUnit = textureUnit;
+            }
+        }
+
+        private sealed class ProgramMaterialDefaultsCache
+        {
+            public List<MaterialDefaultCommand> Commands { get; } = new();
+            public Dictionary<string, int> SamplerUnits { get; } = new(StringComparer.Ordinal);
         }
 
         internal sealed class SceneRenderObjectSnapshot
@@ -425,17 +784,7 @@ namespace LimitlessSquareEngine
 
         private bool TryGetActiveUniformExact(uint program, string uniformName, out ActiveUniformInfo uniform)
         {
-            foreach (ActiveUniformInfo item in GetActiveUniforms(program))
-            {
-                if (string.Equals(item.Name, uniformName, StringComparison.Ordinal))
-                {
-                    uniform = item;
-                    return true;
-                }
-            }
-
-            uniform = default;
-            return false;
+            return GetProgramLocationCache(program).ByName.TryGetValue(uniformName, out uniform);
         }
 
         private struct RenderCommand
@@ -482,7 +831,23 @@ namespace LimitlessSquareEngine
         private readonly List<RenderCommand> _renderQueue = new();
         private long _submissionCounter = 0;
 
-        private float[] PrepareVerticesForCommand(in RenderCommand cmd)
+        private void EnsureDynamicGeometryScratchCapacity(int requiredFloatCount)
+        {
+            if (_dynamicGeometryScratch.Length >= requiredFloatCount)
+                return;
+
+            int newSize = _dynamicGeometryScratch.Length == 0 ? requiredFloatCount : _dynamicGeometryScratch.Length;
+
+            while (newSize < requiredFloatCount)
+                newSize *= 2;
+
+            if (newSize < requiredFloatCount)
+                newSize = requiredFloatCount;
+
+            _dynamicGeometryScratch = new float[newSize];
+        }
+
+        private ReadOnlySpan<float> PrepareVerticesForUpload(in RenderCommand cmd)
         {
             bool needWhiteColor = cmd.ForceWhiteVertexColor;
 
@@ -494,10 +859,15 @@ namespace LimitlessSquareEngine
             if (!needWhiteColor && !needScaleUv)
                 return cmd.Vertices;
 
-            float[] vertices = (float[])cmd.Vertices.Clone();
+            int length = cmd.Vertices.Length;
+            EnsureDynamicGeometryScratchCapacity(length);
+
+            cmd.Vertices.AsSpan(0, length).CopyTo(_dynamicGeometryScratch.AsSpan(0, length));
+
+            Span<float> vertices = _dynamicGeometryScratch.AsSpan(0, length);
 
             // [x, y, z, r, g, b, a, u, v, ...]
-            for (int i = 0; i + 8 < vertices.Length; i += cmd.VertexStrideFloats)
+            for (int i = 0; i + 8 < length; i += cmd.VertexStrideFloats)
             {
                 if (needWhiteColor)
                 {
@@ -913,19 +1283,6 @@ namespace LimitlessSquareEngine
             return 0;
         }
 
-        private bool TryGetReflectionMapTexture(MaterialData material, out TextureInfo texture)
-        {
-            texture = default;
-
-            string mapPath = ReadMaterialString(material, "uReflectionMap", "");
-            if (string.IsNullOrWhiteSpace(mapPath))
-                return false;
-
-            string fullPath = ResolveTexturePath(mapPath);
-            texture = LoadTexture(fullPath);
-            return texture.Id != 0;
-        }
-
         private void UploadEmptyPointLightBuffer()
         {
             float[] emptyLight = new float[_gpuPointLightStrideFloats];
@@ -1051,9 +1408,9 @@ namespace LimitlessSquareEngine
         }
 
         private static void AppendGpuPointLight(
-    List<float> dst,
-    Vector3 relativePosition,
-    SceneRenderLightSnapshot light)
+            List<float> dst,
+            Vector3 relativePosition,
+            SceneRenderLightSnapshot light)
         {
             static void AddVec4(List<float> buffer, float x, float y, float z, float w)
             {
@@ -1357,57 +1714,48 @@ namespace LimitlessSquareEngine
         {
             InitializeLightingSupportResources();
 
+            ProgramUniformLocationCache loc = GetProgramLocationCache(_currentProgram);
+
             _gl.BindBufferBase(BufferTargetARB.ShaderStorageBuffer, _clusterLightBufferBinding, _clusterLightBuffer);
             _gl.BindBufferBase(BufferTargetARB.ShaderStorageBuffer, _clusterRangeBufferBinding, _clusterRangeBuffer);
             _gl.BindBufferBase(BufferTargetARB.ShaderStorageBuffer, _clusterIndexBufferBinding, _clusterIndexBuffer);
 
-            int cameraPosLoc = _gl.GetUniformLocation(_currentProgram, _uniformCameraPosition);
-            if (cameraPosLoc != -1)
-                _gl.Uniform3(cameraPosLoc, cmd.CameraPosition.X, cmd.CameraPosition.Y, cmd.CameraPosition.Z);
+            if (loc.CameraPosition != -1)
+                _gl.Uniform3(loc.CameraPosition, cmd.CameraPosition.X, cmd.CameraPosition.Y, cmd.CameraPosition.Z);
 
-            int ambientColorLoc = _gl.GetUniformLocation(_currentProgram, _uniformAmbientColor);
-            if (ambientColorLoc != -1)
-                _gl.Uniform3(ambientColorLoc, _ambientLightColor.X, _ambientLightColor.Y, _ambientLightColor.Z);
+            if (loc.AmbientColor != -1)
+                _gl.Uniform3(loc.AmbientColor, _ambientLightColor.X, _ambientLightColor.Y, _ambientLightColor.Z);
 
-            int ambientIntensityLoc = _gl.GetUniformLocation(_currentProgram, _uniformAmbientIntensity);
-            if (ambientIntensityLoc != -1)
-                _gl.Uniform1(ambientIntensityLoc, _ambientLightIntensity);
+            if (loc.AmbientIntensity != -1)
+                _gl.Uniform1(loc.AmbientIntensity, _ambientLightIntensity);
 
-            int viewportOriginLoc = _gl.GetUniformLocation(_currentProgram, _uniformViewportOrigin);
-            if (viewportOriginLoc != -1)
-                _gl.Uniform2(viewportOriginLoc, (float)cmd.ViewportX, (float)cmd.ViewportY);
+            if (loc.ViewportOrigin != -1)
+                _gl.Uniform2(loc.ViewportOrigin, (float)cmd.ViewportX, (float)cmd.ViewportY);
 
-            int viewportSizeLoc = _gl.GetUniformLocation(_currentProgram, _uniformViewportSize);
-            if (viewportSizeLoc != -1)
-                _gl.Uniform2(viewportSizeLoc, (float)cmd.ViewportWidth, (float)cmd.ViewportHeight);
+            if (loc.ViewportSize != -1)
+                _gl.Uniform2(loc.ViewportSize, (float)cmd.ViewportWidth, (float)cmd.ViewportHeight);
 
-            int clusterGridSizeLoc = _gl.GetUniformLocation(_currentProgram, _uniformClusterGridSize);
-            if (clusterGridSizeLoc != -1)
-                _gl.Uniform3(clusterGridSizeLoc, _clusterGridSizeX, _clusterGridSizeY, _clusterGridSizeZ);
+            if (loc.ClusterGridSize != -1)
+                _gl.Uniform3(loc.ClusterGridSize, _clusterGridSizeX, _clusterGridSizeY, _clusterGridSizeZ);
 
-            int clusterNearLoc = _gl.GetUniformLocation(_currentProgram, _uniformClusterNear);
-            if (clusterNearLoc != -1)
-                _gl.Uniform1(clusterNearLoc, cmd.ClusterNear);
+            if (loc.ClusterNear != -1)
+                _gl.Uniform1(loc.ClusterNear, cmd.ClusterNear);
 
-            int clusterFarLoc = _gl.GetUniformLocation(_currentProgram, _uniformClusterFar);
-            if (clusterFarLoc != -1)
-                _gl.Uniform1(clusterFarLoc, cmd.ClusterFar);
+            if (loc.ClusterFar != -1)
+                _gl.Uniform1(loc.ClusterFar, cmd.ClusterFar);
 
             int uploadedLightCount = UploadPointLightsForCommand(cmd);
 
-            int lightCountLoc = _gl.GetUniformLocation(_currentProgram, _uniformLightCount);
-            if (lightCountLoc != -1)
-                _gl.Uniform1(lightCountLoc, uploadedLightCount);
+            if (loc.LightCount != -1)
+                _gl.Uniform1(loc.LightCount, uploadedLightCount);
 
-            int shadowAtlasLoc = _gl.GetUniformLocation(_currentProgram, _uniformShadowAtlasTexture);
-            if (shadowAtlasLoc != -1)
+            if (loc.ShadowAtlasTexture != -1)
             {
                 const int shadowAtlasUnit = 13;
                 _gl.ActiveTexture((TextureUnit)((int)TextureUnit.Texture0 + shadowAtlasUnit));
                 _gl.BindTexture(TextureTarget.Texture2D, _lightingDummyTexture);
-                _gl.Uniform1(shadowAtlasLoc, shadowAtlasUnit);
+                _gl.Uniform1(loc.ShadowAtlasTexture, shadowAtlasUnit);
             }
-
 
             int reflectionSourceMode = cmd.Material != null ? ReadReflectionSourceMode(cmd.Material) : 0;
             float reflectionIntensity = cmd.Material != null ? ReadMaterialFloat(cmd.Material, "uReflectionIntensity", 1f) : 1f;
@@ -1426,15 +1774,14 @@ namespace LimitlessSquareEngine
             }
             else
             {
-                if (_capturedSkyboxReflectionValid && _capturedReflectionBatchId == cmd.BatchId)
+                if (_capturedSkyboxReflectionValid)
                 {
                     reflectionCubeToBind = _reflectionPrefilteredCube;
                     reflectionEnabled = true;
                 }
             }
 
-            int reflectionTextureLoc = _gl.GetUniformLocation(_currentProgram, _uniformReflectionTexture);
-            if (reflectionTextureLoc != -1)
+            if (loc.ReflectionTexture != -1)
             {
                 const int reflection2DUnit = 15;
                 _gl.ActiveTexture((TextureUnit)((int)TextureUnit.Texture0 + reflection2DUnit));
@@ -1444,52 +1791,28 @@ namespace LimitlessSquareEngine
                 else
                     _gl.BindTexture(TextureTarget.Texture2D, _lightingDummyTexture);
 
-                _gl.Uniform1(reflectionTextureLoc, reflection2DUnit);
+                _gl.Uniform1(loc.ReflectionTexture, reflection2DUnit);
             }
 
-            int reflectionSkyboxCubeLoc = _gl.GetUniformLocation(_currentProgram, _uniformReflectionSkyboxCube);
-            if (reflectionSkyboxCubeLoc != -1)
+            if (loc.ReflectionSkyboxCube != -1)
             {
                 const int reflectionCubeUnit = 16;
                 _gl.ActiveTexture((TextureUnit)((int)TextureUnit.Texture0 + reflectionCubeUnit));
                 _gl.BindTexture(TextureTarget.TextureCubeMap, reflectionCubeToBind);
-                _gl.Uniform1(reflectionSkyboxCubeLoc, reflectionCubeUnit);
+                _gl.Uniform1(loc.ReflectionSkyboxCube, reflectionCubeUnit);
             }
 
-            int reflectionSourceLoc = _gl.GetUniformLocation(_currentProgram, _uniformReflectionSource);
-            if (reflectionSourceLoc != -1)
-                _gl.Uniform1(reflectionSourceLoc, reflectionSourceMode);
+            if (loc.ReflectionSource != -1)
+                _gl.Uniform1(loc.ReflectionSource, reflectionSourceMode);
 
-            int reflectionEnabledLoc = _gl.GetUniformLocation(_currentProgram, _uniformReflectionEnabled);
-            if (reflectionEnabledLoc != -1)
-                _gl.Uniform1(reflectionEnabledLoc, reflectionEnabled ? 1 : 0);
+            if (loc.ReflectionEnabled != -1)
+                _gl.Uniform1(loc.ReflectionEnabled, reflectionEnabled ? 1 : 0);
 
-            int reflectionIntensityLoc = _gl.GetUniformLocation(_currentProgram, _uniformReflectionIntensity);
-            if (reflectionIntensityLoc != -1)
-                _gl.Uniform1(reflectionIntensityLoc, reflectionEnabled ? reflectionIntensity : 0f);
+            if (loc.ReflectionIntensity != -1)
+                _gl.Uniform1(loc.ReflectionIntensity, reflectionEnabled ? reflectionIntensity : 0f);
 
-            if (reflectionSkyboxCubeLoc != -1)
-            {
-                const int reflectionCubeUnit = 16;
-                _gl.ActiveTexture((TextureUnit)((int)TextureUnit.Texture0 + reflectionCubeUnit));
-
-                if (reflectionSourceMode == 0 && _capturedSkyboxReflectionValid && _capturedReflectionBatchId == cmd.BatchId)
-                {
-                    _gl.BindTexture(TextureTarget.TextureCubeMap, _reflectionPrefilteredCube);
-                    reflectionEnabled = true;
-                }
-                else
-                {
-                    _gl.BindTexture(TextureTarget.TextureCubeMap, _reflectionDummyCubeTexture);
-                }
-
-                _gl.Uniform1(reflectionSkyboxCubeLoc, reflectionCubeUnit);
-            }
-
-
-            int useOutlineNormalLoc = _gl.GetUniformLocation(_currentProgram, _uniformUseOutlineNormal);
-            if (useOutlineNormalLoc != -1)
-                _gl.Uniform1(useOutlineNormalLoc, cmd.VertexStrideFloats >= 19 ? 1 : 0);
+            if (loc.UseOutlineNormal != -1)
+                _gl.Uniform1(loc.UseOutlineNormal, cmd.VertexStrideFloats >= 19 ? 1 : 0);
 
             _gl.ActiveTexture(TextureUnit.Texture0);
         }
@@ -1559,6 +1882,7 @@ namespace LimitlessSquareEngine
         {
             if (_isInitialized) return;
             InitQuadRenderer();
+            InitializeDynamicGeometryResources();
             // 创建VAO和VBO
             _vertexArrayObject = _gl.GenVertexArray();
             _vertexBufferObject = _gl.GenBuffer();
@@ -1644,45 +1968,73 @@ namespace LimitlessSquareEngine
         private uint CreateReflectionEquirectToCubeProgram()
         {
             string vertexSource = @"#version 430 core
-layout(location = 0) in vec3 aPos;
-uniform mat4 uView;
-uniform mat4 uProjection;
-out vec3 vLocalDir;
-void main()
-{
-    vLocalDir = aPos;
-    gl_Position = uProjection * uView * vec4(aPos, 1.0);
-}";
+                layout(location = 0) in vec3 aPos;
+                out vec3 vLocalPos;
+
+                void main()
+                {
+                    vLocalPos = aPos;
+                    gl_Position = vec4(aPos, 1.0);
+                }";
+
+            string geometrySource = @"#version 430 core
+                layout(triangles) in;
+                layout(triangle_strip, max_vertices = 18) out;
+
+                in vec3 vLocalPos[];
+                out vec3 gLocalDir;
+
+                uniform mat4 uViews[6];
+                uniform mat4 uProjection;
+
+                void main()
+                {
+                    for (int face = 0; face < 6; ++face)
+                    {
+                        gl_Layer = face;
+
+                        for (int i = 0; i < 3; ++i)
+                        {
+                            gLocalDir = vLocalPos[i];
+                            gl_Position = uProjection * uViews[face] * vec4(vLocalPos[i], 1.0);
+                            EmitVertex();
+                        }
+
+                        EndPrimitive();
+                    }
+                }";
 
             string fragmentSource = @"#version 430 core
-out vec4 FragColor;
-in vec3 vLocalDir;
+                out vec4 FragColor;
+                in vec3 gLocalDir;
 
-uniform sampler2D uEquirectTexture;
+                uniform sampler2D uEquirectTexture;
 
-const vec2 InvAtan = vec2(0.15915494309189535, 0.3183098861837907);
+                const vec2 InvAtan = vec2(0.15915494309189535, 0.3183098861837907);
 
-vec2 SampleSphericalMap(vec3 v)
-{
-    vec3 d = normalize(v);
-    vec2 uv = vec2(atan(d.z, d.x), asin(clamp(d.y, -1.0, 1.0)));
-    uv *= InvAtan;
-    uv += 0.5;
-    return uv;
-}
+                vec2 SampleSphericalMap(vec3 v)
+                {
+                    vec3 d = normalize(v);
+                    vec2 uv = vec2(atan(d.z, d.x), asin(clamp(d.y, -1.0, 1.0)));
+                    uv *= InvAtan;
+                    uv += 0.5;
+                    return uv;
+                }
 
-void main()
-{
-    vec2 uv = SampleSphericalMap(normalize(vLocalDir));
-    vec3 color = texture(uEquirectTexture, uv).rgb;
-    FragColor = vec4(color, 1.0);
-}";
+                void main()
+                {
+                    vec2 uv = SampleSphericalMap(normalize(gLocalDir));
+                    vec3 color = texture(uEquirectTexture, uv).rgb;
+                    FragColor = vec4(color, 1.0);
+                }";
 
             uint vs = CompileShader(ShaderType.VertexShader, vertexSource);
+            uint gs = CompileShader(ShaderType.GeometryShader, geometrySource);
             uint fs = CompileShader(ShaderType.FragmentShader, fragmentSource);
 
             uint program = _gl.CreateProgram();
             _gl.AttachShader(program, vs);
+            _gl.AttachShader(program, gs);
             _gl.AttachShader(program, fs);
             _gl.LinkProgram(program);
 
@@ -1694,8 +2046,10 @@ void main()
             }
 
             _gl.DetachShader(program, vs);
+            _gl.DetachShader(program, gs);
             _gl.DetachShader(program, fs);
             _gl.DeleteShader(vs);
+            _gl.DeleteShader(gs);
             _gl.DeleteShader(fs);
 
             return program;
@@ -1704,98 +2058,113 @@ void main()
         private uint CreateReflectionPrefilterProgram()
         {
             string vertexSource = @"#version 430 core
-            layout(location = 0) in vec3 aPos;
-            uniform mat4 uView;
-            uniform mat4 uProjection;
-            out vec3 vLocalDir;
-            void main()
-            {
-                vLocalDir = aPos;
-                gl_Position = uProjection * uView * vec4(aPos, 1.0);
-            }";
+                layout(location = 0) in vec3 aPos;
+                out vec3 vLocalPos;
 
-                        string fragmentSource = @"#version 430 core
-            out vec4 FragColor;
-            in vec3 vLocalDir;
-
-            uniform samplerCube uEnvironmentMap;
-            uniform float uRoughness;
-
-            const float PI = 3.1415926535897932384626433832795;
-
-            float RadicalInverse_VdC(uint bits)
-            {
-                bits = (bits << 16u) | (bits >> 16u);
-                bits = ((bits & 0x55555555u) << 1u) | ((bits & 0xAAAAAAAAu) >> 1u);
-                bits = ((bits & 0x33333333u) << 2u) | ((bits & 0xCCCCCCCCu) >> 2u);
-                bits = ((bits & 0x0F0F0F0Fu) << 4u) | ((bits & 0xF0F0F0F0u) >> 4u);
-                bits = ((bits & 0x00FF00FFu) << 8u) | ((bits & 0xFF00FF00u) >> 8u);
-                return float(bits) * 2.3283064365386963e-10;
-            }
-
-            vec2 Hammersley(uint i, uint N)
-            {
-                return vec2(float(i) / float(N), RadicalInverse_VdC(i));
-            }
-
-            vec3 ImportanceSampleGGX(vec2 Xi, vec3 N, float roughness)
-            {
-                float a = max(roughness * roughness, 0.001);
-                float phi = 2.0 * PI * Xi.x;
-                float cosTheta = sqrt((1.0 - Xi.y) / (1.0 + (a * a - 1.0) * Xi.y));
-                float sinTheta = sqrt(max(1.0 - cosTheta * cosTheta, 0.0));
-
-                vec3 H;
-                H.x = cos(phi) * sinTheta;
-                H.y = sin(phi) * sinTheta;
-                H.z = cosTheta;
-
-                vec3 up = abs(N.z) < 0.999 ? vec3(0.0, 0.0, 1.0) : vec3(1.0, 0.0, 0.0);
-                vec3 tangent = normalize(cross(up, N));
-                vec3 bitangent = cross(N, tangent);
-
-                vec3 sampleVec = tangent * H.x + bitangent * H.y + N * H.z;
-                return normalize(sampleVec);
-            }
-
-            void main()
-            {
-                vec3 N = normalize(vLocalDir);
-                vec3 R = N;
-                vec3 V = R;
-
-                if (uRoughness <= 0.0001)
+                void main()
                 {
-                    FragColor = vec4(texture(uEnvironmentMap, R).rgb, 1.0);
-                    return;
-                }
+                    vLocalPos = aPos;
+                    gl_Position = vec4(aPos, 1.0);
+                }";
 
-                const uint SAMPLE_COUNT = 1024u;
-                vec3 prefilteredColor = vec3(0.0);
-                float totalWeight = 0.0;
+            string geometrySource = @"#version 430 core
+                layout(triangles) in;
+                layout(triangle_strip, max_vertices = 18) out;
 
-                for (uint i = 0u; i < SAMPLE_COUNT; ++i)
+                in vec3 vLocalPos[];
+                out vec3 gLocalDir;
+
+                uniform mat4 uViews[6];
+                uniform mat4 uProjection;
+
+                void main()
                 {
-                    vec2 Xi = Hammersley(i, SAMPLE_COUNT);
-                    vec3 H = ImportanceSampleGGX(Xi, N, uRoughness);
-                    vec3 L = normalize(2.0 * dot(V, H) * H - V);
-
-                    float NdotL = max(dot(N, L), 0.0);
-                    if (NdotL > 0.0)
+                    for (int face = 0; face < 6; ++face)
                     {
-                        prefilteredColor += texture(uEnvironmentMap, L).rgb * NdotL;
-                        totalWeight += NdotL;
-                    }
-                }
+                        gl_Layer = face;
 
-                prefilteredColor /= max(totalWeight, 0.0001);
-                FragColor = vec4(prefilteredColor, 1.0);
-            }";
+                        for (int i = 0; i < 3; ++i)
+                        {
+                            gLocalDir = vLocalPos[i];
+                            gl_Position = uProjection * uViews[face] * vec4(vLocalPos[i], 1.0);
+                            EmitVertex();
+                        }
+
+                        EndPrimitive();
+                    }
+                }";
+
+            string fragmentSource = $@"#version 430 core
+                out vec4 FragColor;
+                in vec3 gLocalDir;
+
+                uniform samplerCube uEnvironmentMap;
+                uniform sampler1D uHammersleyLut;
+                uniform float uRoughness;
+
+                const float PI = 3.1415926535897932384626433832795;
+                const int SAMPLE_COUNT = {_reflectionPrefilterSampleCount};
+
+                vec3 ImportanceSampleGGX(vec2 Xi, vec3 N, vec3 T, vec3 B, float a)
+                {{
+                    float phi = 2.0 * PI * Xi.x;
+                    float a2 = a * a;
+
+                    float cosTheta = sqrt((1.0 - Xi.y) / (1.0 + (a2 - 1.0) * Xi.y));
+                    float sinTheta = sqrt(max(1.0 - cosTheta * cosTheta, 0.0));
+
+                    vec3 Ht;
+                    Ht.x = cos(phi) * sinTheta;
+                    Ht.y = sin(phi) * sinTheta;
+                    Ht.z = cosTheta;
+
+                    return normalize(T * Ht.x + B * Ht.y + N * Ht.z);
+                }}
+
+                void main()
+                {{
+                    vec3 N = normalize(gLocalDir);
+
+                    if (uRoughness <= 0.0001)
+                    {{
+                        FragColor = vec4(texture(uEnvironmentMap, N).rgb, 1.0);
+                        return;
+                    }}
+
+                    float a = max(uRoughness * uRoughness, 0.001);
+
+                    vec3 up = abs(N.z) < 0.999 ? vec3(0.0, 0.0, 1.0) : vec3(1.0, 0.0, 0.0);
+                    vec3 T = normalize(cross(up, N));
+                    vec3 B = cross(N, T);
+
+                    vec3 prefilteredColor = vec3(0.0);
+                    float totalWeight = 0.0;
+
+                    for (int i = 0; i < SAMPLE_COUNT; ++i)
+                    {{
+                        vec2 Xi = texelFetch(uHammersleyLut, i, 0).rg;
+                        vec3 H = ImportanceSampleGGX(Xi, N, T, B, a);
+                        vec3 L = normalize(2.0 * dot(N, H) * H - N);
+
+                        float NdotL = max(dot(N, L), 0.0);
+                        if (NdotL > 0.0)
+                        {{
+                            prefilteredColor += texture(uEnvironmentMap, L).rgb * NdotL;
+                            totalWeight += NdotL;
+                        }}
+                    }}
+
+                    prefilteredColor /= max(totalWeight, 0.0001);
+                    FragColor = vec4(prefilteredColor, 1.0);
+                }}";
+
             uint vs = CompileShader(ShaderType.VertexShader, vertexSource);
+            uint gs = CompileShader(ShaderType.GeometryShader, geometrySource);
             uint fs = CompileShader(ShaderType.FragmentShader, fragmentSource);
 
             uint program = _gl.CreateProgram();
             _gl.AttachShader(program, vs);
+            _gl.AttachShader(program, gs);
             _gl.AttachShader(program, fs);
             _gl.LinkProgram(program);
 
@@ -1807,8 +2176,10 @@ void main()
             }
 
             _gl.DetachShader(program, vs);
+            _gl.DetachShader(program, gs);
             _gl.DetachShader(program, fs);
             _gl.DeleteShader(vs);
+            _gl.DeleteShader(gs);
             _gl.DeleteShader(fs);
 
             return program;
@@ -1816,46 +2187,14 @@ void main()
 
         private void RenderEquirectTextureToCube(uint equirectTextureId, uint targetCube)
         {
-            if (equirectTextureId == 0 || targetCube == 0) return;
-            if (!_meshes.TryGetValue("builtin/cube_1x1x1", out MeshData cubeMesh)) return;
+            if (equirectTextureId == 0 || targetCube == 0)
+                return;
 
             Matrix4x4 captureProjection = CreatePerspective(MathF.PI / 2f, 1f, 0.1f, 1f);
 
-            var renderCmd = new RenderCommand
-            {
-                Vertices = cubeMesh.Vertices,
-                PrimitiveType = cubeMesh.PrimitiveType,
-                Program = _reflectionEquirectToCubeProgram,
-                UseTexture = false,
-                TextureId = 0,
-                VertexStrideFloats = cubeMesh.VertexStrideFloats,
-                CameraPosition = Vector3.Zero,
-                ClusterNear = 0.1f,
-                ClusterFar = 1f,
-                RenderSpace = RenderSpace.Camera,
-                Model = Matrix4x4.Identity,
-                View = Matrix4x4.Identity,
-                Projection = captureProjection,
-                QueueType = RenderQueueType.Opaque,
-                SortDepth = 0f,
-                SubmissionIndex = 0,
-                Pass = RenderPass.Scene,
-                BatchId = -1,
-                BatchSubmissionOrder = -1,
-                ViewportX = 0,
-                ViewportY = 0,
-                ViewportWidth = _reflectionSkyboxCubeSize,
-                ViewportHeight = _reflectionSkyboxCubeSize,
-                Material = null,
-                Skybox = null,
-                ForceWhiteVertexColor = true,
-                IsSkybox = true,
-                SceneId = "",
-                CameraWorldPosition = Double3.Zero,
-                CullMode = RenderCullMode.Both
-            };
-
             _gl.BindFramebuffer(FramebufferTarget.Framebuffer, _reflectionCaptureFramebuffer);
+            _gl.FramebufferTexture(FramebufferTarget.Framebuffer, FramebufferAttachment.ColorAttachment0, targetCube, 0);
+
             _gl.Viewport(0, 0, (uint)_reflectionSkyboxCubeSize, (uint)_reflectionSkyboxCubeSize);
             _gl.Disable(GLEnum.ScissorTest);
             _gl.Disable(GLEnum.Blend);
@@ -1866,41 +2205,28 @@ void main()
             _currentProgram = _reflectionEquirectToCubeProgram;
             _gl.UseProgram(_reflectionEquirectToCubeProgram);
 
-            int texLoc = _gl.GetUniformLocation(_reflectionEquirectToCubeProgram, "uEquirectTexture");
-            int viewLoc = _gl.GetUniformLocation(_reflectionEquirectToCubeProgram, "uView");
-            int projLoc = _gl.GetUniformLocation(_reflectionEquirectToCubeProgram, "uProjection");
-
             _gl.ActiveTexture(TextureUnit.Texture0);
             _gl.BindTexture(TextureTarget.Texture2D, equirectTextureId);
-            if (texLoc != -1) _gl.Uniform1(texLoc, 0);
-            if (projLoc != -1) SetMatrixUniform(projLoc, captureProjection);
 
-            for (int face = 0; face < 6; face++)
-            {
-                TextureTarget faceTarget = (TextureTarget)((int)TextureTarget.TextureCubeMapPositiveX + face);
-                _gl.FramebufferTexture2D(
-                    FramebufferTarget.Framebuffer,
-                    FramebufferAttachment.ColorAttachment0,
-                    faceTarget,
-                    targetCube,
-                    0);
+            if (_reflectionEquirectTextureLoc != -1)
+                _gl.Uniform1(_reflectionEquirectTextureLoc, 0);
 
-                _gl.ClearColor(0f, 0f, 0f, 1f);
-                _gl.Clear(ClearBufferMask.ColorBufferBit);
+            if (_reflectionEquirectProjectionLoc != -1)
+                SetMatrixUniform(_reflectionEquirectProjectionLoc, captureProjection);
 
-                if (viewLoc != -1) SetMatrixUniform(viewLoc, _reflectionCaptureViews[face]);
+            if (_reflectionEquirectViewsLoc != -1)
+                SetMatrixUniformArray(_reflectionEquirectViewsLoc, _reflectionCaptureViews);
 
-                _activeRenderSpace = RenderSpace.Camera;
-                _activeModelMatrix = Matrix4x4.Identity;
-                _activeViewMatrix = _reflectionCaptureViews[face];
-                _activeProjectionMatrix = captureProjection;
+            _gl.ClearColor(0f, 0f, 0f, 1f);
+            _gl.Clear(ClearBufferMask.ColorBufferBit);
 
-                BindCommandGeometry(renderCmd);
-                _gl.DrawArrays(
-                    renderCmd.PrimitiveType,
-                    0,
-                    (uint)(renderCmd.Vertices.Length / renderCmd.VertexStrideFloats));
-            }
+            _activeRenderSpace = RenderSpace.Camera;
+            _activeModelMatrix = Matrix4x4.Identity;
+            _activeViewMatrix = Matrix4x4.Identity;
+            _activeProjectionMatrix = captureProjection;
+
+            BindReflectionCubeGeometry();
+            _gl.DrawArrays(PrimitiveType.Triangles, 0, (uint)_reflectionCubeVertexCount);
 
             _gl.ActiveTexture(TextureUnit.Texture0);
             _gl.BindTexture(TextureTarget.Texture2D, 0);
@@ -1908,8 +2234,8 @@ void main()
 
         private void PrefilterReflectionCube(uint sourceCube, uint targetCube)
         {
-            if (sourceCube == 0 || targetCube == 0) return;
-            if (!_meshes.TryGetValue("builtin/cube_1x1x1", out MeshData cubeMesh)) return;
+            if (sourceCube == 0 || targetCube == 0)
+                return;
 
             int mipLevels = GetReflectionCubeMipCount();
 
@@ -1935,40 +2261,6 @@ void main()
 
             Matrix4x4 captureProjection = CreatePerspective(MathF.PI / 2f, 1f, 0.1f, 1f);
 
-            var renderCmd = new RenderCommand
-            {
-                Vertices = cubeMesh.Vertices,
-                PrimitiveType = cubeMesh.PrimitiveType,
-                Program = _reflectionPrefilterProgram,
-                UseTexture = false,
-                TextureId = 0,
-                VertexStrideFloats = cubeMesh.VertexStrideFloats,
-                CameraPosition = Vector3.Zero,
-                ClusterNear = 0.1f,
-                ClusterFar = 1f,
-                RenderSpace = RenderSpace.Camera,
-                Model = Matrix4x4.Identity,
-                View = Matrix4x4.Identity,
-                Projection = captureProjection,
-                QueueType = RenderQueueType.Opaque,
-                SortDepth = 0f,
-                SubmissionIndex = 0,
-                Pass = RenderPass.Scene,
-                BatchId = -1,
-                BatchSubmissionOrder = -1,
-                ViewportX = 0,
-                ViewportY = 0,
-                ViewportWidth = _reflectionSkyboxCubeSize,
-                ViewportHeight = _reflectionSkyboxCubeSize,
-                Material = null,
-                Skybox = null,
-                ForceWhiteVertexColor = true,
-                IsSkybox = true,
-                SceneId = "",
-                CameraWorldPosition = Double3.Zero,
-                CullMode = RenderCullMode.Both
-            };
-
             _gl.BindFramebuffer(FramebufferTarget.Framebuffer, _reflectionCaptureFramebuffer);
             _gl.Disable(GLEnum.ScissorTest);
             _gl.Disable(GLEnum.Blend);
@@ -1979,15 +2271,30 @@ void main()
             _currentProgram = _reflectionPrefilterProgram;
             _gl.UseProgram(_reflectionPrefilterProgram);
 
-            int envLoc = _gl.GetUniformLocation(_reflectionPrefilterProgram, "uEnvironmentMap");
-            int roughnessLoc = _gl.GetUniformLocation(_reflectionPrefilterProgram, "uRoughness");
-            int viewLoc = _gl.GetUniformLocation(_reflectionPrefilterProgram, "uView");
-            int projLoc = _gl.GetUniformLocation(_reflectionPrefilterProgram, "uProjection");
-
             _gl.ActiveTexture(TextureUnit.Texture0);
             _gl.BindTexture(TextureTarget.TextureCubeMap, sourceCube);
-            if (envLoc != -1) _gl.Uniform1(envLoc, 0);
-            if (projLoc != -1) SetMatrixUniform(projLoc, captureProjection);
+
+            _gl.ActiveTexture((TextureUnit)((int)TextureUnit.Texture0 + 1));
+            _gl.BindTexture(TextureTarget.Texture1D, _reflectionHammersleyLutTexture);
+
+            if (_reflectionPrefilterEnvironmentLoc != -1)
+                _gl.Uniform1(_reflectionPrefilterEnvironmentLoc, 0);
+
+            if (_reflectionPrefilterHammersleyLoc != -1)
+                _gl.Uniform1(_reflectionPrefilterHammersleyLoc, 1);
+
+            if (_reflectionPrefilterProjectionLoc != -1)
+                SetMatrixUniform(_reflectionPrefilterProjectionLoc, captureProjection);
+
+            if (_reflectionPrefilterViewsLoc != -1)
+                SetMatrixUniformArray(_reflectionPrefilterViewsLoc, _reflectionCaptureViews);
+
+            _activeRenderSpace = RenderSpace.Camera;
+            _activeModelMatrix = Matrix4x4.Identity;
+            _activeViewMatrix = Matrix4x4.Identity;
+            _activeProjectionMatrix = captureProjection;
+
+            BindReflectionCubeGeometry();
 
             for (int mip = 1; mip < mipLevels; mip++)
             {
@@ -1995,36 +2302,20 @@ void main()
                 float mipT = mip / (float)(mipLevels - 1);
                 float roughness = mipT * mipT;
 
+                _gl.FramebufferTexture(FramebufferTarget.Framebuffer, FramebufferAttachment.ColorAttachment0, targetCube, mip);
                 _gl.Viewport(0, 0, (uint)mipSize, (uint)mipSize);
-                if (roughnessLoc != -1) _gl.Uniform1(roughnessLoc, roughness);
 
-                for (int face = 0; face < 6; face++)
-                {
-                    TextureTarget faceTarget = (TextureTarget)((int)TextureTarget.TextureCubeMapPositiveX + face);
-                    _gl.FramebufferTexture2D(
-                        (GLEnum)FramebufferTarget.Framebuffer,
-                        (GLEnum)FramebufferAttachment.ColorAttachment0,
-                        (GLEnum)faceTarget,
-                        targetCube,
-                        mip);
+                if (_reflectionPrefilterRoughnessLoc != -1)
+                    _gl.Uniform1(_reflectionPrefilterRoughnessLoc, roughness);
 
-                    _gl.ClearColor(0f, 0f, 0f, 1f);
-                    _gl.Clear(ClearBufferMask.ColorBufferBit);
+                _gl.ClearColor(0f, 0f, 0f, 1f);
+                _gl.Clear(ClearBufferMask.ColorBufferBit);
 
-                    if (viewLoc != -1) SetMatrixUniform(viewLoc, _reflectionCaptureViews[face]);
-
-                    _activeRenderSpace = RenderSpace.Camera;
-                    _activeModelMatrix = Matrix4x4.Identity;
-                    _activeViewMatrix = _reflectionCaptureViews[face];
-                    _activeProjectionMatrix = captureProjection;
-
-                    BindCommandGeometry(renderCmd);
-                    _gl.DrawArrays(
-                        renderCmd.PrimitiveType,
-                        0,
-                        (uint)(renderCmd.Vertices.Length / renderCmd.VertexStrideFloats));
-                }
+                _gl.DrawArrays(PrimitiveType.Triangles, 0, (uint)_reflectionCubeVertexCount);
             }
+
+            _gl.ActiveTexture((TextureUnit)((int)TextureUnit.Texture0 + 1));
+            _gl.BindTexture(TextureTarget.Texture1D, 0);
 
             _gl.ActiveTexture(TextureUnit.Texture0);
             _gl.BindTexture(TextureTarget.TextureCubeMap, 0);
@@ -2065,8 +2356,6 @@ void main()
             _gl.ActiveTexture(TextureUnit.Texture0);
             _gl.BindTexture(TextureTarget.Texture2D, 0);
             _gl.BindTexture(TextureTarget.TextureCubeMap, 0);
-
-            BindCommandGeometry(cmd);
         }
 
         private bool TryGetReflectionEnvironmentCube(
@@ -2134,8 +2423,6 @@ void main()
                 SourcePath = fullPath,
                 SourceCube = sourceCube,
                 PrefilteredCube = targetPrefilteredCube,
-                Width = sourceTexture.Width,
-                Height = sourceTexture.Height,
                 SourceLastWriteUtcTicks = sourceLastWriteUtcTicks
             };
 
@@ -2361,7 +2648,7 @@ void main()
         {
             EnsureLuaCanvasMode();
 
-            int texLoc = _gl.GetUniformLocation(_currentProgram, "uTexture");
+            int texLoc = GetProgramLocationCache(_currentProgram).Texture;
             if (texLoc == -1)
             {
                 Console.WriteLine("[X] Current shader does not support texture");
@@ -2433,7 +2720,7 @@ void main()
         {
             EnsureLuaCanvasMode();
 
-            int texLoc = _gl.GetUniformLocation(_currentProgram, "uTexture");
+            int texLoc = GetProgramLocationCache(_currentProgram).Texture;
             if (texLoc == -1)
             {
                 Console.WriteLine("[X] Current shader does not support texture");
@@ -2842,6 +3129,222 @@ void main()
             return result;
         }
 
+        private ProgramUniformLocationCache GetProgramLocationCache(uint program)
+        {
+            if (_programLocationCache.TryGetValue(program, out ProgramUniformLocationCache cached))
+                return cached;
+
+            ProgramUniformLocationCache cache = new ProgramUniformLocationCache();
+
+            foreach (ActiveUniformInfo uniform in GetActiveUniforms(program))
+            {
+                cache.ByName[uniform.Name] = uniform;
+            }
+
+            int GetLoc(string name)
+            {
+                return cache.ByName.TryGetValue(name, out ActiveUniformInfo info) ? info.Location : -1;
+            }
+
+            cache.RenderSpace = GetLoc("uRenderSpace");
+            cache.UseTexture = GetLoc("uUseTexture");
+            cache.Color = GetLoc("uColor");
+            cache.Model = GetLoc("uModel");
+            cache.View = GetLoc("uView");
+            cache.Projection = GetLoc("uProjection");
+
+            cache.CameraPosition = GetLoc(_uniformCameraPosition);
+            cache.AmbientColor = GetLoc(_uniformAmbientColor);
+            cache.AmbientIntensity = GetLoc(_uniformAmbientIntensity);
+            cache.ViewportOrigin = GetLoc(_uniformViewportOrigin);
+            cache.ViewportSize = GetLoc(_uniformViewportSize);
+            cache.ClusterGridSize = GetLoc(_uniformClusterGridSize);
+            cache.ClusterNear = GetLoc(_uniformClusterNear);
+            cache.ClusterFar = GetLoc(_uniformClusterFar);
+            cache.LightCount = GetLoc(_uniformLightCount);
+            cache.ShadowAtlasTexture = GetLoc(_uniformShadowAtlasTexture);
+            cache.ReflectionTexture = GetLoc(_uniformReflectionTexture);
+            cache.ReflectionEnabled = GetLoc(_uniformReflectionEnabled);
+            cache.ReflectionSkyboxCube = GetLoc(_uniformReflectionSkyboxCube);
+            cache.ReflectionSource = GetLoc(_uniformReflectionSource);
+            cache.ReflectionIntensity = GetLoc(_uniformReflectionIntensity);
+            cache.OutlinePass = GetLoc(_uniformOutlinePass);
+            cache.UseOutlineNormal = GetLoc(_uniformUseOutlineNormal);
+
+            cache.Texture = GetLoc("uTexture");
+
+            _programLocationCache[program] = cache;
+            return cache;
+        }
+
+        private ProgramMaterialDefaultsCache GetProgramMaterialDefaultsCache(uint program)
+        {
+            if (_programMaterialDefaultsCache.TryGetValue(program, out ProgramMaterialDefaultsCache cached))
+                return cached;
+
+            ProgramMaterialDefaultsCache cache = new ProgramMaterialDefaultsCache();
+            int nextSamplerUnit = 0;
+
+            foreach (ActiveUniformInfo uniform in GetActiveUniforms(program))
+            {
+                if (uniform.Location == -1)
+                    continue;
+
+                if (IsEngineManagedUniform(uniform.Name))
+                    continue;
+
+                switch (uniform.Type)
+                {
+                    case UniformType.Float:
+                        if (string.Equals(uniform.Name, "uNormalStrength", StringComparison.Ordinal))
+                        {
+                            cache.Commands.Add(new MaterialDefaultCommand(
+                                MaterialDefaultCommandKind.Float1,
+                                uniform.Location,
+                                x: 1f));
+                        }
+                        else if (string.Equals(uniform.Name, "uAmbientStrength", StringComparison.Ordinal))
+                        {
+                            cache.Commands.Add(new MaterialDefaultCommand(
+                                MaterialDefaultCommandKind.Float1,
+                                uniform.Location,
+                                x: 1f));
+                        }
+                        else if (string.Equals(uniform.Name, "uAlphaCutoff", StringComparison.Ordinal))
+                        {
+                            cache.Commands.Add(new MaterialDefaultCommand(
+                                MaterialDefaultCommandKind.Float1,
+                                uniform.Location,
+                                x: 0.5f));
+                        }
+                        else if (string.Equals(uniform.Name, "uSpecularRange", StringComparison.Ordinal) ||
+                                 string.Equals(uniform.Name, "uRimRange", StringComparison.Ordinal))
+                        {
+                            cache.Commands.Add(new MaterialDefaultCommand(
+                                MaterialDefaultCommandKind.Float1,
+                                uniform.Location,
+                                x: 0.5f));
+                        }
+                        else
+                        {
+                            cache.Commands.Add(new MaterialDefaultCommand(
+                                MaterialDefaultCommandKind.Float1,
+                                uniform.Location,
+                                x: 0f));
+                        }
+                        break;
+
+                    case UniformType.FloatVec2:
+                        cache.Commands.Add(new MaterialDefaultCommand(
+                            MaterialDefaultCommandKind.Float2,
+                            uniform.Location,
+                            x: 0f,
+                            y: 0f));
+                        break;
+
+                    case UniformType.FloatVec3:
+                        cache.Commands.Add(new MaterialDefaultCommand(
+                            MaterialDefaultCommandKind.Float3,
+                            uniform.Location,
+                            x: 0f,
+                            y: 0f,
+                            z: 0f));
+                        break;
+
+                    case UniformType.FloatVec4:
+                        if (string.Equals(uniform.Name, "uColor", StringComparison.Ordinal))
+                        {
+                            cache.Commands.Add(new MaterialDefaultCommand(
+                                MaterialDefaultCommandKind.Float4,
+                                uniform.Location,
+                                x: 1f,
+                                y: 1f,
+                                z: 1f,
+                                w: 1f));
+                        }
+                        else
+                        {
+                            cache.Commands.Add(new MaterialDefaultCommand(
+                                MaterialDefaultCommandKind.Float4,
+                                uniform.Location,
+                                x: 0.5f,
+                                y: 0.5f,
+                                z: 0.5f,
+                                w: 1f));
+                        }
+                        break;
+
+                    case UniformType.Int:
+                    case UniformType.Bool:
+                        if (string.Equals(uniform.Name, "uReceiveShadow", StringComparison.Ordinal) ||
+                            string.Equals(uniform.Name, "uCastShadow", StringComparison.Ordinal) ||
+                            string.Equals(uniform.Name, "uReceiveReflection", StringComparison.Ordinal))
+                        {
+                            cache.Commands.Add(new MaterialDefaultCommand(
+                                MaterialDefaultCommandKind.Int1,
+                                uniform.Location,
+                                ix: 1));
+                        }
+                        else
+                        {
+                            cache.Commands.Add(new MaterialDefaultCommand(
+                                MaterialDefaultCommandKind.Int1,
+                                uniform.Location,
+                                ix: 0));
+                        }
+                        break;
+
+                    case UniformType.IntVec2:
+                    case UniformType.BoolVec2:
+                        cache.Commands.Add(new MaterialDefaultCommand(
+                            MaterialDefaultCommandKind.Int2,
+                            uniform.Location,
+                            ix: 0,
+                            iy: 0));
+                        break;
+
+                    case UniformType.IntVec3:
+                    case UniformType.BoolVec3:
+                        cache.Commands.Add(new MaterialDefaultCommand(
+                            MaterialDefaultCommandKind.Int3,
+                            uniform.Location,
+                            ix: 0,
+                            iy: 0,
+                            iz: 0));
+                        break;
+
+                    case UniformType.IntVec4:
+                    case UniformType.BoolVec4:
+                        cache.Commands.Add(new MaterialDefaultCommand(
+                            MaterialDefaultCommandKind.Int4,
+                            uniform.Location,
+                            ix: 0,
+                            iy: 0,
+                            iz: 0,
+                            iw: 0));
+                        break;
+
+                    case UniformType.FloatMat4:
+                        cache.Commands.Add(new MaterialDefaultCommand(
+                            MaterialDefaultCommandKind.Mat4Identity,
+                            uniform.Location));
+                        break;
+
+                    case UniformType.Sampler2D:
+                        cache.SamplerUnits[uniform.Name] = nextSamplerUnit;
+                        cache.Commands.Add(new MaterialDefaultCommand(
+                            MaterialDefaultCommandKind.Sampler2D,
+                            uniform.Location,
+                            textureUnit: nextSamplerUnit));
+                        nextSamplerUnit++;
+                        break;
+                }
+            }
+
+            _programMaterialDefaultsCache[program] = cache;
+            return cache;
+        }
+
         private bool IsEngineManagedUniform(string uniformName)
         {
             return string.Equals(uniformName, "uRenderSpace", StringComparison.Ordinal) ||
@@ -2871,14 +3374,13 @@ void main()
         {
             InitializeReflectionCaptureResources();
 
-            _capturedReflectionBatchId = batchCmd.BatchId;
-            _capturedSkyboxReflectionValid = false;
-
             if (skybox == null)
+            {
+                _capturedSkyboxReflectionValid = false;
                 return;
+            }
 
-            if (!_meshes.TryGetValue("builtin/cube_1x1x1", out MeshData skyboxMesh))
-                return;
+            _capturedSkyboxReflectionValid = false;
 
             uint previousProgram = _currentProgram;
             RenderSpace previousRenderSpace = _activeRenderSpace;
@@ -2889,40 +3391,6 @@ void main()
             Matrix4x4 captureProjection = CreatePerspective(MathF.PI / 2f, 1f, 0.1f, MathF.Max(1f, batchCmd.ClusterFar));
             Matrix4x4 captureModel = Matrix4x4.CreateScale(MathF.Max(1f, batchCmd.ClusterFar * 0.5f));
 
-            var captureCmd = new RenderCommand
-            {
-                Vertices = skyboxMesh.Vertices,
-                PrimitiveType = skyboxMesh.PrimitiveType,
-                Program = skybox.Program,
-                UseTexture = false,
-                TextureId = 0,
-                VertexStrideFloats = skyboxMesh.VertexStrideFloats,
-                CameraPosition = Vector3.Zero,
-                ClusterNear = 0.1f,
-                ClusterFar = MathF.Max(1f, batchCmd.ClusterFar),
-                RenderSpace = RenderSpace.Camera,
-                Model = captureModel,
-                View = Matrix4x4.Identity,
-                Projection = captureProjection,
-                QueueType = RenderQueueType.Opaque,
-                SortDepth = 0f,
-                SubmissionIndex = 0,
-                Pass = RenderPass.Scene,
-                BatchId = batchCmd.BatchId,
-                BatchSubmissionOrder = batchCmd.BatchSubmissionOrder,
-                ViewportX = 0,
-                ViewportY = 0,
-                ViewportWidth = _reflectionSkyboxCubeSize,
-                ViewportHeight = _reflectionSkyboxCubeSize,
-                Material = null,
-                Skybox = skybox,
-                ForceWhiteVertexColor = true,
-                IsSkybox = true,
-                SceneId = batchCmd.SceneId,
-                CameraWorldPosition = Double3.Zero,
-                CullMode = skybox.CullMode
-            };
-
             _gl.BindFramebuffer(FramebufferTarget.Framebuffer, _reflectionCaptureFramebuffer);
             _gl.Viewport(0, 0, (uint)_reflectionSkyboxCubeSize, (uint)_reflectionSkyboxCubeSize);
 
@@ -2930,6 +3398,13 @@ void main()
             _gl.Disable(GLEnum.Blend);
             _gl.Disable(GLEnum.DepthTest);
             _gl.DepthMask(false);
+
+            _currentProgram = skybox.Program;
+            _gl.UseProgram(skybox.Program);
+
+            BindReflectionCubeGeometry();
+            ApplyCullMode(skybox.CullMode);
+            ApplySkyboxParametersOnly(skybox);
 
             for (int face = 0; face < 6; face++)
             {
@@ -2945,22 +3420,17 @@ void main()
                 _gl.ClearColor(0f, 0f, 0f, 1f);
                 _gl.Clear(ClearBufferMask.ColorBufferBit);
 
-                _currentProgram = skybox.Program;
-                _gl.UseProgram(skybox.Program);
-
                 _activeRenderSpace = RenderSpace.Camera;
                 _activeModelMatrix = captureModel;
                 _activeViewMatrix = _reflectionCaptureViews[face];
                 _activeProjectionMatrix = captureProjection;
 
-                BindCommandGeometry(captureCmd);
-                ApplyCullMode(skybox.CullMode);
-                ApplySkybox(skybox);
+                ApplyCoreSceneUniforms();
 
                 _gl.DrawArrays(
-                    captureCmd.PrimitiveType,
+                    PrimitiveType.Triangles,
                     0,
-                    (uint)(captureCmd.Vertices.Length / captureCmd.VertexStrideFloats));
+                    (uint)_reflectionCubeVertexCount);
             }
 
             UpdatePrefilteredReflectionCube();
@@ -2984,112 +3454,75 @@ void main()
 
         private void ApplyCoreSceneUniforms()
         {
-            int renderSpaceLoc = _gl.GetUniformLocation(_currentProgram, "uRenderSpace");
-            if (renderSpaceLoc != -1)
-                _gl.Uniform1(renderSpaceLoc, (int)_activeRenderSpace);
+            ProgramUniformLocationCache loc = GetProgramLocationCache(_currentProgram);
 
-            int modelLoc = _gl.GetUniformLocation(_currentProgram, "uModel");
-            if (modelLoc != -1)
-                SetMatrixUniform(modelLoc, _activeModelMatrix);
+            if (loc.RenderSpace != -1)
+                _gl.Uniform1(loc.RenderSpace, (int)_activeRenderSpace);
 
-            int viewLoc = _gl.GetUniformLocation(_currentProgram, "uView");
-            if (viewLoc != -1)
-                SetMatrixUniform(viewLoc, _activeViewMatrix);
+            if (loc.Model != -1)
+                SetMatrixUniform(loc.Model, _activeModelMatrix);
 
-            int projLoc = _gl.GetUniformLocation(_currentProgram, "uProjection");
-            if (projLoc != -1)
-                SetMatrixUniform(projLoc, _activeProjectionMatrix);
+            if (loc.View != -1)
+                SetMatrixUniform(loc.View, _activeViewMatrix);
+
+            if (loc.Projection != -1)
+                SetMatrixUniform(loc.Projection, _activeProjectionMatrix);
         }
 
         private Dictionary<string, int> ApplyMaterialDefaults(uint program)
         {
-            var samplerUnits = new Dictionary<string, int>(StringComparer.Ordinal);
-            int nextSamplerUnit = 0;
+            ProgramMaterialDefaultsCache cache = GetProgramMaterialDefaultsCache(program);
 
-            foreach (ActiveUniformInfo uniform in GetActiveUniforms(program))
+            foreach (MaterialDefaultCommand command in cache.Commands)
             {
-                if (uniform.Location == -1)
-                    continue;
-
-                if (IsEngineManagedUniform(uniform.Name))
-                    continue;
-
-                switch (uniform.Type)
+                switch (command.Kind)
                 {
-                    case UniformType.Float:
-                        if (string.Equals(uniform.Name, "uNormalStrength", StringComparison.Ordinal))
-                            _gl.Uniform1(uniform.Location, 1f);
-                        else if (string.Equals(uniform.Name, "uAmbientStrength", StringComparison.Ordinal))
-                            _gl.Uniform1(uniform.Location, 1f);
-                        else if (string.Equals(uniform.Name, "uAlphaCutoff", StringComparison.Ordinal))
-                            _gl.Uniform1(uniform.Location, 0.5f);
-                        else if (string.Equals(uniform.Name, "uSpecularRange", StringComparison.Ordinal) ||
-                                 string.Equals(uniform.Name, "uRimRange", StringComparison.Ordinal))
-                            _gl.Uniform1(uniform.Location, 0.5f);
-                        else
-                            _gl.Uniform1(uniform.Location, 0f);
+                    case MaterialDefaultCommandKind.Float1:
+                        _gl.Uniform1(command.Location, command.X);
                         break;
 
-                    case UniformType.FloatVec2:
-                        _gl.Uniform2(uniform.Location, 0f, 0f);
+                    case MaterialDefaultCommandKind.Float2:
+                        _gl.Uniform2(command.Location, command.X, command.Y);
                         break;
 
-                    case UniformType.FloatVec3:
-                        _gl.Uniform3(uniform.Location, 0f, 0f, 0f);
+                    case MaterialDefaultCommandKind.Float3:
+                        _gl.Uniform3(command.Location, command.X, command.Y, command.Z);
                         break;
 
-                    case UniformType.FloatVec4:
-                        if (string.Equals(uniform.Name, "uColor", StringComparison.Ordinal))
-                            _gl.Uniform4(uniform.Location, 1f, 1f, 1f, 1f);
-                        else
-                            _gl.Uniform4(uniform.Location, 0.5f, 0.5f, 0.5f, 1f);
+                    case MaterialDefaultCommandKind.Float4:
+                        _gl.Uniform4(command.Location, command.X, command.Y, command.Z, command.W);
                         break;
 
-                    case UniformType.Int:
-                    case UniformType.Bool:
-                        if (string.Equals(uniform.Name, "uReceiveShadow", StringComparison.Ordinal) ||
-                            string.Equals(uniform.Name, "uCastShadow", StringComparison.Ordinal) ||
-                            string.Equals(uniform.Name, "uReceiveReflection", StringComparison.Ordinal))
-                        {
-                            _gl.Uniform1(uniform.Location, 1);
-                        }
-                        else
-                        {
-                            _gl.Uniform1(uniform.Location, 0);
-                        }
+                    case MaterialDefaultCommandKind.Int1:
+                        _gl.Uniform1(command.Location, command.IX);
                         break;
 
-                    case UniformType.IntVec2:
-                    case UniformType.BoolVec2:
-                        _gl.Uniform2(uniform.Location, 0, 0);
+                    case MaterialDefaultCommandKind.Int2:
+                        _gl.Uniform2(command.Location, command.IX, command.IY);
                         break;
 
-                    case UniformType.IntVec3:
-                    case UniformType.BoolVec3:
-                        _gl.Uniform3(uniform.Location, 0, 0, 0);
+                    case MaterialDefaultCommandKind.Int3:
+                        _gl.Uniform3(command.Location, command.IX, command.IY, command.IZ);
                         break;
 
-                    case UniformType.IntVec4:
-                    case UniformType.BoolVec4:
-                        _gl.Uniform4(uniform.Location, 0, 0, 0, 0);
+                    case MaterialDefaultCommandKind.Int4:
+                        _gl.Uniform4(command.Location, command.IX, command.IY, command.IZ, command.IW);
                         break;
 
-                    case UniformType.FloatMat4:
-                        SetMatrixUniform(uniform.Location, Matrix4x4.Identity);
+                    case MaterialDefaultCommandKind.Mat4Identity:
+                        SetMatrixUniform(command.Location, Matrix4x4.Identity);
                         break;
 
-                    case UniformType.Sampler2D:
-                        samplerUnits[uniform.Name] = nextSamplerUnit;
-                        _gl.ActiveTexture((TextureUnit)((int)TextureUnit.Texture0 + nextSamplerUnit));
+                    case MaterialDefaultCommandKind.Sampler2D:
+                        _gl.ActiveTexture((TextureUnit)((int)TextureUnit.Texture0 + command.TextureUnit));
                         _gl.BindTexture(TextureTarget.Texture2D, 0);
-                        _gl.Uniform1(uniform.Location, nextSamplerUnit);
-                        nextSamplerUnit++;
+                        _gl.Uniform1(command.Location, command.TextureUnit);
                         break;
                 }
             }
 
             _gl.ActiveTexture(TextureUnit.Texture0);
-            return samplerUnits;
+            return cache.SamplerUnits;
         }
 
         private string ResolveTexturePath(string rawPath)
@@ -3403,7 +3836,7 @@ void main()
 
         private void SetOutlinePassUniform(uint program, int passValue)
         {
-            int loc = _gl.GetUniformLocation(program, _uniformOutlinePass);
+            int loc = GetProgramLocationCache(program).OutlinePass;
             if (loc != -1)
                 _gl.Uniform1(loc, passValue);
         }
@@ -3853,29 +4286,25 @@ void main()
         // 上传辅助函数
         private void ApplyRenderUniforms(bool useTexture)
         {
-            int renderSpaceLoc = _gl.GetUniformLocation(_currentProgram, "uRenderSpace");
-            if (renderSpaceLoc != -1)
-                _gl.Uniform1(renderSpaceLoc, (int)_activeRenderSpace);
+            ProgramUniformLocationCache loc = GetProgramLocationCache(_currentProgram);
 
-            int useTexLoc = _gl.GetUniformLocation(_currentProgram, "uUseTexture");
-            if (useTexLoc != -1)
-                _gl.Uniform1(useTexLoc, useTexture ? 1 : 0);
+            if (loc.RenderSpace != -1)
+                _gl.Uniform1(loc.RenderSpace, (int)_activeRenderSpace);
 
-            int colorLoc = _gl.GetUniformLocation(_currentProgram, "uColor");
-            if (colorLoc != -1)
-                _gl.Uniform4(colorLoc, 1f, 1f, 1f, 1f);
+            if (loc.UseTexture != -1)
+                _gl.Uniform1(loc.UseTexture, useTexture ? 1 : 0);
 
-            int modelLoc = _gl.GetUniformLocation(_currentProgram, "uModel");
-            if (modelLoc != -1)
-                SetMatrixUniform(modelLoc, _activeModelMatrix);
+            if (loc.Color != -1)
+                _gl.Uniform4(loc.Color, 1f, 1f, 1f, 1f);
 
-            int viewLoc = _gl.GetUniformLocation(_currentProgram, "uView");
-            if (viewLoc != -1)
-                SetMatrixUniform(viewLoc, _activeViewMatrix);
+            if (loc.Model != -1)
+                SetMatrixUniform(loc.Model, _activeModelMatrix);
 
-            int projLoc = _gl.GetUniformLocation(_currentProgram, "uProjection");
-            if (projLoc != -1)
-                SetMatrixUniform(projLoc, _activeProjectionMatrix);
+            if (loc.View != -1)
+                SetMatrixUniform(loc.View, _activeViewMatrix);
+
+            if (loc.Projection != -1)
+                SetMatrixUniform(loc.Projection, _activeProjectionMatrix);
         }
         // 矩阵上传函数
         private void SetMatrixUniform(int location, Matrix4x4 matrix)
@@ -4012,46 +4441,13 @@ void main()
 
         private void BindCommandGeometry(RenderCommand cmd)
         {
-            _gl.BindVertexArray(_quadVAO);
-            _gl.BindBuffer(BufferTargetARB.ArrayBuffer, _quadVBO);
+            InitializeDynamicGeometryResources();
 
-            float[] uploadVertices = PrepareVerticesForCommand(cmd);
-            _gl.BufferData(BufferTargetARB.ArrayBuffer, (ReadOnlySpan<float>)uploadVertices, BufferUsageARB.DynamicDraw);
+            ReadOnlySpan<float> uploadVertices = PrepareVerticesForUpload(cmd);
+            UploadDynamicGeometry(uploadVertices);
 
-            uint strideBytes = (uint)(cmd.VertexStrideFloats * sizeof(float));
-
-            _gl.VertexAttribPointer(0, 3, VertexAttribPointerType.Float, false, strideBytes, 0);
-            _gl.EnableVertexAttribArray(0);
-
-            _gl.VertexAttribPointer(1, 4, VertexAttribPointerType.Float, false, strideBytes, 3 * sizeof(float));
-            _gl.EnableVertexAttribArray(1);
-
-            _gl.VertexAttribPointer(2, 2, VertexAttribPointerType.Float, false, strideBytes, 7 * sizeof(float));
-            _gl.EnableVertexAttribArray(2);
-
-            if (cmd.VertexStrideFloats >= 16)
-            {
-                _gl.VertexAttribPointer(3, 3, VertexAttribPointerType.Float, false, strideBytes, 9 * sizeof(float));
-                _gl.EnableVertexAttribArray(3);
-
-                _gl.VertexAttribPointer(4, 4, VertexAttribPointerType.Float, false, strideBytes, 12 * sizeof(float));
-                _gl.EnableVertexAttribArray(4);
-            }
-            else
-            {
-                _gl.DisableVertexAttribArray(3);
-                _gl.DisableVertexAttribArray(4);
-            }
-
-            if (cmd.VertexStrideFloats >= 19)
-            {
-                _gl.VertexAttribPointer(5, 3, VertexAttribPointerType.Float, false, strideBytes, 16 * sizeof(float));
-                _gl.EnableVertexAttribArray(5);
-            }
-            else
-            {
-                _gl.DisableVertexAttribArray(5);
-            }
+            uint vao = GetDynamicGeometryVAO(cmd.VertexStrideFloats);
+            _gl.BindVertexArray(vao);
         }
 
         private void ExecuteSortedCommands(List<RenderCommand> commands)
@@ -4140,9 +4536,7 @@ void main()
 
             bool hasOutline = ShouldRenderOutline(cmd);
 
-            // =========================
-            // 1) 本体 pass
-            // =========================
+            // 本体 pass
             ApplyCullMode(cmd.CullMode);
             SetOutlinePassUniform(cmd.Program, 0);
 
@@ -4156,7 +4550,7 @@ void main()
 
                 if (cmd.UseTexture)
                 {
-                    int texLoc = _gl.GetUniformLocation(cmd.Program, "uTexture");
+                    int texLoc = GetProgramLocationCache(cmd.Program).Texture;
                     if (texLoc != -1)
                     {
                         _gl.ActiveTexture(TextureUnit.Texture0);
@@ -4172,9 +4566,7 @@ void main()
 
             _gl.DrawArrays(cmd.PrimitiveType, 0, (uint)(cmd.Vertices.Length / cmd.VertexStrideFloats));
 
-            // =========================
             // 描边 pass
-            // =========================
             if (hasOutline)
             {
                 SetOutlinePassUniform(cmd.Program, 1);
@@ -4524,8 +4916,6 @@ void main()
             _gl.Enable(GLEnum.Blend);
             _gl.BlendFunc(GLEnum.SrcAlpha, GLEnum.OneMinusSrcAlpha);
 
-            ApplyCullMode(RenderCullMode.Front);
-
             _currentProgram = previousProgram;
             _gl.UseProgram(previousProgram);
 
@@ -4656,9 +5046,58 @@ void main()
                 _reflectionPrefilterProgram = 0;
             }
 
+            if (_reflectionCubeVAO != 0)
+            {
+                _gl.DeleteVertexArray(_reflectionCubeVAO);
+                _reflectionCubeVAO = 0;
+            }
+
+            if (_reflectionCubeVBO != 0)
+            {
+                _gl.DeleteBuffer(_reflectionCubeVBO);
+                _reflectionCubeVBO = 0;
+            }
+
+            if (_reflectionHammersleyLutTexture != 0)
+            {
+                _gl.DeleteTexture(_reflectionHammersleyLutTexture);
+                _reflectionHammersleyLutTexture = 0;
+            }
+
+            _reflectionCubeVertexCount = 0;
+
+            if (_dynamicGeometryVAO9 != 0)
+            {
+                _gl.DeleteVertexArray(_dynamicGeometryVAO9);
+                _dynamicGeometryVAO9 = 0;
+            }
+
+            if (_dynamicGeometryVAO16 != 0)
+            {
+                _gl.DeleteVertexArray(_dynamicGeometryVAO16);
+                _dynamicGeometryVAO16 = 0;
+            }
+
+            if (_dynamicGeometryVAO19 != 0)
+            {
+                _gl.DeleteVertexArray(_dynamicGeometryVAO19);
+                _dynamicGeometryVAO19 = 0;
+            }
+
+            if (_dynamicGeometryVBO != 0)
+            {
+                _gl.DeleteBuffer(_dynamicGeometryVBO);
+                _dynamicGeometryVBO = 0;
+            }
+
+            _dynamicGeometryCapacityBytes = 0;
+            _dynamicGeometryScratch = Array.Empty<float>();
+
             _reflectionCaptureInitialized = false;
-            _capturedReflectionBatchId = long.MinValue;
             _capturedSkyboxReflectionValid = false;
+            _programUniformCache.Clear();
+            _programLocationCache.Clear();
+            _programMaterialDefaultsCache.Clear();
         }
     }
 }
