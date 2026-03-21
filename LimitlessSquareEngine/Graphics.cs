@@ -108,6 +108,49 @@ namespace LimitlessSquareEngine
         private uint _lightingDummyTexture = 0;
         private bool _lightingSupportInitialized = false;
 
+        private const uint _directionalShadowCascadeBufferBinding = 3;
+
+        private const int _directionalShadowCascadeTileSize = 1024;
+        private const int _maxDirectionalShadowLights = 1;
+        private const int _gpuDirectionalShadowCascadeStrideFloats = 24;
+
+        private int _directionalShadowCascadeCount = 4;
+        private float _directionalShadowCascadeBaseDistance = 2f;
+        private float _directionalShadowCascadeScale = 3f;
+        private int _directionalShadowAtlasAllocatedSize = 0;
+
+        private uint _shadowAtlasTexture = 0;
+        private uint _shadowFramebuffer = 0;
+        private uint _shadowDepthProgram = 0;
+        private uint _directionalShadowCascadeBuffer = 0;
+        private bool _shadowSupportInitialized = false;
+
+        private readonly List<float> _gpuDirectionalShadowCascadeUploadScratch = new(256);
+
+        private sealed class DirectionalShadowCascadeInfo
+        {
+            public bool Valid { get; init; }
+            public Matrix4x4 ShadowMatrix { get; init; }
+            public Vector4 AtlasRect { get; init; }
+            public float SplitNear { get; init; }
+            public float SplitFar { get; init; }
+            public int ViewportX { get; init; }
+            public int ViewportY { get; init; }
+            public int ViewportSize { get; init; }
+        }
+
+        private sealed class DirectionalShadowLightBatchData
+        {
+            public List<DirectionalShadowCascadeInfo> Cascades { get; } = new();
+        }
+
+        private sealed class DirectionalShadowBatchData
+        {
+            public Dictionary<string, DirectionalShadowLightBatchData> ByLightObjectId { get; } = new(StringComparer.Ordinal);
+        }
+
+        private readonly Dictionary<long, DirectionalShadowBatchData> _directionalShadowBatchCache = new();
+
         private const int _reflectionSkyboxCubeSize = 256;
 
         private uint _reflectionCaptureFramebuffer = 0;
@@ -762,6 +805,124 @@ namespace LimitlessSquareEngine
             CacheReflectionProgramUniformLocations();
 
             _reflectionCaptureInitialized = true;
+        }
+
+        private uint CreateDirectionalShadowDepthProgram()
+        {
+            string vertexSource = @"
+        #version 430 core
+        layout(location = 0) in vec3 aPos;
+
+        uniform mat4 uModel;
+        uniform mat4 uLightViewProjection;
+
+        void main()
+        {
+            gl_Position = uLightViewProjection * uModel * vec4(aPos, 1.0);
+        }";
+
+            string fragmentSource = @"
+        #version 430 core
+        void main()
+        {
+        }";
+
+            uint vs = CompileShader(ShaderType.VertexShader, vertexSource);
+            uint fs = CompileShader(ShaderType.FragmentShader, fragmentSource);
+
+            uint program = _gl.CreateProgram();
+            _gl.AttachShader(program, vs);
+            _gl.AttachShader(program, fs);
+            _gl.LinkProgram(program);
+
+            _gl.GetProgram(program, ProgramPropertyARB.LinkStatus, out int success);
+            if (success == 0)
+            {
+                string infoLog = _gl.GetProgramInfoLog(program);
+                throw new Exception($"[X] Directional shadow shader link failed: {infoLog}");
+            }
+
+            _gl.DetachShader(program, vs);
+            _gl.DetachShader(program, fs);
+            _gl.DeleteShader(vs);
+            _gl.DeleteShader(fs);
+
+            return program;
+        }
+
+        private void InitializeShadowSupportResources()
+        {
+            int requiredAtlasSize = GetDirectionalShadowAtlasSize();
+
+            if (_shadowDepthProgram == 0)
+                _shadowDepthProgram = CreateDirectionalShadowDepthProgram();
+
+            if (_directionalShadowCascadeBuffer == 0)
+            {
+                _directionalShadowCascadeBuffer = _gl.GenBuffer();
+                _gl.BindBuffer(BufferTargetARB.ShaderStorageBuffer, _directionalShadowCascadeBuffer);
+
+                float[] emptyCascade = new float[_gpuDirectionalShadowCascadeStrideFloats];
+                _gl.BufferData(
+                    BufferTargetARB.ShaderStorageBuffer,
+                    (ReadOnlySpan<float>)emptyCascade,
+                    BufferUsageARB.DynamicDraw);
+
+                _gl.BindBuffer(BufferTargetARB.ShaderStorageBuffer, 0);
+            }
+
+            if (_shadowAtlasTexture != 0 &&
+                _shadowFramebuffer != 0 &&
+                _directionalShadowAtlasAllocatedSize == requiredAtlasSize)
+            {
+                _shadowSupportInitialized = true;
+                return;
+            }
+
+            ReleaseDirectionalShadowAtlasStorage();
+
+            _shadowAtlasTexture = _gl.GenTexture();
+            _gl.BindTexture(TextureTarget.Texture2D, _shadowAtlasTexture);
+
+            float[] emptyDepth = new float[requiredAtlasSize * requiredAtlasSize];
+
+            _gl.TexImage2D(
+                TextureTarget.Texture2D,
+                0,
+                InternalFormat.DepthComponent32f,
+                (uint)requiredAtlasSize,
+                (uint)requiredAtlasSize,
+                0,
+                PixelFormat.DepthComponent,
+                PixelType.Float,
+                (ReadOnlySpan<float>)emptyDepth);
+
+            _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.Nearest);
+            _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMagFilter, (int)TextureMagFilter.Nearest);
+            _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapS, (int)TextureWrapMode.ClampToEdge);
+            _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapT, (int)TextureWrapMode.ClampToEdge);
+            _gl.BindTexture(TextureTarget.Texture2D, 0);
+
+            _shadowFramebuffer = _gl.GenFramebuffer();
+            _gl.BindFramebuffer(FramebufferTarget.Framebuffer, _shadowFramebuffer);
+            _gl.FramebufferTexture2D(
+                FramebufferTarget.Framebuffer,
+                FramebufferAttachment.DepthAttachment,
+                TextureTarget.Texture2D,
+                _shadowAtlasTexture,
+                0);
+
+            _gl.DrawBuffer(GLEnum.None);
+            _gl.ReadBuffer(GLEnum.None);
+
+            GLEnum status = _gl.CheckFramebufferStatus(FramebufferTarget.Framebuffer);
+            if (status != GLEnum.FramebufferComplete)
+                throw new Exception($"[X] Directional shadow framebuffer incomplete: {status}");
+
+            _gl.BindFramebuffer(FramebufferTarget.Framebuffer, 0);
+
+            _directionalShadowAtlasAllocatedSize = requiredAtlasSize;
+            _shadowSupportInitialized = true;
         }
 
         private readonly struct ActiveUniformInfo
@@ -1456,6 +1617,72 @@ namespace LimitlessSquareEngine
             _window = window;
         }
 
+        public void SetDirectionalShadowCascadeCount(int count)
+        {
+            _directionalShadowCascadeCount = Math.Max(1, count);
+            ReleaseDirectionalShadowAtlasStorage();
+            _shadowSupportInitialized = false;
+        }
+
+        public void SetDirectionalShadowCascadeBaseDistance(float distance)
+        {
+            _directionalShadowCascadeBaseDistance = MathF.Max(0.0001f, distance);
+            ReleaseDirectionalShadowAtlasStorage();
+            _shadowSupportInitialized = false;
+        }
+
+        public void SetDirectionalShadowCascadeScale(float scale)
+        {
+            _directionalShadowCascadeScale = MathF.Max(1f, scale);
+        }
+
+        private int GetDirectionalShadowAtlasTileCount()
+        {
+            return Math.Max(1, _directionalShadowCascadeCount * _maxDirectionalShadowLights);
+        }
+
+        private int GetDirectionalShadowAtlasGrid()
+        {
+            return (int)MathF.Ceiling(MathF.Sqrt(GetDirectionalShadowAtlasTileCount()));
+        }
+
+        private int GetDirectionalShadowAtlasSize()
+        {
+            return GetDirectionalShadowAtlasGrid() * _directionalShadowCascadeTileSize;
+        }
+
+        private float GetDirectionalShadowCascadeMaxDistance(int cascadeIndex)
+        {
+            float baseDistance = MathF.Max(0.0001f, _directionalShadowCascadeBaseDistance);
+            float scale = MathF.Max(1f, _directionalShadowCascadeScale);
+
+            if (cascadeIndex <= 0)
+                return baseDistance;
+
+            if (MathF.Abs(scale - 1f) <= 0.000001f)
+                return baseDistance * (cascadeIndex + 1);
+
+            float sum = (MathF.Pow(scale, cascadeIndex + 1) - 1f) / (scale - 1f);
+            return baseDistance * sum;
+        }
+
+        private void ReleaseDirectionalShadowAtlasStorage()
+        {
+            if (_shadowAtlasTexture != 0)
+            {
+                _gl.DeleteTexture(_shadowAtlasTexture);
+                _shadowAtlasTexture = 0;
+            }
+
+            if (_shadowFramebuffer != 0)
+            {
+                _gl.DeleteFramebuffer(_shadowFramebuffer);
+                _shadowFramebuffer = 0;
+            }
+
+            _directionalShadowAtlasAllocatedSize = 0;
+        }
+
         private void InitializeLightingSupportResources()
         {
             if (_lightingSupportInitialized)
@@ -1501,7 +1728,335 @@ namespace LimitlessSquareEngine
 
             _lightingSupportInitialized = true;
 
+            InitializeShadowSupportResources();
             InitializeReflectionCaptureResources();
+        }
+
+        private bool ShouldCastShadow(MaterialData material)
+        {
+            if (material == null)
+                return true;
+
+            if (!TryGetMaterialProperty(material, "uCastShadow", out JsonElement value))
+                return true;
+
+            return value.ValueKind switch
+            {
+                JsonValueKind.True => true,
+                JsonValueKind.False => false,
+                JsonValueKind.Number => value.GetDouble() != 0.0,
+                _ => true
+            };
+        }
+
+        private Vector3[] ComputeCameraFrustumCorners(in RenderCommand cmd, float nearValue, float farValue)
+        {
+            bool isOrthographic =
+                MathF.Abs(cmd.Projection.M34) < 0.0001f &&
+                MathF.Abs(cmd.Projection.M44 - 1f) < 0.0001f;
+
+            nearValue = MathF.Max(0.01f, nearValue);
+            farValue = MathF.Max(nearValue + 0.01f, farValue);
+
+            if (!Matrix4x4.Invert(cmd.View, out Matrix4x4 inverseView))
+                inverseView = Matrix4x4.Identity;
+
+            Vector3[] viewCorners = new Vector3[8];
+
+            if (isOrthographic)
+            {
+                float halfWidth = 1f / MathF.Max(MathF.Abs(cmd.Projection.M11), 0.0001f);
+                float halfHeight = 1f / MathF.Max(MathF.Abs(cmd.Projection.M22), 0.0001f);
+
+                viewCorners[0] = new Vector3(-halfWidth, -halfHeight, -nearValue);
+                viewCorners[1] = new Vector3(halfWidth, -halfHeight, -nearValue);
+                viewCorners[2] = new Vector3(halfWidth, halfHeight, -nearValue);
+                viewCorners[3] = new Vector3(-halfWidth, halfHeight, -nearValue);
+
+                viewCorners[4] = new Vector3(-halfWidth, -halfHeight, -farValue);
+                viewCorners[5] = new Vector3(halfWidth, -halfHeight, -farValue);
+                viewCorners[6] = new Vector3(halfWidth, halfHeight, -farValue);
+                viewCorners[7] = new Vector3(-halfWidth, halfHeight, -farValue);
+            }
+            else
+            {
+                float tanHalfX = 1f / MathF.Max(MathF.Abs(cmd.Projection.M11), 0.0001f);
+                float tanHalfY = 1f / MathF.Max(MathF.Abs(cmd.Projection.M22), 0.0001f);
+
+                float nearX = nearValue * tanHalfX;
+                float nearY = nearValue * tanHalfY;
+                float farX = farValue * tanHalfX;
+                float farY = farValue * tanHalfY;
+
+                viewCorners[0] = new Vector3(-nearX, -nearY, -nearValue);
+                viewCorners[1] = new Vector3(nearX, -nearY, -nearValue);
+                viewCorners[2] = new Vector3(nearX, nearY, -nearValue);
+                viewCorners[3] = new Vector3(-nearX, nearY, -nearValue);
+
+                viewCorners[4] = new Vector3(-farX, -farY, -farValue);
+                viewCorners[5] = new Vector3(farX, -farY, -farValue);
+                viewCorners[6] = new Vector3(farX, farY, -farValue);
+                viewCorners[7] = new Vector3(-farX, farY, -farValue);
+            }
+
+            Vector3[] worldCorners = new Vector3[8];
+            for (int i = 0; i < 8; i++)
+                worldCorners[i] = TransformPosition(inverseView, viewCorners[i]);
+
+            return worldCorners;
+        }
+
+        private DirectionalShadowCascadeInfo BuildDirectionalShadowCascadeInfo(
+            in RenderCommand cmd,
+            SceneRenderLightSnapshot light,
+            float cascadeNear,
+            float cascadeFar,
+            int tileIndex)
+        {
+            if (cascadeFar <= cascadeNear)
+            {
+                return new DirectionalShadowCascadeInfo
+                {
+                    Valid = false
+                };
+            }
+
+            Vector3[] frustumCorners = ComputeCameraFrustumCorners(cmd, cascadeNear, cascadeFar);
+            Vector3 lightDirection = ExtractDirectionalLightDirection(light);
+
+            Vector3 frustumCenter = Vector3.Zero;
+            for (int i = 0; i < frustumCorners.Length; i++)
+                frustumCenter += frustumCorners[i];
+            frustumCenter /= frustumCorners.Length;
+
+            Vector3 up = MathF.Abs(Vector3.Dot(lightDirection, Vector3.UnitY)) > 0.98f
+                ? Vector3.UnitZ
+                : Vector3.UnitY;
+
+            Vector3 lightPosition = frustumCenter - lightDirection * (cascadeFar + 32f);
+            Matrix4x4 lightView = Matrix4x4.CreateLookAt(lightPosition, frustumCenter, up);
+
+            float minX = float.PositiveInfinity;
+            float maxX = float.NegativeInfinity;
+            float minY = float.PositiveInfinity;
+            float maxY = float.NegativeInfinity;
+            float minZ = float.PositiveInfinity;
+            float maxZ = float.NegativeInfinity;
+
+            for (int i = 0; i < frustumCorners.Length; i++)
+            {
+                Vector3 ls = TransformPosition(lightView, frustumCorners[i]);
+
+                minX = MathF.Min(minX, ls.X);
+                maxX = MathF.Max(maxX, ls.X);
+
+                minY = MathF.Min(minY, ls.Y);
+                maxY = MathF.Max(maxY, ls.Y);
+
+                minZ = MathF.Min(minZ, ls.Z);
+                maxZ = MathF.Max(maxZ, ls.Z);
+            }
+
+            int tileSize = _directionalShadowCascadeTileSize;
+            int atlasGrid = GetDirectionalShadowAtlasGrid();
+            int atlasSize = GetDirectionalShadowAtlasSize();
+
+            float extentX = MathF.Max(0.5f, maxX - minX);
+            float extentY = MathF.Max(0.5f, maxY - minY);
+
+            float texelSizeX = extentX / tileSize;
+            float texelSizeY = extentY / tileSize;
+
+            float centerX = (minX + maxX) * 0.5f;
+            float centerY = (minY + maxY) * 0.5f;
+
+            centerX = MathF.Floor(centerX / texelSizeX) * texelSizeX;
+            centerY = MathF.Floor(centerY / texelSizeY) * texelSizeY;
+
+            float halfX = extentX * 0.5f;
+            float halfY = extentY * 0.5f;
+
+            minX = centerX - halfX;
+            maxX = centerX + halfX;
+            minY = centerY - halfY;
+            maxY = centerY + halfY;
+
+            float zPadding = MathF.Max(4f, (cascadeFar - cascadeNear) * 0.5f);
+            float nearPlane = MathF.Max(0.1f, -maxZ - zPadding);
+            float farPlane = MathF.Max(nearPlane + 1f, -minZ + zPadding);
+
+            Matrix4x4 lightProjection = Matrix4x4.CreateOrthographicOffCenter(
+                minX,
+                maxX,
+                minY,
+                maxY,
+                nearPlane,
+                farPlane);
+
+            int tileX = (tileIndex % atlasGrid) * tileSize;
+            int tileY = (tileIndex / atlasGrid) * tileSize;
+
+            return new DirectionalShadowCascadeInfo
+            {
+                Valid = true,
+                ShadowMatrix = lightView * lightProjection,
+                AtlasRect = new Vector4(
+                    tileX / (float)atlasSize,
+                    tileY / (float)atlasSize,
+                    tileSize / (float)atlasSize,
+                    tileSize / (float)atlasSize),
+                SplitNear = cascadeNear,
+                SplitFar = cascadeFar,
+                ViewportX = tileX,
+                ViewportY = tileY,
+                ViewportSize = tileSize
+            };
+        }
+
+        private void PrepareDirectionalShadowBatch(in RenderCommand batchAnchor, List<RenderCommand> batchCommands)
+        {
+            InitializeShadowSupportResources();
+
+            DirectionalShadowBatchData batchData = new DirectionalShadowBatchData();
+            _directionalShadowBatchCache[batchAnchor.BatchId] = batchData;
+
+            if (string.IsNullOrWhiteSpace(batchAnchor.SceneId))
+                return;
+
+            if (!_sceneLightCache.TryGetValue(batchAnchor.SceneId, out var lightMap))
+                return;
+
+            List<SceneRenderLightSnapshot> shadowLights = lightMap.Values
+                .Where(l =>
+                    l.Active &&
+                    l.Visible &&
+                    l.Settings.CastShadow &&
+                    l.Settings.LightMode == (int)LightKind.Directional)
+                .OrderBy(l => l.ObjectId)
+                .Take(_maxDirectionalShadowLights)
+                .ToList();
+
+            if (shadowLights.Count == 0)
+                return;
+
+            uint previousProgram = _currentProgram;
+            RenderSpace previousRenderSpace = _activeRenderSpace;
+            Matrix4x4 previousModel = _activeModelMatrix;
+            Matrix4x4 previousView = _activeViewMatrix;
+            Matrix4x4 previousProjection = _activeProjectionMatrix;
+
+            _gl.BindFramebuffer(FramebufferTarget.Framebuffer, _shadowFramebuffer);
+            _gl.ColorMask(false, false, false, false);
+            _gl.Disable(GLEnum.Blend);
+            _gl.Enable(GLEnum.DepthTest);
+            _gl.DepthFunc(GLEnum.Less);
+            _gl.DepthMask(true);
+            _gl.Enable(GLEnum.PolygonOffsetFill);
+            _gl.PolygonOffset(0.001f, 0.002f);
+            _gl.Disable(GLEnum.CullFace);
+
+            _currentProgram = _shadowDepthProgram;
+            _gl.UseProgram(_shadowDepthProgram);
+
+            int lightViewProjectionLoc = _gl.GetUniformLocation(_shadowDepthProgram, "uLightViewProjection");
+            int modelLoc = _gl.GetUniformLocation(_shadowDepthProgram, "uModel");
+
+            for (int lightIndex = 0; lightIndex < shadowLights.Count; lightIndex++)
+            {
+                SceneRenderLightSnapshot light = shadowLights[lightIndex];
+                DirectionalShadowLightBatchData lightBatchData = new DirectionalShadowLightBatchData();
+                batchData.ByLightObjectId[light.ObjectId] = lightBatchData;
+
+                float previousSplitFar = 0f;
+
+                for (int cascadeIndex = 0; cascadeIndex < _directionalShadowCascadeCount; cascadeIndex++)
+                {
+                    float cascadeMaxDistance = GetDirectionalShadowCascadeMaxDistance(cascadeIndex);
+                    float cascadeNear = MathF.Max(batchAnchor.ClusterNear, previousSplitFar);
+                    float cascadeFar = MathF.Min(batchAnchor.ClusterFar, cascadeMaxDistance);
+                    previousSplitFar = cascadeMaxDistance;
+
+                    if (cascadeFar <= cascadeNear)
+                        continue;
+
+                    int tileIndex = lightIndex * _directionalShadowCascadeCount + cascadeIndex;
+
+                    DirectionalShadowCascadeInfo cascadeInfo = BuildDirectionalShadowCascadeInfo(
+                        batchAnchor,
+                        light,
+                        cascadeNear,
+                        cascadeFar,
+                        tileIndex);
+
+                    if (!cascadeInfo.Valid)
+                        continue;
+
+                    lightBatchData.Cascades.Add(cascadeInfo);
+
+                    _gl.Viewport(
+                        cascadeInfo.ViewportX,
+                        cascadeInfo.ViewportY,
+                        (uint)cascadeInfo.ViewportSize,
+                        (uint)cascadeInfo.ViewportSize);
+
+                    _gl.Enable(GLEnum.ScissorTest);
+                    _gl.Scissor(
+                        cascadeInfo.ViewportX,
+                        cascadeInfo.ViewportY,
+                        (uint)cascadeInfo.ViewportSize,
+                        (uint)cascadeInfo.ViewportSize);
+                    _gl.Clear(ClearBufferMask.DepthBufferBit);
+                    _gl.Disable(GLEnum.ScissorTest);
+
+                    SetMatrixUniform(lightViewProjectionLoc, cascadeInfo.ShadowMatrix);
+
+                    foreach (RenderCommand cmd in batchCommands)
+                    {
+                        if (cmd.IsSkybox)
+                            continue;
+
+                        if (cmd.QueueType != RenderQueueType.Opaque)
+                            continue;
+
+                        if (!ShouldCastShadow(cmd.Material))
+                            continue;
+
+                        BindCommandGeometry(cmd);
+                        SetMatrixUniform(modelLoc, cmd.Model);
+                        _gl.DrawArrays(cmd.PrimitiveType, 0, (uint)(cmd.Vertices.Length / cmd.VertexStrideFloats));
+                    }
+
+                    if (cascadeFar >= batchAnchor.ClusterFar)
+                        break;
+                }
+            }
+
+            _gl.Disable(GLEnum.PolygonOffsetFill);
+            _gl.BindFramebuffer(FramebufferTarget.Framebuffer, 0);
+            _gl.ColorMask(true, true, true, true);
+
+            _gl.Viewport(
+                batchAnchor.ViewportX,
+                batchAnchor.ViewportY,
+                (uint)Math.Max(1, batchAnchor.ViewportWidth),
+                (uint)Math.Max(1, batchAnchor.ViewportHeight));
+
+            _gl.Enable(GLEnum.DepthTest);
+            _gl.DepthFunc(GLEnum.Less);
+            _gl.DepthMask(true);
+            _gl.Enable(GLEnum.Blend);
+            _gl.BlendFunc(GLEnum.SrcAlpha, GLEnum.OneMinusSrcAlpha);
+
+            _currentProgram = previousProgram;
+            _gl.UseProgram(previousProgram);
+
+            _activeRenderSpace = previousRenderSpace;
+            _activeModelMatrix = previousModel;
+            _activeViewMatrix = previousView;
+            _activeProjectionMatrix = previousProjection;
+
+            _gl.BindBuffer(BufferTargetARB.ArrayBuffer, 0);
+            _gl.BindVertexArray(0);
         }
 
         private static bool TryGetMaterialProperty(MaterialData material, string name, out JsonElement value)
@@ -1570,6 +2125,13 @@ namespace LimitlessSquareEngine
                 (ReadOnlySpan<uint>)emptyIndices,
                 BufferUsageARB.DynamicDraw);
 
+            float[] emptyCascade = new float[_gpuDirectionalShadowCascadeStrideFloats];
+            _gl.BindBuffer(BufferTargetARB.ShaderStorageBuffer, _directionalShadowCascadeBuffer);
+            _gl.BufferData(
+                BufferTargetARB.ShaderStorageBuffer,
+                (ReadOnlySpan<float>)emptyCascade,
+                BufferUsageARB.DynamicDraw);
+
             _gl.BindBuffer(BufferTargetARB.ShaderStorageBuffer, 0);
 
             _uploadedLightCount = 0;
@@ -1593,9 +2155,12 @@ namespace LimitlessSquareEngine
             }
 
             _gpuLightUploadScratch.Clear();
+            _gpuDirectionalShadowCascadeUploadScratch.Clear();
 
             for (int i = 0; i < _clusterLightLists.Length; i++)
                 _clusterLightLists[i].Clear();
+
+            _directionalShadowBatchCache.TryGetValue(cmd.BatchId, out DirectionalShadowBatchData shadowBatch);
 
             foreach (SceneRenderLightSnapshot light in lightMap.Values.OrderBy(l => l.ObjectId))
             {
@@ -1605,7 +2170,6 @@ namespace LimitlessSquareEngine
                 int lightMode = light.Settings.LightMode;
                 uint gpuLightIndex = (uint)_uploadedLightCount;
 
-                // 点光源
                 if (lightMode == (int)LightKind.Point)
                 {
                     float range = (float)light.Settings.Range;
@@ -1635,15 +2199,35 @@ namespace LimitlessSquareEngine
                     continue;
                 }
 
-                // 平行光
                 if (lightMode == (int)LightKind.Directional)
                 {
                     Vector3 direction = ExtractDirectionalLightDirection(light);
 
+                    DirectionalShadowLightBatchData matchedShadowData = null;
+                    if (shadowBatch != null)
+                        shadowBatch.ByLightObjectId.TryGetValue(light.ObjectId, out matchedShadowData);
+
+                    int shadowCascadeStart = _gpuDirectionalShadowCascadeUploadScratch.Count / _gpuDirectionalShadowCascadeStrideFloats;
+                    int shadowCascadeCount = 0;
+
+                    if (matchedShadowData != null)
+                    {
+                        foreach (DirectionalShadowCascadeInfo cascade in matchedShadowData.Cascades)
+                        {
+                            if (!cascade.Valid)
+                                continue;
+
+                            AppendGpuDirectionalShadowCascade(_gpuDirectionalShadowCascadeUploadScratch, cascade);
+                            shadowCascadeCount++;
+                        }
+                    }
+
                     AppendGpuDirectionalLight(
                         _gpuLightUploadScratch,
                         direction,
-                        light);
+                        light,
+                        shadowCascadeStart,
+                        shadowCascadeCount);
 
                     AssignLightToAllClusters(
                         gpuLightIndex,
@@ -1683,6 +2267,17 @@ namespace LimitlessSquareEngine
             _gl.BufferData(
                 BufferTargetARB.ShaderStorageBuffer,
                 (ReadOnlySpan<uint>)clusterIndices,
+                BufferUsageARB.DynamicDraw);
+
+            float[] gpuDirectionalShadowCascadeArray =
+                _gpuDirectionalShadowCascadeUploadScratch.Count > 0
+                    ? _gpuDirectionalShadowCascadeUploadScratch.ToArray()
+                    : new float[_gpuDirectionalShadowCascadeStrideFloats];
+
+            _gl.BindBuffer(BufferTargetARB.ShaderStorageBuffer, _directionalShadowCascadeBuffer);
+            _gl.BufferData(
+                BufferTargetARB.ShaderStorageBuffer,
+                (ReadOnlySpan<float>)gpuDirectionalShadowCascadeArray,
                 BufferUsageARB.DynamicDraw);
 
             _gl.BindBuffer(BufferTargetARB.ShaderStorageBuffer, 0);
@@ -1761,9 +2356,6 @@ namespace LimitlessSquareEngine
         {
             Quaternion rotation = light.World.Rotation.ToSingle();
 
-            // 约定：灯的本地 -Y 为“出光方向”
-            // 如果你的编辑器/对象系统约定本地 -Z 才是前向，
-            // 只需要把这一行改成 Vector3.Transform(-Vector3.UnitZ, rotation)
             Vector3 direction = Vector3.Transform(-Vector3.UnitY, rotation);
 
             if (direction.LengthSquared() <= 0.0000001f)
@@ -1772,10 +2364,37 @@ namespace LimitlessSquareEngine
             return Vector3.Normalize(direction);
         }
 
-        private static void AppendGpuDirectionalLight(
+        private static void AppendGpuDirectionalShadowCascade(
             List<float> dst,
-            Vector3 direction,
-            SceneRenderLightSnapshot light)
+            DirectionalShadowCascadeInfo cascade)
+        {
+            static void AddVec4(List<float> buffer, float x, float y, float z, float w)
+            {
+                buffer.Add(x);
+                buffer.Add(y);
+                buffer.Add(z);
+                buffer.Add(w);
+            }
+
+            static void AddMat4(List<float> buffer, Matrix4x4 m)
+            {
+                buffer.Add(m.M11); buffer.Add(m.M12); buffer.Add(m.M13); buffer.Add(m.M14);
+                buffer.Add(m.M21); buffer.Add(m.M22); buffer.Add(m.M23); buffer.Add(m.M24);
+                buffer.Add(m.M31); buffer.Add(m.M32); buffer.Add(m.M33); buffer.Add(m.M34);
+                buffer.Add(m.M41); buffer.Add(m.M42); buffer.Add(m.M43); buffer.Add(m.M44);
+            }
+
+            AddVec4(dst, cascade.AtlasRect.X, cascade.AtlasRect.Y, cascade.AtlasRect.Z, cascade.AtlasRect.W);
+            AddMat4(dst, cascade.ShadowMatrix);
+            AddVec4(dst, cascade.SplitNear, cascade.SplitFar, 0f, 0f);
+        }
+
+        private static void AppendGpuDirectionalLight(
+    List<float> dst,
+    Vector3 direction,
+    SceneRenderLightSnapshot light,
+    int shadowCascadeStart,
+    int shadowCascadeCount)
         {
             static void AddVec4(List<float> buffer, float x, float y, float z, float w)
             {
@@ -1793,16 +2412,15 @@ namespace LimitlessSquareEngine
                 buffer.Add(0f); buffer.Add(0f); buffer.Add(0f); buffer.Add(1f);
             }
 
-            // Meta0: x=Kind, y=Intensity, z=CastShadow, w=AttenuationCurve
+            bool hasShadow = shadowCascadeCount > 0;
+
             AddVec4(
                 dst,
                 (float)LightKind.Directional,
                 (float)light.Settings.Intensity,
-                light.Settings.CastShadow ? 1f : 0f,
+                hasShadow ? 1f : 0f,
                 0.5f);
 
-            // ColorRange: xyz=Color, w=Range
-            // Directional
             AddVec4(
                 dst,
                 (float)light.Settings.Color.X,
@@ -1810,18 +2428,13 @@ namespace LimitlessSquareEngine
                 (float)light.Settings.Color.Z,
                 0f);
 
-            // PositionInner: Directional
             AddVec4(dst, 0f, 0f, 0f, 0f);
-
-            // DirectionOuter: xyz=Direction
             AddVec4(dst, direction.X, direction.Y, direction.Z, 0f);
-
+            AddVec4(dst, shadowCascadeStart, shadowCascadeCount, 0f, 0f);
             AddVec4(dst, 0f, 0f, 0f, 0f);
             AddVec4(dst, 0f, 0f, 0f, 0f);
             AddVec4(dst, 0f, 0f, 0f, 0f);
             AddVec4(dst, 0f, 0f, 0f, 0f);
-            AddVec4(dst, 0f, 0f, 0f, 0f);
-
             AddIdentityMat4(dst);
         }
 
@@ -2078,6 +2691,7 @@ namespace LimitlessSquareEngine
             _gl.BindBufferBase(BufferTargetARB.ShaderStorageBuffer, _clusterLightBufferBinding, _clusterLightBuffer);
             _gl.BindBufferBase(BufferTargetARB.ShaderStorageBuffer, _clusterRangeBufferBinding, _clusterRangeBuffer);
             _gl.BindBufferBase(BufferTargetARB.ShaderStorageBuffer, _clusterIndexBufferBinding, _clusterIndexBuffer);
+            _gl.BindBufferBase(BufferTargetARB.ShaderStorageBuffer, _directionalShadowCascadeBufferBinding, _directionalShadowCascadeBuffer);
 
             if (loc.CameraPosition != -1)
                 _gl.Uniform3(loc.CameraPosition, cmd.CameraPosition.X, cmd.CameraPosition.Y, cmd.CameraPosition.Z);
@@ -2108,11 +2722,17 @@ namespace LimitlessSquareEngine
             if (loc.LightCount != -1)
                 _gl.Uniform1(loc.LightCount, uploadedLightCount);
 
+            bool hasDirectionalShadow =
+                _directionalShadowBatchCache.TryGetValue(cmd.BatchId, out DirectionalShadowBatchData shadowBatch) &&
+                shadowBatch.ByLightObjectId.Values.Any(v => v.Cascades.Count > 0);
+
             if (loc.ShadowAtlasTexture != -1)
             {
                 const int shadowAtlasUnit = 13;
                 _gl.ActiveTexture((TextureUnit)((int)TextureUnit.Texture0 + shadowAtlasUnit));
-                _gl.BindTexture(TextureTarget.Texture2D, _lightingDummyTexture);
+                _gl.BindTexture(
+                    TextureTarget.Texture2D,
+                    hasDirectionalShadow ? _shadowAtlasTexture : _lightingDummyTexture);
                 _gl.Uniform1(loc.ShadowAtlasTexture, shadowAtlasUnit);
             }
 
@@ -5216,6 +5836,8 @@ namespace LimitlessSquareEngine
             if (!_isInitialized)
                 Initialize();
 
+            _directionalShadowBatchCache.Clear();
+
             if (_renderQueue.Count == 0)
                 return;
 
@@ -5269,6 +5891,7 @@ namespace LimitlessSquareEngine
                 .FirstOrDefault();
 
                 CaptureSkyboxReflectionForBatch(first, batchSkybox);
+                PrepareDirectionalShadowBatch(first, batchCommands);
                 ExecuteSortedCommands(batchCommands);
             }
 
@@ -6224,6 +6847,34 @@ namespace LimitlessSquareEngine
             _programUniformCache.Clear();
             _programLocationCache.Clear();
             _programMaterialDefaultsCache.Clear();
+
+            if (_shadowAtlasTexture != 0)
+            {
+                _gl.DeleteTexture(_shadowAtlasTexture);
+                _shadowAtlasTexture = 0;
+            }
+
+            if (_shadowFramebuffer != 0)
+            {
+                _gl.DeleteFramebuffer(_shadowFramebuffer);
+                _shadowFramebuffer = 0;
+            }
+
+            if (_shadowDepthProgram != 0)
+            {
+                _gl.DeleteProgram(_shadowDepthProgram);
+                _shadowDepthProgram = 0;
+            }
+
+            if (_directionalShadowCascadeBuffer != 0)
+            {
+                _gl.DeleteBuffer(_directionalShadowCascadeBuffer);
+                _directionalShadowCascadeBuffer = 0;
+            }
+
+            _shadowSupportInitialized = false;
+            _directionalShadowAtlasAllocatedSize = 0;
+            _directionalShadowBatchCache.Clear();
         }
     }
 }
