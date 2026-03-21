@@ -1061,6 +1061,8 @@ namespace LimitlessSquareEngine
             public string MeshId;
             public string MeshSurfaceId;
             public bool MeshVertexColorsAreWhite;
+
+            public bool UsePremultipliedTransparentBlend;
         }
         private readonly List<RenderCommand> _renderQueue = new();
         private long _submissionCounter = 0;
@@ -1079,6 +1081,20 @@ namespace LimitlessSquareEngine
                 newSize = requiredFloatCount;
 
             _dynamicGeometryScratch = new float[newSize];
+        }
+
+        private float ReadMaterialColorAlpha(MaterialData material)
+        {
+            if (material == null)
+                return 1f;
+
+            if (!TryGetMaterialProperty(material, "uColor", out JsonElement value))
+                return 1f;
+
+            if (!TryReadNumericArray(value, out double[] numbers) || numbers.Length < 4)
+                return 1f;
+
+            return Math.Clamp((float)numbers[3], 0f, 1f);
         }
 
         private ReadOnlySpan<float> PrepareVerticesForUpload(in RenderCommand cmd)
@@ -1586,36 +1602,56 @@ namespace LimitlessSquareEngine
                 if (!light.Active || !light.Visible)
                     continue;
 
-                // 当前只处理 Point
-                if (light.Settings.LightMode != 0)
-                    continue;
-
-                float range = (float)light.Settings.Range;
-                if (range <= 0.0001f)
-                    continue;
-
-                Double3 relativePosition = light.World.Position - cmd.CameraWorldPosition;
-                Vector3 relativePositionF = new(
-                    (float)relativePosition.X,
-                    (float)relativePosition.Y,
-                    (float)relativePosition.Z);
-
-                Vector3 viewSpacePosition = TransformPosition(cmd.View, relativePositionF);
-
+                int lightMode = light.Settings.LightMode;
                 uint gpuLightIndex = (uint)_uploadedLightCount;
 
-                AppendGpuPointLight(_gpuLightUploadScratch, relativePositionF, light);
+                // 点光源
+                if (lightMode == (int)LightKind.Point)
+                {
+                    float range = (float)light.Settings.Range;
+                    if (range <= 0.0001f)
+                        continue;
 
-                AssignLightToClustersXYZ(
-                    cmd.Projection,
-                    viewSpacePosition,
-                    range,
-                    cmd.ClusterNear,
-                    cmd.ClusterFar,
-                    gpuLightIndex,
-                    _clusterLightLists);
+                    Double3 relativePosition = light.World.Position - cmd.CameraWorldPosition;
+                    Vector3 relativePositionF = new(
+                        (float)relativePosition.X,
+                        (float)relativePosition.Y,
+                        (float)relativePosition.Z);
 
-                _uploadedLightCount++;
+                    Vector3 viewSpacePosition = TransformPosition(cmd.View, relativePositionF);
+
+                    AppendGpuPointLight(_gpuLightUploadScratch, relativePositionF, light);
+
+                    AssignLightToClustersXYZ(
+                        cmd.Projection,
+                        viewSpacePosition,
+                        range,
+                        cmd.ClusterNear,
+                        cmd.ClusterFar,
+                        gpuLightIndex,
+                        _clusterLightLists);
+
+                    _uploadedLightCount++;
+                    continue;
+                }
+
+                // 平行光
+                if (lightMode == (int)LightKind.Directional)
+                {
+                    Vector3 direction = ExtractDirectionalLightDirection(light);
+
+                    AppendGpuDirectionalLight(
+                        _gpuLightUploadScratch,
+                        direction,
+                        light);
+
+                    AssignLightToAllClusters(
+                        gpuLightIndex,
+                        _clusterLightLists);
+
+                    _uploadedLightCount++;
+                    continue;
+                }
             }
 
             if (_uploadedLightCount == 0)
@@ -1721,14 +1757,90 @@ namespace LimitlessSquareEngine
             AddIdentityMat4(dst);
         }
 
+        private static Vector3 ExtractDirectionalLightDirection(SceneRenderLightSnapshot light)
+        {
+            Quaternion rotation = light.World.Rotation.ToSingle();
+
+            // 约定：灯的本地 -Y 为“出光方向”
+            // 如果你的编辑器/对象系统约定本地 -Z 才是前向，
+            // 只需要把这一行改成 Vector3.Transform(-Vector3.UnitZ, rotation)
+            Vector3 direction = Vector3.Transform(-Vector3.UnitY, rotation);
+
+            if (direction.LengthSquared() <= 0.0000001f)
+                direction = -Vector3.UnitY;
+
+            return Vector3.Normalize(direction);
+        }
+
+        private static void AppendGpuDirectionalLight(
+            List<float> dst,
+            Vector3 direction,
+            SceneRenderLightSnapshot light)
+        {
+            static void AddVec4(List<float> buffer, float x, float y, float z, float w)
+            {
+                buffer.Add(x);
+                buffer.Add(y);
+                buffer.Add(z);
+                buffer.Add(w);
+            }
+
+            static void AddIdentityMat4(List<float> buffer)
+            {
+                buffer.Add(1f); buffer.Add(0f); buffer.Add(0f); buffer.Add(0f);
+                buffer.Add(0f); buffer.Add(1f); buffer.Add(0f); buffer.Add(0f);
+                buffer.Add(0f); buffer.Add(0f); buffer.Add(1f); buffer.Add(0f);
+                buffer.Add(0f); buffer.Add(0f); buffer.Add(0f); buffer.Add(1f);
+            }
+
+            // Meta0: x=Kind, y=Intensity, z=CastShadow, w=AttenuationCurve
+            AddVec4(
+                dst,
+                (float)LightKind.Directional,
+                (float)light.Settings.Intensity,
+                light.Settings.CastShadow ? 1f : 0f,
+                0.5f);
+
+            // ColorRange: xyz=Color, w=Range
+            // Directional
+            AddVec4(
+                dst,
+                (float)light.Settings.Color.X,
+                (float)light.Settings.Color.Y,
+                (float)light.Settings.Color.Z,
+                0f);
+
+            // PositionInner: Directional
+            AddVec4(dst, 0f, 0f, 0f, 0f);
+
+            // DirectionOuter: xyz=Direction
+            AddVec4(dst, direction.X, direction.Y, direction.Z, 0f);
+
+            AddVec4(dst, 0f, 0f, 0f, 0f);
+            AddVec4(dst, 0f, 0f, 0f, 0f);
+            AddVec4(dst, 0f, 0f, 0f, 0f);
+            AddVec4(dst, 0f, 0f, 0f, 0f);
+            AddVec4(dst, 0f, 0f, 0f, 0f);
+
+            AddIdentityMat4(dst);
+        }
+
+        private void AssignLightToAllClusters(
+            uint lightIndex,
+            List<uint>[] clusterLightLists)
+        {
+            for (int i = 0; i < clusterLightLists.Length; i++)
+                clusterLightLists[i].Add(lightIndex);
+        }
+
         private void AssignLightToClustersXYZ(
-    Matrix4x4 projectionMatrix,
-    Vector3 viewSpacePosition,
-    float range,
-    float clusterNear,
-    float clusterFar,
-    uint lightIndex,
-    List<uint>[] clusterLightLists)
+            Matrix4x4 projectionMatrix,
+            Vector3 viewSpacePosition,
+            float range,
+            float clusterNear,
+            float clusterFar,
+            uint lightIndex,
+            List<uint>[] clusterLightLists)
         {
             if (!TryGetProjectedTileBounds(
                     projectionMatrix,
@@ -4915,8 +5027,12 @@ namespace LimitlessSquareEngine
 
                 if (!_meshes.TryGetValue(obj.Mesh, out MeshData mesh))
                 {
-                    Console.WriteLine($"[!] Mesh '{obj.Mesh}' not found for object '{obj.ObjectId}'.");
-                    continue;
+                    if (!TryRegisterSceneMeshOnDemand(obj.Mesh) ||
+                        !_meshes.TryGetValue(obj.Mesh, out mesh))
+                    {
+                        Console.WriteLine($"[!] Mesh '{obj.Mesh}' not found for object '{obj.ObjectId}'.");
+                        continue;
+                    }
                 }
 
                 Double3 relativePosition = obj.WorldPosition - cameraWorld.Position;
@@ -4929,6 +5045,9 @@ namespace LimitlessSquareEngine
                 foreach (MeshSurfaceData surface in mesh.Surfaces)
                 {
                     MaterialData material = ResolveSceneMaterial(obj, surface);
+
+                    float materialAlpha = ReadMaterialColorAlpha(material);
+                    bool transparentByColorAlpha = materialAlpha < 0.9999f;
 
                     _renderQueue.Add(new RenderCommand
                     {
@@ -4947,7 +5066,8 @@ namespace LimitlessSquareEngine
                         Model = model,
                         View = view,
                         Projection = projection,
-                        QueueType = RenderQueueType.Opaque,
+                        QueueType = transparentByColorAlpha ? RenderQueueType.Transparent : RenderQueueType.Opaque,
+                        UsePremultipliedTransparentBlend = transparentByColorAlpha,
                         SortDepth = ComputeSortDepth(surface.LocalCenter, model, view, RenderSpace.Camera),
                         SubmissionIndex = _submissionCounter++,
                         Pass = RenderPass.Scene,
@@ -4967,6 +5087,19 @@ namespace LimitlessSquareEngine
                         MeshVertexColorsAreWhite = surface.VertexColorsAreWhite
                     });
                 }
+            }
+        }
+
+        private void ApplyBlendModeForCommand(in RenderCommand cmd)
+        {
+            if (cmd.QueueType == RenderQueueType.Transparent &&
+                cmd.UsePremultipliedTransparentBlend)
+            {
+                _gl.BlendFunc(GLEnum.One, GLEnum.OneMinusSrcAlpha);
+            }
+            else
+            {
+                _gl.BlendFunc(GLEnum.SrcAlpha, GLEnum.OneMinusSrcAlpha);
             }
         }
 
@@ -5250,49 +5383,70 @@ namespace LimitlessSquareEngine
             _activeProjectionMatrix = cmd.Projection;
 
             BindCommandGeometry(cmd);
+            ApplyBlendModeForCommand(cmd);
 
             bool hasOutline = ShouldRenderOutline(cmd);
+            bool isTransparentQueue = cmd.QueueType == RenderQueueType.Transparent;
+            bool useStencilMaskedTransparentOutline = hasOutline && isTransparentQueue;
 
-            // 本体 pass
-            ApplyCullMode(cmd.CullMode);
-            SetOutlinePassUniform(cmd.Program, 0);
-
-            if (cmd.Material != null)
+            void ApplyBaseDepthState()
             {
-                ApplySceneMaterial(cmd.Material, cmd);
-            }
-            else
-            {
-                ApplyRenderUniforms(cmd.UseTexture);
-
-                if (cmd.UseTexture)
+                if (isTransparentQueue)
                 {
-                    int texLoc = GetProgramLocationCache(cmd.Program).Texture;
-                    if (texLoc != -1)
-                    {
-                        _gl.ActiveTexture(TextureUnit.Texture0);
-                        _gl.BindTexture(TextureTarget.Texture2D, cmd.TextureId);
-                        _gl.Uniform1(texLoc, 0);
-                    }
+                    _gl.DepthFunc(GLEnum.Lequal);
+                    _gl.DepthMask(false);
                 }
                 else
                 {
-                    _gl.BindTexture(TextureTarget.Texture2D, 0);
+                    _gl.DepthFunc(GLEnum.Less);
+                    _gl.DepthMask(true);
                 }
             }
 
-            _gl.DrawArrays(cmd.PrimitiveType, 0, (uint)(cmd.Vertices.Length / cmd.VertexStrideFloats));
+            void ApplyBaseMaterialAndState()
+            {
+                ApplyCullMode(cmd.CullMode);
+                SetOutlinePassUniform(cmd.Program, 0);
 
-            // 描边 pass
-            if (hasOutline)
+                if (cmd.Material != null)
+                {
+                    ApplySceneMaterial(cmd.Material, cmd);
+                }
+                else
+                {
+                    ApplyRenderUniforms(cmd.UseTexture);
+
+                    if (cmd.UseTexture)
+                    {
+                        int texLoc = GetProgramLocationCache(cmd.Program).Texture;
+                        if (texLoc != -1)
+                        {
+                            _gl.ActiveTexture(TextureUnit.Texture0);
+                            _gl.BindTexture(TextureTarget.Texture2D, cmd.TextureId);
+                            _gl.Uniform1(texLoc, 0);
+                        }
+                    }
+                    else
+                    {
+                        _gl.BindTexture(TextureTarget.Texture2D, 0);
+                    }
+                }
+            }
+
+            void DrawBasePass()
+            {
+                ApplyBaseDepthState();
+                ApplyBaseMaterialAndState();
+                _gl.DrawArrays(cmd.PrimitiveType, 0, (uint)(cmd.Vertices.Length / cmd.VertexStrideFloats));
+            }
+
+            void DrawOutlinePass()
             {
                 SetOutlinePassUniform(cmd.Program, 1);
 
-                // 描边壳：剔正面，只留外扩后的背面轮廓
                 _gl.Enable(GLEnum.CullFace);
                 _gl.CullFace(TriangleFace.Front);
 
-                // 描边接收深度测试，但不写深度
                 _gl.DepthFunc(GLEnum.Lequal);
                 _gl.DepthMask(false);
 
@@ -5301,13 +5455,53 @@ namespace LimitlessSquareEngine
 
                 _gl.DrawArrays(cmd.PrimitiveType, 0, (uint)(cmd.Vertices.Length / cmd.VertexStrideFloats));
 
-                // 恢复状态
-                _gl.DepthMask(true);
-                _gl.DepthFunc(GLEnum.Less);
-
+                ApplyBaseDepthState();
                 ApplyCullMode(cmd.CullMode);
                 SetOutlinePassUniform(cmd.Program, 0);
             }
+
+            if (useStencilMaskedTransparentOutline)
+            {
+                ApplyBaseDepthState();
+
+                _gl.ClearStencil(0);
+                _gl.Clear(ClearBufferMask.StencilBufferBit);
+
+                _gl.Enable(GLEnum.StencilTest);
+
+                _gl.StencilMask(0xFF);
+                _gl.StencilFunc(StencilFunction.Always, 1, 0xFF);
+                _gl.StencilOp(StencilOp.Keep, StencilOp.Keep, StencilOp.Replace);
+
+                _gl.ColorMask(false, false, false, false);
+
+                ApplyBaseMaterialAndState();
+                _gl.DrawArrays(cmd.PrimitiveType, 0, (uint)(cmd.Vertices.Length / cmd.VertexStrideFloats));
+
+                _gl.ColorMask(true, true, true, true);
+
+                _gl.StencilMask(0x00);
+                _gl.StencilFunc(StencilFunction.Notequal, 1, 0xFF);
+                _gl.StencilOp(StencilOp.Keep, StencilOp.Keep, StencilOp.Keep);
+
+                DrawOutlinePass();
+
+                _gl.Disable(GLEnum.StencilTest);
+                _gl.StencilMask(0xFF);
+
+                DrawBasePass();
+            }
+            else
+            {
+                DrawBasePass();
+
+                if (hasOutline)
+                    DrawOutlinePass();
+            }
+
+            _gl.Disable(GLEnum.StencilTest);
+            _gl.StencilMask(0xFF);
+            _gl.ColorMask(true, true, true, true);
 
             _gl.ActiveTexture(TextureUnit.Texture0);
             _gl.BindTexture(TextureTarget.Texture2D, 0);
@@ -5416,6 +5610,32 @@ namespace LimitlessSquareEngine
             }
         }
 
+        [MoonSharpHidden]
+        private bool TryRegisterSceneMeshOnDemand(string meshId)
+        {
+            if (string.IsNullOrWhiteSpace(meshId))
+                return false;
+
+            string assetsRoot = Path.Combine(AppContext.BaseDirectory, "Assets");
+            string objFilePath = Path.Combine(
+                assetsRoot,
+                meshId.Replace('/', Path.DirectorySeparatorChar) + ".obj");
+
+            if (!File.Exists(objFilePath))
+                return false;
+
+            try
+            {
+                RegisterObjMeshFromFile(assetsRoot, objFilePath);
+                return _meshes.ContainsKey(meshId);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[!] Failed to register mesh '{meshId}' from '{objFilePath}': {ex.Message}");
+                return false;
+            }
+        }
+
         private List<MeshSurfaceData> BuildObjSurfacesFromAssimpScene(
             Assimp.Scene importedScene,
             string sourcePath,
@@ -5436,8 +5656,9 @@ namespace LimitlessSquareEngine
                 {
                     Assimp.Face face = mesh.Faces[faceIndex];
 
-                    if (face.IndexCount != 3)
-                        throw new InvalidDataException($"[X] OBJ '{sourcePath}' contains a non-triangle face after triangulation.");
+                    // 跳过非三角
+                    if (face == null || face.IndexCount != 3)
+                        continue;
 
                     for (int i = 0; i < 3; i++)
                     {

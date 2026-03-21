@@ -1046,9 +1046,10 @@ namespace LimitlessSquareEngine
                     case "lightMode":
                         if (prop.Value.ValueKind != JsonValueKind.Number ||
                             !prop.Value.TryGetInt32(out int lightMode) ||
-                            lightMode != 0)
+                            (lightMode != 0 && lightMode != 3))
                         {
-                            throw new InvalidDataException($"[X] Light '{objectId}' data.lightMode must be 0.");
+                            throw new InvalidDataException(
+                                $"[X] Light '{objectId}' data.lightMode must be 0 (Point) or 3 (Directional).");
                         }
                         settings.LightMode = lightMode;
                         break;
