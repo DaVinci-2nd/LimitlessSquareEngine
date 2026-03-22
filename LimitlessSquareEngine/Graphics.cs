@@ -119,6 +119,9 @@ namespace LimitlessSquareEngine
         private float _directionalShadowCascadeScale = 3f;
         private int _directionalShadowAtlasAllocatedSize = 0;
 
+        private Double3 _directionalShadowStableAnchorWorld = Double3.Zero;
+        private bool _directionalShadowStableAnchorInitialized = false;
+
         private uint _shadowAtlasTexture = 0;
         private uint _shadowFramebuffer = 0;
         private uint _shadowDepthProgram = 0;
@@ -1829,17 +1832,39 @@ namespace LimitlessSquareEngine
                 frustumCenter += frustumCorners[i];
             frustumCenter /= frustumCorners.Length;
 
-            Vector3 up = MathF.Abs(Vector3.Dot(lightDirection, Vector3.UnitY)) > 0.98f
-                ? Vector3.UnitZ
-                : Vector3.UnitY;
+            float boundingRadius = ComputeFrustumBoundingSphereRadius(frustumCenter, frustumCorners);
 
-            Vector3 lightPosition = frustumCenter - lightDirection * (cascadeFar + 32f);
-            Matrix4x4 lightView = Matrix4x4.CreateLookAt(lightPosition, frustumCenter, up);
+            float baseHalfExtent = MathF.Max(0.5f, boundingRadius);
 
-            float minX = float.PositiveInfinity;
-            float maxX = float.NegativeInfinity;
-            float minY = float.PositiveInfinity;
-            float maxY = float.NegativeInfinity;
+            const float extentQuantize = 2048f;
+            baseHalfExtent = MathF.Ceiling(baseHalfExtent * extentQuantize) / extentQuantize;
+
+            float halfExtent = baseHalfExtent;
+            float texelWorldSize = (halfExtent * 2f) / _directionalShadowCascadeTileSize;
+
+            const int guardTexels = 2;
+            halfExtent += texelWorldSize * guardTexels;
+
+            texelWorldSize = (halfExtent * 2f) / _directionalShadowCascadeTileSize;
+
+            float anchorGridWorldSize = halfExtent * 2f;
+            Vector3 stableAnchorRelative = GetDirectionalShadowStableAnchorRelative(
+                cmd.CameraWorldPosition,
+                anchorGridWorldSize);
+
+            BuildDirectionalLightBasis(lightDirection, out Vector3 lightRight, out Vector3 lightUp, out Vector3 lightForward);
+
+            Vector3 snappedCenter = SnapDirectionalShadowCenterToTexelStable(
+                frustumCenter,
+                stableAnchorRelative,
+                lightRight,
+                lightUp,
+                lightForward,
+                texelWorldSize);
+
+            Vector3 lightPosition = snappedCenter - lightDirection * (cascadeFar + 32f);
+            Matrix4x4 lightView = Matrix4x4.CreateLookAt(lightPosition, snappedCenter, lightUp);
+
             float minZ = float.PositiveInfinity;
             float maxZ = float.NegativeInfinity;
 
@@ -1847,39 +1872,14 @@ namespace LimitlessSquareEngine
             {
                 Vector3 ls = TransformPosition(lightView, frustumCorners[i]);
 
-                minX = MathF.Min(minX, ls.X);
-                maxX = MathF.Max(maxX, ls.X);
-
-                minY = MathF.Min(minY, ls.Y);
-                maxY = MathF.Max(maxY, ls.Y);
-
                 minZ = MathF.Min(minZ, ls.Z);
                 maxZ = MathF.Max(maxZ, ls.Z);
             }
 
-            int tileSize = _directionalShadowCascadeTileSize;
-            int atlasGrid = GetDirectionalShadowAtlasGrid();
-            int atlasSize = GetDirectionalShadowAtlasSize();
-
-            float extentX = MathF.Max(0.5f, maxX - minX);
-            float extentY = MathF.Max(0.5f, maxY - minY);
-
-            float texelSizeX = extentX / tileSize;
-            float texelSizeY = extentY / tileSize;
-
-            float centerX = (minX + maxX) * 0.5f;
-            float centerY = (minY + maxY) * 0.5f;
-
-            centerX = MathF.Floor(centerX / texelSizeX) * texelSizeX;
-            centerY = MathF.Floor(centerY / texelSizeY) * texelSizeY;
-
-            float halfX = extentX * 0.5f;
-            float halfY = extentY * 0.5f;
-
-            minX = centerX - halfX;
-            maxX = centerX + halfX;
-            minY = centerY - halfY;
-            maxY = centerY + halfY;
+            float minX = -halfExtent;
+            float maxX = halfExtent;
+            float minY = -halfExtent;
+            float maxY = halfExtent;
 
             float zPadding = MathF.Max(4f, (cascadeFar - cascadeNear) * 0.5f);
             float nearPlane = MathF.Max(0.1f, -maxZ - zPadding);
@@ -1892,6 +1892,10 @@ namespace LimitlessSquareEngine
                 maxY,
                 nearPlane,
                 farPlane);
+
+            int tileSize = _directionalShadowCascadeTileSize;
+            int atlasGrid = GetDirectionalShadowAtlasGrid();
+            int atlasSize = GetDirectionalShadowAtlasSize();
 
             int tileX = (tileIndex % atlasGrid) * tileSize;
             int tileY = (tileIndex / atlasGrid) * tileSize;
@@ -2643,6 +2647,145 @@ namespace LimitlessSquareEngine
         {
             Vector4 result = Vector4.Transform(new Vector4(position, 1f), matrix);
             return new Vector3(result.X, result.Y, result.Z);
+        }
+
+        private static void BuildDirectionalLightBasis(Vector3 lightDirection, out Vector3 right, out Vector3 up, out Vector3 forward)
+        {
+            forward = lightDirection.LengthSquared() <= 0.0000001f
+                ? -Vector3.UnitY
+                : Vector3.Normalize(lightDirection);
+
+            if (forward.Z < -0.9999999f)
+            {
+                right = new Vector3(0f, -1f, 0f);
+                up = new Vector3(-1f, 0f, 0f);
+                return;
+            }
+
+            float a = 1f / (1f + forward.Z);
+            float b = -forward.X * forward.Y * a;
+
+            right = new Vector3(
+                1f - forward.X * forward.X * a,
+                b,
+                -forward.X);
+
+            up = new Vector3(
+                b,
+                1f - forward.Y * forward.Y * a,
+                -forward.Y);
+
+            right = Vector3.Normalize(right);
+            up = Vector3.Normalize(up);
+        }
+
+        private static float ComputeFrustumBoundingSphereRadius(Vector3 center, Vector3[] corners)
+        {
+            float radiusSq = 0f;
+
+            for (int i = 0; i < corners.Length; i++)
+            {
+                float distSq = Vector3.DistanceSquared(center, corners[i]);
+                if (distSq > radiusSq)
+                    radiusSq = distSq;
+            }
+
+            return MathF.Sqrt(radiusSq);
+        }
+
+        private Vector3 GetDirectionalShadowStableAnchorRelative(
+    Double3 cameraWorldPosition,
+    float gridWorldSize)
+        {
+            if (gridWorldSize <= 0.0000001f)
+                return Vector3.Zero;
+
+            double grid = gridWorldSize;
+
+            if (!_directionalShadowStableAnchorInitialized)
+            {
+                _directionalShadowStableAnchorWorld = new Double3(
+                    Math.Round(cameraWorldPosition.X / grid, MidpointRounding.AwayFromZero) * grid,
+                    Math.Round(cameraWorldPosition.Y / grid, MidpointRounding.AwayFromZero) * grid,
+                    Math.Round(cameraWorldPosition.Z / grid, MidpointRounding.AwayFromZero) * grid);
+
+                _directionalShadowStableAnchorInitialized = true;
+            }
+            else
+            {
+                double dx = cameraWorldPosition.X - _directionalShadowStableAnchorWorld.X;
+                double dy = cameraWorldPosition.Y - _directionalShadowStableAnchorWorld.Y;
+                double dz = cameraWorldPosition.Z - _directionalShadowStableAnchorWorld.Z;
+
+                if (Math.Abs(dx) > grid * 0.5)
+                    _directionalShadowStableAnchorWorld.X = Math.Round(cameraWorldPosition.X / grid, MidpointRounding.AwayFromZero) * grid;
+
+                if (Math.Abs(dy) > grid * 0.5)
+                    _directionalShadowStableAnchorWorld.Y = Math.Round(cameraWorldPosition.Y / grid, MidpointRounding.AwayFromZero) * grid;
+
+                if (Math.Abs(dz) > grid * 0.5)
+                    _directionalShadowStableAnchorWorld.Z = Math.Round(cameraWorldPosition.Z / grid, MidpointRounding.AwayFromZero) * grid;
+            }
+
+            Double3 relative = _directionalShadowStableAnchorWorld - cameraWorldPosition;
+
+            return new Vector3(
+                (float)relative.X,
+                (float)relative.Y,
+                (float)relative.Z);
+        }
+
+        private static Vector3 SnapDirectionalShadowCenterToTexelStable(
+            Vector3 centerCameraRelative,
+            Vector3 stableAnchorCameraRelative,
+            Vector3 right,
+            Vector3 up,
+            Vector3 forward,
+            float texelWorldSize)
+        {
+            if (texelWorldSize <= 0.0000001f)
+                return centerCameraRelative;
+
+            double texel = texelWorldSize;
+
+            double centerLocalX =
+                (double)centerCameraRelative.X * right.X +
+                (double)centerCameraRelative.Y * right.Y +
+                (double)centerCameraRelative.Z * right.Z;
+
+            double centerLocalY =
+                (double)centerCameraRelative.X * up.X +
+                (double)centerCameraRelative.Y * up.Y +
+                (double)centerCameraRelative.Z * up.Z;
+
+            double centerLocalZ =
+                (double)centerCameraRelative.X * forward.X +
+                (double)centerCameraRelative.Y * forward.Y +
+                (double)centerCameraRelative.Z * forward.Z;
+
+            double anchorLocalX =
+                (double)stableAnchorCameraRelative.X * right.X +
+                (double)stableAnchorCameraRelative.Y * right.Y +
+                (double)stableAnchorCameraRelative.Z * right.Z;
+
+            double anchorLocalY =
+                (double)stableAnchorCameraRelative.X * up.X +
+                (double)stableAnchorCameraRelative.Y * up.Y +
+                (double)stableAnchorCameraRelative.Z * up.Z;
+
+            double deltaX = centerLocalX - anchorLocalX;
+            double deltaY = centerLocalY - anchorLocalY;
+
+            double snappedDeltaX = Math.Round(deltaX / texel, MidpointRounding.AwayFromZero) * texel;
+            double snappedDeltaY = Math.Round(deltaY / texel, MidpointRounding.AwayFromZero) * texel;
+
+            double snappedLocalX = anchorLocalX + snappedDeltaX;
+            double snappedLocalY = anchorLocalY + snappedDeltaY;
+
+            return
+                right * (float)snappedLocalX +
+                up * (float)snappedLocalY +
+                forward * (float)centerLocalZ;
         }
 
         private int GetClusterLinearIndex(int x, int y, int z)
@@ -3928,50 +4071,6 @@ namespace LimitlessSquareEngine
             };
         }
 
-        private bool TryGetSceneObject(SceneData scene, string objectId, out SceneObject obj)
-        {
-            foreach (SceneObject item in scene.Objects)
-            {
-                if (string.Equals(item.Id, objectId, StringComparison.Ordinal))
-                {
-                    obj = item;
-                    return true;
-                }
-            }
-
-            obj = null;
-            return false;
-        }
-
-        private bool IsSceneCameraMarkedMain(SceneObject cameraObj)
-        {
-            if (cameraObj == null)
-                return false;
-
-            if (!string.Equals(cameraObj.Type, "Camera", StringComparison.Ordinal))
-                return false;
-
-            if (string.IsNullOrWhiteSpace(cameraObj.Data))
-                return false;
-
-            try
-            {
-                using JsonDocument doc = JsonDocument.Parse(cameraObj.Data);
-
-                if (doc.RootElement.ValueKind != JsonValueKind.Object)
-                    return false;
-
-                if (!doc.RootElement.TryGetProperty("isMainCamera", out JsonElement mainElement))
-                    return false;
-
-                return mainElement.ValueKind == JsonValueKind.True;
-            }
-            catch
-            {
-                return false;
-            }
-        }
-
         private string ResolveMainScreenCameraId()
         {
             foreach (SceneData scene in Scene.GetLoadedScenes())
@@ -5079,17 +5178,6 @@ namespace LimitlessSquareEngine
             _gl.BindTexture(TextureTarget.Texture2D, textureId);
             _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapS, wrapValue);
             _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapT, wrapValue);
-        }
-
-        private bool AllIntegral(double[] values)
-        {
-            foreach (double v in values)
-            {
-                if (Math.Abs(v - Math.Round(v)) > 0.000001)
-                    return false;
-            }
-
-            return true;
         }
 
         private void ApplyMaterialParameter(string uniformName, JsonElement value, Dictionary<string, int> samplerUnits, MaterialData material)
@@ -6745,23 +6833,6 @@ namespace LimitlessSquareEngine
             {
                 _gl.DeleteFramebuffer(_reflectionCaptureFramebuffer);
                 _reflectionCaptureFramebuffer = 0;
-            }
-            if (_reflectionSkyboxCube != 0)
-            {
-                _gl.DeleteTexture(_reflectionSkyboxCube);
-                _reflectionSkyboxCube = 0;
-            }
-
-            if (_reflectionPrefilteredCube != 0)
-            {
-                _gl.DeleteTexture(_reflectionPrefilteredCube);
-                _reflectionPrefilteredCube = 0;
-            }
-
-            if (_reflectionDummyCubeTexture != 0)
-            {
-                _gl.DeleteTexture(_reflectionDummyCubeTexture);
-                _reflectionDummyCubeTexture = 0;
             }
 
             foreach (ReflectionTextureEnvironmentCacheEntry entry in _reflectionTextureEnvironmentCache.Values)
