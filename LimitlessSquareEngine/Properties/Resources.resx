@@ -122,4 +122,8 @@
     <value>..\Resources\LimitlessSquareEngineIcon.ico;System.Byte[], mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
     <comment>Limitless Square Engine Icon</comment>
   </data>
+  <data name="LimitlessSquareEngineLogo" type="System.Resources.ResXFileRef, System.Windows.Forms">
+    <value>..\Resources\LimitlessSquareEngineLogo.png;System.Byte[], mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
+    <comment>Limitless Square Engine Logo</comment>
+  </data>
 </root>

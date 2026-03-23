@@ -10,6 +10,7 @@ using System.Numerics;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Silk.NET.Input;
+using System.Drawing;
 
 namespace LimitlessSquareEngine
 {
@@ -113,6 +114,229 @@ namespace LimitlessSquareEngine
         // 定义前一帧时间
         private static double _lastFrameTime;
 
+        // 启动Logo选项
+        static bool showStartupLogo = true;
+        static string? startupLogoPath = null;
+        static Color startupBackgroundColor = Color.SkyBlue;
+
+        /// <summary>
+        /// 显示启动Logo
+        /// </summary>
+        static void ShowStartupLogo()
+        {
+            if (!showStartupLogo || _window == null || _gl == null)
+                return;
+
+            byte[]? logoBytes = null;
+
+            if (!string.IsNullOrWhiteSpace(startupLogoPath))
+            {
+                try
+                {
+                    string fullPath = Path.Combine(AppContext.BaseDirectory, startupLogoPath);
+                    if (File.Exists(fullPath))
+                        logoBytes = File.ReadAllBytes(fullPath);
+                }
+                catch
+                {
+                    logoBytes = null;
+                }
+            }
+
+            if (logoBytes == null)
+                logoBytes = Properties.Resources.LimitlessSquareEngineLogo;
+
+            uint texture = 0;
+            uint vao = 0;
+            uint program = 0;
+            uint vertexShader = 0;
+            uint fragmentShader = 0;
+
+            try
+            {
+                using var codec = SKCodec.Create(new SKMemoryStream(logoBytes));
+                if (codec == null)
+                    return;
+
+                var info = new SKImageInfo(
+                    codec.Info.Width,
+                    codec.Info.Height,
+                    SKColorType.Rgba8888,
+                    SKAlphaType.Unpremul);
+
+                byte[] pixelBytes = new byte[info.Width * info.Height * 4];
+                var result = codec.GetPixels(info, pixelBytes);
+
+                if (result != SKCodecResult.Success && result != SKCodecResult.IncompleteInput)
+                {
+                    Console.WriteLine($"[X] Failed to decode startup logo: {result}");
+                    return;
+                }
+
+                int imageWidth = info.Width;
+                int imageHeight = info.Height;
+
+                float windowWidth = _window.Size.X;
+                float windowHeight = _window.Size.Y;
+                float boxSize = MathF.Min(windowWidth, windowHeight);
+
+                float scale = MathF.Min(boxSize / imageWidth, boxSize / imageHeight);
+                float drawWidth = imageWidth * scale;
+                float drawHeight = imageHeight * scale;
+
+                float left = (windowWidth - drawWidth) * 0.5f;
+                float top = (windowHeight - drawHeight) * 0.5f;
+                float right = left + drawWidth;
+                float bottom = top + drawHeight;
+
+                float x1 = left / windowWidth * 2f - 1f;
+                float x2 = right / windowWidth * 2f - 1f;
+                float y1 = 1f - top / windowHeight * 2f;
+                float y2 = 1f - bottom / windowHeight * 2f;
+
+                const string vertexSource = @"
+                    #version 330 core
+                    uniform vec4 uRect;
+                    out vec2 vUv;
+
+                    void main()
+                    {
+                        vec2 pos[6] = vec2[6](
+                            vec2(uRect.x, uRect.y),
+                            vec2(uRect.x, uRect.w),
+                            vec2(uRect.z, uRect.y),
+                            vec2(uRect.z, uRect.y),
+                            vec2(uRect.x, uRect.w),
+                            vec2(uRect.z, uRect.w)
+                        );
+
+                        vec2 uv[6] = vec2[6](
+                            vec2(0.0, 0.0),
+                            vec2(0.0, 1.0),
+                            vec2(1.0, 0.0),
+                            vec2(1.0, 0.0),
+                            vec2(0.0, 1.0),
+                            vec2(1.0, 1.0)
+                        );
+
+                        gl_Position = vec4(pos[gl_VertexID], 0.0, 1.0);
+                        vUv = uv[gl_VertexID];
+                    }";
+
+                const string fragmentSource = @"
+                    #version 330 core
+                    in vec2 vUv;
+                    uniform sampler2D uTexture;
+                    out vec4 FragColor;
+
+                    void main()
+                    {
+                        FragColor = texture(uTexture, vUv);
+                    }";
+
+                vertexShader = _gl.CreateShader(ShaderType.VertexShader);
+                _gl.ShaderSource(vertexShader, vertexSource);
+                _gl.CompileShader(vertexShader);
+                _gl.GetShader(vertexShader, ShaderParameterName.CompileStatus, out int vertexCompiled);
+                if (vertexCompiled == 0)
+                {
+                    Console.WriteLine("[X] Startup logo vertex shader compile failed:");
+                    Console.WriteLine(_gl.GetShaderInfoLog(vertexShader));
+                    return;
+                }
+
+                fragmentShader = _gl.CreateShader(ShaderType.FragmentShader);
+                _gl.ShaderSource(fragmentShader, fragmentSource);
+                _gl.CompileShader(fragmentShader);
+                _gl.GetShader(fragmentShader, ShaderParameterName.CompileStatus, out int fragmentCompiled);
+                if (fragmentCompiled == 0)
+                {
+                    Console.WriteLine("[X] Startup logo fragment shader compile failed:");
+                    Console.WriteLine(_gl.GetShaderInfoLog(fragmentShader));
+                    return;
+                }
+
+                program = _gl.CreateProgram();
+                _gl.AttachShader(program, vertexShader);
+                _gl.AttachShader(program, fragmentShader);
+                _gl.LinkProgram(program);
+                _gl.GetProgram(program, ProgramPropertyARB.LinkStatus, out int linked);
+                if (linked == 0)
+                {
+                    Console.WriteLine("[X] Startup logo shader program link failed:");
+                    Console.WriteLine(_gl.GetProgramInfoLog(program));
+                    return;
+                }
+
+                texture = _gl.GenTexture();
+                _gl.ActiveTexture(TextureUnit.Texture0);
+                _gl.BindTexture(TextureTarget.Texture2D, texture);
+                _gl.PixelStore(PixelStoreParameter.UnpackAlignment, 1);
+                _gl.TexImage2D(
+                    TextureTarget.Texture2D,
+                    0,
+                    InternalFormat.Rgba8,
+                    (uint)imageWidth,
+                    (uint)imageHeight,
+                    0,
+                    PixelFormat.Rgba,
+                    PixelType.UnsignedByte,
+                    in pixelBytes[0]);
+
+                _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.Linear);
+                _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMagFilter, (int)TextureMagFilter.Linear);
+                _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapS, (int)TextureWrapMode.ClampToEdge);
+                _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapT, (int)TextureWrapMode.ClampToEdge);
+
+                vao = _gl.GenVertexArray();
+                _gl.BindVertexArray(vao);
+
+                _gl.Viewport(0, 0, (uint)_window.Size.X, (uint)_window.Size.Y);
+                _gl.Disable(EnableCap.DepthTest);
+                _gl.Clear(ClearBufferMask.ColorBufferBit);
+
+                _gl.UseProgram(program);
+
+                int rectLocation = _gl.GetUniformLocation(program, "uRect");
+                int texLocation = _gl.GetUniformLocation(program, "uTexture");
+
+                _gl.Uniform4(rectLocation, x1, y1, x2, y2);
+                _gl.Uniform1(texLocation, 0);
+
+                _gl.DrawArrays(PrimitiveType.Triangles, 0, 6);
+
+                _gl.Finish();
+                _window.SwapBuffers();
+                _window.DoEvents();
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[X] Failed to show startup logo: {ex.Message}");
+            }
+            finally
+            {
+                if (vao != 0)
+                    _gl.DeleteVertexArray(vao);
+                if (texture != 0)
+                    _gl.DeleteTexture(texture);
+                if (program != 0)
+                    _gl.DeleteProgram(program);
+                if (vertexShader != 0)
+                    _gl.DeleteShader(vertexShader);
+                if (fragmentShader != 0)
+                    _gl.DeleteShader(fragmentShader);
+            }
+        }
+
+        /// <summary>
+        /// 关闭启动Logo
+        /// </summary>
+        static void CloseStartupLogo()
+        {
+            _graphics?.ClearBackground();
+            _window?.SwapBuffers();
+        }
+
         /// <summary>
         /// 初始化方法
         /// </summary>
@@ -205,7 +429,7 @@ namespace LimitlessSquareEngine
 
                 // 初始化OpenGL
                 _gl = _window.CreateOpenGL();
-                _gl.ClearColor(0.2f, 0.2f, 0.2f, 1.0f);
+                _gl.ClearColor(startupBackgroundColor);
                 var graphics = new Graphics(_gl, _window);
                 graphics.Initialize();
                 _graphics = graphics;
@@ -213,6 +437,9 @@ namespace LimitlessSquareEngine
 
                 // 初始化帧时间
                 _lastFrameTime = _window.Time;
+
+                // 显示启动Logo
+                ShowStartupLogo();
 
                 // 任务提交函数
                 Func<string, int> submitTaskFunc = (luaCode) =>
@@ -572,6 +799,9 @@ namespace LimitlessSquareEngine
 
                     Console.WriteLine($"[i] Scene scan completed. Registered scenes: {_sceneFileRegistry.Count}, materials: {_materialFileRegistry.Count}");
                 }
+
+                // 关闭启动Logo
+                CloseStartupLogo();
 
                 // 调用所有脚本的init函数
                 foreach (var instance in _luaScriptInstances)
