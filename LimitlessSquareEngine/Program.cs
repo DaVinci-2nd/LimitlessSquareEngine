@@ -98,6 +98,10 @@ namespace LimitlessSquareEngine
         internal static List<string> _texturePaths = new List<string>();
         // 定义布局集合
         internal static Dictionary<string, List<UIElement>> _uiLayouts = new Dictionary<string, List<UIElement>>();
+        // 当前激活的UI布局Key
+        static string? _activeUILayoutKey = null;
+        // 当前激活的UI根节点缓存
+        static List<UIElement>? _activeUILayoutRoots = null;
         // 场景文件注册表
         internal static Dictionary<string, string> _sceneFileRegistry = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         // 材质文件注册表
@@ -511,6 +515,16 @@ namespace LimitlessSquareEngine
                         instance.LuaScript.Globals["graphics"] = graphics;
                         // 注入打印输出
                         instance.LuaScript.Globals["print"] = (Action<object>)((obj) => Console.Write(obj));
+                        // 注入UI设置函数
+                        instance.LuaScript.Globals["set_ui"] = (Action<string>)((layoutKey) =>
+                        {
+                            SetActiveUILayout(layoutKey);
+                        });
+                        // 注入UI清除函数
+                        instance.LuaScript.Globals["clear_ui"] = (Action)(() =>
+                        {
+                            ClearActiveUILayout();
+                        });
                         // 注入纹理目录
                         Table textureTable = new Table(instance.LuaScript);
                         foreach (var path in _texturePaths)
@@ -872,6 +886,8 @@ namespace LimitlessSquareEngine
                     }
                 }
             }
+            RenderActiveUILayout();
+
             _graphics?.ExecuteRenderQueue();
 
             // 交换缓冲区
@@ -1184,6 +1200,53 @@ namespace LimitlessSquareEngine
 
             value = default;
             return false;
+        }
+
+        /// <summary>
+        /// 切换当前激活UI布局
+        /// </summary>
+        static void SetActiveUILayout(string layoutKey)
+        {
+            if (string.IsNullOrWhiteSpace(layoutKey))
+                return;
+
+            string key = layoutKey.Trim();
+
+            if (!_uiLayouts.TryGetValue(key, out var roots) || roots == null)
+            {
+                Console.WriteLine($"[!] UI layout not found: {key}");
+                return;
+            }
+
+            _activeUILayoutKey = key;
+            _activeUILayoutRoots = roots;
+        }
+
+        /// <summary>
+        /// 清空当前激活UI布局
+        /// </summary>
+        static void ClearActiveUILayout()
+        {
+            _activeUILayoutKey = null;
+            _activeUILayoutRoots = null;
+        }
+
+        /// <summary>
+        /// 渲染当前激活UI布局
+        /// </summary>
+        static void RenderActiveUILayout()
+        {
+            if (_graphics == null || _activeUILayoutRoots == null)
+                return;
+
+            foreach (var root in _activeUILayoutRoots)
+            {
+                if (root == null || !root.Visible)
+                    continue;
+
+                root.PerformLayout();
+                _graphics.DrawUI(root);
+            }
         }
     }
 }

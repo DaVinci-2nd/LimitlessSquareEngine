@@ -15,17 +15,36 @@ namespace LimitlessSquareEngine
     {
         Panel,
         Button,
-        Label,
-        Image
+        TextBlock,
+        Image,
+        ColorBlock
     }
 
     // 布局模式
+    [JsonConverter(typeof(JsonStringEnumConverter))]
     public enum LayoutMode
     {
         None,
         Vertical,
         Horizontal
     }
+
+    [JsonConverter(typeof(JsonStringEnumConverter))]
+    public enum UITextHorizontalAlign
+    {
+        Left,
+        Center,
+        Right
+    }
+
+    [JsonConverter(typeof(JsonStringEnumConverter))]
+    public enum UITextVerticalAlign
+    {
+        Top,
+        Middle,
+        Bottom
+    }
+
     // UI元素类
     [MoonSharpUserData]
     public class UIElement
@@ -33,119 +52,195 @@ namespace LimitlessSquareEngine
         // 元素类型
         public UIElementType Type { get; set; }
 
-        // X坐标
-        public float X { get; set; }
+        // 图层
+        public int Layer { get; set; }
 
-        // Y坐标（
+        // 本地坐标
+        public float X { get; set; }
         public float Y { get; set; }
 
-        // 宽度
+        // 尺寸
         public float Width { get; set; }
-
-        // 高度
         public float Height { get; set; }
 
-        // 背景颜色（R,G,B,A）
-        public Vector4 BackgroundColor { get; set; }
-
-        // 文本颜色
-        public Vector4 TextColor { get; set; }
-
-        // 显示的文本
-        public string Text { get; set; }
-
-        // 图片路径或标识（仅对Image有效）
-        public string ImageSource { get; set; }
-
-        // 是否可见
+        // 可见性
         public bool Visible { get; set; }
 
         // 父元素
-        public UIElement Parent { get; set; }
+        [JsonIgnore]
+        public UIElement? Parent { get; set; }
 
-        // 子元素列表
-        public List<UIElement> Children { get; private set; }
+        // 子元素
+        public List<UIElement> Children { get; set; } = new();
 
         // 布局模式
         public LayoutMode Layout { get; set; }
 
-        // 左边距
+        // 内边距
         public float PaddingLeft { get; set; }
-
-        // 右边距
-        public float PaddingRight { get; set; }
-
-        // 上边距
         public float PaddingTop { get; set; }
-
-        // 下边距
+        public float PaddingRight { get; set; }
         public float PaddingBottom { get; set; }
 
-        // UI构造函数
+        // 其它属性
+        public Vector4 FillColor { get; set; }
+
+        public string Content { get; set; }
+        public Vector4 TextColor { get; set; }
+
+        // 字体家族名，空则系统默认
+        public string FontFamily { get; set; }
+
+        // 字号（像素）
+        public float FontSize { get; set; }
+
+        public bool FontBold { get; set; }
+        public bool FontItalic { get; set; }
+
+        // 是否自动换行
+        public bool WordWrap { get; set; }
+
+        // 是否裁剪到元素矩形内
+        public bool ClipText { get; set; }
+
+        public UITextHorizontalAlign TextHorizontalAlign { get; set; }
+        public UITextVerticalAlign TextVerticalAlign { get; set; }
+
+        public string ImageSource { get; set; }
+
+        public Vector4 TintColor { get; set; }
+
+        public string ButtonId { get; set; }
+
+        public bool Interactable { get; set; }
+
         public UIElement()
         {
-            Children = new List<UIElement>();
             Visible = true;
-            BackgroundColor = new Vector4(0.5f, 0.5f, 0.5f, 1.0f);
-            TextColor = new Vector4(1.0f, 1.0f, 1.0f, 1.0f);
-            Text = string.Empty;
-            ImageSource = string.Empty;
+            Layer = 0;
+
+            X = 0f;
+            Y = 0f;
+            Width = 0f;
+            Height = 0f;
+
             Layout = LayoutMode.None;
+
+            PaddingLeft = 0f;
+            PaddingTop = 0f;
+            PaddingRight = 0f;
+            PaddingBottom = 0f;
+
+            FillColor = new Vector4(1f, 1f, 1f, 1f);
+
+            Content = string.Empty;
+            TextColor = new Vector4(1f, 1f, 1f, 1f);
+
+            ImageSource = string.Empty;
+            TintColor = new Vector4(1f, 1f, 1f, 1f);
+
+            ButtonId = string.Empty;
+            Interactable = true;
         }
 
-        // 添加子元素
         public void AddChild(UIElement child)
         {
-            if (child == null) return;
+            if (child == null)
+                return;
+
+            if (child.Parent != null)
+                child.Parent.RemoveChild(child);
+
             child.Parent = this;
             Children.Add(child);
         }
 
-        // 移除子元素
         public void RemoveChild(UIElement child)
         {
+            if (child == null)
+                return;
+
             if (Children.Remove(child))
-            {
                 child.Parent = null;
-            }
         }
 
-        // 执行布局
+        public float GetGlobalX()
+        {
+            if (Parent == null)
+                return X;
+
+            return Parent.GetGlobalX() + X;
+        }
+
+        public float GetGlobalY()
+        {
+            if (Parent == null)
+                return Y;
+
+            return Parent.GetGlobalY() + Y;
+        }
+
+        public bool ContainsPoint(float px, float py)
+        {
+            float gx = GetGlobalX();
+            float gy = GetGlobalY();
+
+            return px >= gx &&
+                   py >= gy &&
+                   px <= gx + Width &&
+                   py <= gy + Height;
+        }
+
         public void PerformLayout()
         {
-            if (!Visible || Children.Count == 0) return;
+            if (!Visible || Children.Count == 0)
+                return;
 
-            float currentX = X + PaddingLeft;
-            float currentY = Y + PaddingTop;
+            float currentX = PaddingLeft;
+            float currentY = PaddingTop;
 
-            if (Layout == LayoutMode.Vertical)
+            switch (Layout)
             {
-                foreach (var child in Children)
-                {
-                    if (!child.Visible) continue;
-                    child.X = currentX;
-                    child.Y = currentY;
-                    child.PerformLayout();
-                    currentY += child.Height + PaddingBottom;
-                }
-            }
-            else if (Layout == LayoutMode.Horizontal)
-            {
-                foreach (var child in Children)
-                {
-                    if (!child.Visible) continue;
-                    child.X = currentX;
-                    child.Y = currentY;
-                    child.PerformLayout();
-                    currentX += child.Width + PaddingRight;
-                }
-            }
-            else
-            {
-                foreach (var child in Children)
-                {
-                    child.PerformLayout();
-                }
+                case LayoutMode.Vertical:
+                    foreach (UIElement child in Children)
+                    {
+                        if (!child.Visible)
+                            continue;
+
+                        child.X = currentX;
+                        child.Y = currentY;
+
+                        child.PerformLayout();
+
+                        currentY += child.Height;
+                    }
+                    break;
+
+                case LayoutMode.Horizontal:
+                    foreach (UIElement child in Children)
+                    {
+                        if (!child.Visible)
+                            continue;
+
+                        child.X = currentX;
+                        child.Y = currentY;
+
+                        child.PerformLayout();
+
+                        currentX += child.Width;
+                    }
+                    break;
+
+                case LayoutMode.None:
+                default:
+                    foreach (UIElement child in Children)
+                    {
+                        if (!child.Visible)
+                            continue;
+
+                        child.PerformLayout();
+                    }
+                    break;
             }
         }
     }
@@ -153,36 +248,49 @@ namespace LimitlessSquareEngine
     [MoonSharpUserData]
     internal class UI
     {
-        // 根元素列表
         public List<UIElement> RootElements { get; private set; }
 
-        // 构造函数
         public UI()
         {
             RootElements = new List<UIElement>();
         }
 
-        // 添加根元素
         public void AddElement(UIElement element)
         {
+            if (element == null)
+                return;
+
             if (element.Parent != null)
-            {
                 element.Parent.RemoveChild(element);
-            }
+
+            element.Parent = null;
             RootElements.Add(element);
         }
 
-        // 移除根元素
         public void RemoveElement(UIElement element)
         {
-            RootElements.Remove(element);
+            if (element == null)
+                return;
+
+            if (RootElements.Remove(element))
+                element.Parent = null;
         }
 
-        // 更新所有元素的布局
+        public void Clear()
+        {
+            foreach (UIElement element in RootElements)
+                element.Parent = null;
+
+            RootElements.Clear();
+        }
+
         public void UpdateLayout()
         {
-            foreach (var element in RootElements)
+            foreach (UIElement element in RootElements)
             {
+                if (!element.Visible)
+                    continue;
+
                 element.PerformLayout();
             }
         }

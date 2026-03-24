@@ -1,9 +1,12 @@
 ﻿using MoonSharp.Interpreter;
 using Silk.NET.OpenGL;
 using Silk.NET.Windowing;
+using SixLabors.Fonts;
 using SixLabors.ImageSharp;
+using SixLabors.ImageSharp.Drawing.Processing;
 using SixLabors.ImageSharp.PixelFormats;
 using SixLabors.ImageSharp.Processing;
+using System.Globalization;
 using System.Numerics;
 using System.Text.Json;
 
@@ -52,6 +55,21 @@ namespace LimitlessSquareEngine
         }
 
         private Dictionary<string, TextureInfo> _textures = new();
+
+        // 文本缓存
+        private struct TextTextureInfo
+        {
+            public uint TextureId;
+            public int Width;
+            public int Height;
+            public string CacheKey;
+        }
+
+        private readonly Dictionary<string, TextTextureInfo> _textTextureCache = new(StringComparer.Ordinal);
+
+        private FontFamily? _defaultUIFontFamily;
+        private bool _defaultUIFontResolved = false;
+
         // 激活的着色器序列
         private uint _currentProgram;
         private readonly Dictionary<string, MaterialData> _materialCache = new(StringComparer.Ordinal);
@@ -113,6 +131,8 @@ namespace LimitlessSquareEngine
         private const int _directionalShadowCascadeTileSize = 1024;
         private const int _maxDirectionalShadowLights = 1;
         private const int _gpuDirectionalShadowCascadeStrideFloats = 24;
+
+        private int _activeCanvasLayer = 0;
 
         private int _directionalShadowCascadeCount = 4;
         private float _directionalShadowCascadeBaseDistance = 2f;
@@ -1206,6 +1226,8 @@ namespace LimitlessSquareEngine
             public long SubmissionIndex;
 
             public RenderPass Pass;
+            public int CanvasLayer;
+
             public long BatchId;
             public long BatchSubmissionOrder;
 
@@ -1303,6 +1325,266 @@ namespace LimitlessSquareEngine
 
         private bool _cameraContextActive = false;
         private int _activeSceneId = -1;
+
+        private string BuildTextTextureCacheKey(UIElement element)
+        {
+            string content = element.Content ?? string.Empty;
+            string fontFamily = element.FontFamily ?? string.Empty;
+
+            return string.Join("|",
+                content,
+                fontFamily,
+                element.FontSize.ToString(CultureInfo.InvariantCulture),
+                element.FontBold ? "1" : "0",
+                element.FontItalic ? "1" : "0",
+                element.WordWrap ? "1" : "0",
+                element.ClipText ? "1" : "0",
+                element.TextHorizontalAlign.ToString(),
+                element.TextVerticalAlign.ToString(),
+                element.Width.ToString(CultureInfo.InvariantCulture),
+                element.Height.ToString(CultureInfo.InvariantCulture),
+                element.TextColor.X.ToString(CultureInfo.InvariantCulture),
+                element.TextColor.Y.ToString(CultureInfo.InvariantCulture),
+                element.TextColor.Z.ToString(CultureInfo.InvariantCulture),
+                element.TextColor.W.ToString(CultureInfo.InvariantCulture));
+        }
+
+        private FontFamily ResolveDefaultUIFontFamily()
+        {
+            if (_defaultUIFontResolved && _defaultUIFontFamily != null)
+                return _defaultUIFontFamily.Value;
+
+            _defaultUIFontResolved = true;
+
+            string[] preferredFamilies =
+            {
+                "Microsoft YaHei",
+                "SimHei",
+                "PingFang SC",
+                "Hiragino Sans GB",
+                "Noto Sans CJK SC",
+                "Source Han Sans SC",
+                "Arial Unicode MS",
+                "Segoe UI",
+                "Arial",
+                "Sans Serif"
+            };
+
+            foreach (string familyName in preferredFamilies)
+            {
+                if (SystemFonts.TryGet(familyName, out FontFamily family))
+                {
+                    _defaultUIFontFamily = family;
+                    return family;
+                }
+            }
+
+            FontFamily fallback = SystemFonts.Collection.Families.First();
+            _defaultUIFontFamily = fallback;
+            return fallback;
+        }
+
+        private Font ResolveUIFont(UIElement element)
+        {
+            FontStyle style = FontStyle.Regular;
+
+            if (element.FontBold && element.FontItalic)
+                style = FontStyle.BoldItalic;
+            else if (element.FontBold)
+                style = FontStyle.Bold;
+            else if (element.FontItalic)
+                style = FontStyle.Italic;
+
+            float fontSize = element.FontSize <= 0f ? 24f : element.FontSize;
+
+            if (!string.IsNullOrWhiteSpace(element.FontFamily) &&
+                SystemFonts.TryGet(element.FontFamily, out FontFamily requestedFamily))
+            {
+                return requestedFamily.CreateFont(fontSize, style);
+            }
+
+            FontFamily defaultFamily = ResolveDefaultUIFontFamily();
+            return defaultFamily.CreateFont(fontSize, style);
+        }
+
+        private HorizontalAlignment ResolveImageSharpHorizontalAlignment(UITextHorizontalAlign align)
+        {
+            return align switch
+            {
+                UITextHorizontalAlign.Center => HorizontalAlignment.Center,
+                UITextHorizontalAlign.Right => HorizontalAlignment.Right,
+                _ => HorizontalAlignment.Left
+            };
+        }
+
+        private VerticalAlignment ResolveImageSharpVerticalAlignment(UITextVerticalAlign align)
+        {
+            return align switch
+            {
+                UITextVerticalAlign.Middle => VerticalAlignment.Center,
+                UITextVerticalAlign.Bottom => VerticalAlignment.Bottom,
+                _ => VerticalAlignment.Top
+            };
+        }
+
+        private TextTextureInfo GetOrCreateTextTexture(UIElement element)
+        {
+            string cacheKey = BuildTextTextureCacheKey(element);
+
+            if (_textTextureCache.TryGetValue(cacheKey, out TextTextureInfo cached))
+                return cached;
+
+            string content = element.Content ?? string.Empty;
+            if (string.IsNullOrEmpty(content))
+                return default;
+
+            int targetWidth = Math.Max(1, (int)MathF.Ceiling(element.Width));
+            int targetHeight = Math.Max(1, (int)MathF.Ceiling(element.Height));
+
+            Font font = ResolveUIFont(element);
+
+            using Image<Rgba32> image = new Image<Rgba32>(targetWidth, targetHeight);
+            image.Mutate(ctx =>
+            {
+                ctx.Clear(Color.Transparent);
+
+                var rgba = new SixLabors.ImageSharp.Color(
+                    new Rgba32(
+                        (byte)Math.Clamp(element.TextColor.X * 255f, 0f, 255f),
+                        (byte)Math.Clamp(element.TextColor.Y * 255f, 0f, 255f),
+                        (byte)Math.Clamp(element.TextColor.Z * 255f, 0f, 255f),
+                        (byte)Math.Clamp(element.TextColor.W * 255f, 0f, 255f)));
+
+                var options = new RichTextOptions(font)
+                {
+                    Origin = new PointF(0, 0),
+                    WrappingLength = element.WordWrap ? targetWidth : -1,
+                    HorizontalAlignment = ResolveImageSharpHorizontalAlignment(element.TextHorizontalAlign),
+                    VerticalAlignment = ResolveImageSharpVerticalAlignment(element.TextVerticalAlign)
+                };
+
+                if (element.ClipText)
+                {
+                    ctx.SetDrawingTransform(Matrix3x2.Identity);
+                }
+
+                ctx.DrawText(options, content, rgba);
+            });
+
+            Rgba32[] pixels = new Rgba32[targetWidth * targetHeight];
+            image.CopyPixelDataTo(pixels);
+
+            byte[] pixelBytes = new byte[targetWidth * targetHeight * 4];
+            for (int i = 0; i < pixels.Length; i++)
+            {
+                pixelBytes[i * 4 + 0] = pixels[i].R;
+                pixelBytes[i * 4 + 1] = pixels[i].G;
+                pixelBytes[i * 4 + 2] = pixels[i].B;
+                pixelBytes[i * 4 + 3] = pixels[i].A;
+            }
+
+            uint texture = _gl.GenTexture();
+            _gl.BindTexture(TextureTarget.Texture2D, texture);
+
+            _gl.TexImage2D(
+                TextureTarget.Texture2D,
+                0,
+                InternalFormat.Rgba,
+                (uint)targetWidth,
+                (uint)targetHeight,
+                0,
+                PixelFormat.Rgba,
+                PixelType.UnsignedByte,
+                (ReadOnlySpan<byte>)pixelBytes);
+
+            _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.Linear);
+            _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMagFilter, (int)TextureMagFilter.Linear);
+            _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapS, (int)TextureWrapMode.ClampToEdge);
+            _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapT, (int)TextureWrapMode.ClampToEdge);
+
+            _gl.BindTexture(TextureTarget.Texture2D, 0);
+
+            TextTextureInfo info = new TextTextureInfo
+            {
+                TextureId = texture,
+                Width = targetWidth,
+                Height = targetHeight,
+                CacheKey = cacheKey
+            };
+
+            _textTextureCache[cacheKey] = info;
+            return info;
+        }
+
+        public void ClearTextTextureCache()
+        {
+            foreach (TextTextureInfo info in _textTextureCache.Values)
+            {
+                if (info.TextureId != 0)
+                    _gl.DeleteTexture(info.TextureId);
+            }
+
+            _textTextureCache.Clear();
+        }
+
+        private void DrawTextureIdQuad(
+            float x1, float y1, float x2, float y2,
+            uint textureId,
+            bool hasTransparency = true)
+        {
+            float[] vertices =
+            {
+                x1, y1, 0, _currentColor.X,_currentColor.Y,_currentColor.Z,_currentColor.W, 0, 0,
+                x2, y1, 0, _currentColor.X,_currentColor.Y,_currentColor.Z,_currentColor.W, 1, 0,
+                x2, y2, 0, _currentColor.X,_currentColor.Y,_currentColor.Z,_currentColor.W, 1, 1,
+
+                x2, y2, 0, _currentColor.X,_currentColor.Y,_currentColor.Z,_currentColor.W, 1, 1,
+                x1, y2, 0, _currentColor.X,_currentColor.Y,_currentColor.Z,_currentColor.W, 0, 1,
+                x1, y1, 0, _currentColor.X,_currentColor.Y,_currentColor.Z,_currentColor.W, 0, 0
+            };
+
+            bool transparent = IsCurrentDrawTransparent(true, hasTransparency);
+
+            var cmd = new RenderCommand
+            {
+                Vertices = vertices,
+                PrimitiveType = PrimitiveType.Triangles,
+                Program = _currentProgram,
+                UseTexture = true,
+                TextureId = textureId,
+                SceneId = "",
+                CameraWorldPosition = Double3.Zero,
+                VertexStrideFloats = 9,
+                CameraPosition = Vector3.Zero,
+                ClusterNear = 0.1f,
+                ClusterFar = 1f,
+                RenderSpace = _activeRenderSpace,
+                Model = _activeModelMatrix,
+                View = _activeViewMatrix,
+                Projection = _activeProjectionMatrix,
+                QueueType = transparent ? RenderQueueType.Transparent : RenderQueueType.Opaque,
+                SortDepth = ComputeSortDepth(vertices, 9, _activeModelMatrix, _activeViewMatrix, _activeRenderSpace),
+                SubmissionIndex = _submissionCounter++,
+                Pass = RenderPass.Canvas,
+                CanvasLayer = _activeCanvasLayer,
+                BatchId = -1,
+                BatchSubmissionOrder = -1,
+                ViewportX = 0,
+                ViewportY = 0,
+                ViewportWidth = _window.Size.X,
+                ViewportHeight = _window.Size.Y,
+                Material = null,
+                Skybox = null,
+                ForceWhiteVertexColor = false,
+                IsSkybox = false,
+                CullMode = _currentCullMode,
+                MeshId = "",
+                MeshSurfaceId = "",
+                MeshVertexColorsAreWhite = false
+            };
+
+            _renderQueue.Add(cmd);
+        }
 
         /// <summary>
         /// 渲染类型枚举
@@ -3794,13 +4076,13 @@ namespace LimitlessSquareEngine
 
             float[] vertices =
             {
-                x1,y1,z1, _currentColor.X,_currentColor.Y,_currentColor.Z,_currentColor.W, 0,0,
-                x4,y4,z4, _currentColor.X,_currentColor.Y,_currentColor.Z,_currentColor.W, 0,1,
-                x3,y3,z3, _currentColor.X,_currentColor.Y,_currentColor.Z,_currentColor.W, 1,1,
+                x1,y1,z1, _currentColor.X,_currentColor.Y,_currentColor.Z,_currentColor.W, 0,1,
+                x4,y4,z4, _currentColor.X,_currentColor.Y,_currentColor.Z,_currentColor.W, 0,0,
+                x3,y3,z3, _currentColor.X,_currentColor.Y,_currentColor.Z,_currentColor.W, 1,0,
 
-                x3,y3,z3, _currentColor.X,_currentColor.Y,_currentColor.Z,_currentColor.W, 1,1,
-                x2,y2,z2, _currentColor.X,_currentColor.Y,_currentColor.Z,_currentColor.W, 1,0,
-                x1,y1,z1, _currentColor.X,_currentColor.Y,_currentColor.Z,_currentColor.W, 0,0
+                x3,y3,z3, _currentColor.X,_currentColor.Y,_currentColor.Z,_currentColor.W, 1,0,
+                x2,y2,z2, _currentColor.X,_currentColor.Y,_currentColor.Z,_currentColor.W, 1,1,
+                x1,y1,z1, _currentColor.X,_currentColor.Y,_currentColor.Z,_currentColor.W, 0,1
             };
 
             bool transparent = IsCurrentDrawTransparent(true, tex.HasTransparency);
@@ -3826,6 +4108,7 @@ namespace LimitlessSquareEngine
                 SortDepth = ComputeSortDepth(vertices, 9, _activeModelMatrix, _activeViewMatrix, _activeRenderSpace),
                 SubmissionIndex = _submissionCounter++,
                 Pass = RenderPass.Canvas,
+                CanvasLayer = _activeCanvasLayer,
                 BatchId = -1,
                 BatchSubmissionOrder = -1,
                 ViewportX = 0,
@@ -3874,13 +4157,13 @@ namespace LimitlessSquareEngine
 
             float[] vertices =
             {
-                x1, y1, 0, _currentColor.X,_currentColor.Y,_currentColor.Z,_currentColor.W, 0, 0,
-                x2, y1, 0, _currentColor.X,_currentColor.Y,_currentColor.Z,_currentColor.W, 1, 0,
-                x2, y2, 0, _currentColor.X,_currentColor.Y,_currentColor.Z,_currentColor.W, 1, 1,
+                x1, y1, 0, _currentColor.X,_currentColor.Y,_currentColor.Z,_currentColor.W, 0, 1,
+                x2, y1, 0, _currentColor.X,_currentColor.Y,_currentColor.Z,_currentColor.W, 1, 1,
+                x2, y2, 0, _currentColor.X,_currentColor.Y,_currentColor.Z,_currentColor.W, 1, 0,
 
-                x2, y2, 0, _currentColor.X,_currentColor.Y,_currentColor.Z,_currentColor.W, 1, 1,
-                x1, y2, 0, _currentColor.X,_currentColor.Y,_currentColor.Z,_currentColor.W, 0, 1,
-                x1, y1, 0, _currentColor.X,_currentColor.Y,_currentColor.Z,_currentColor.W, 0, 0
+                x2, y2, 0, _currentColor.X,_currentColor.Y,_currentColor.Z,_currentColor.W, 1, 0,
+                x1, y2, 0, _currentColor.X,_currentColor.Y,_currentColor.Z,_currentColor.W, 0, 0,
+                x1, y1, 0, _currentColor.X,_currentColor.Y,_currentColor.Z,_currentColor.W, 0, 1
             };
 
             bool transparent = IsCurrentDrawTransparent(true, tex.HasTransparency);
@@ -3906,6 +4189,7 @@ namespace LimitlessSquareEngine
                 SortDepth = ComputeSortDepth(vertices, 9, _activeModelMatrix, _activeViewMatrix, _activeRenderSpace),
                 SubmissionIndex = _submissionCounter++,
                 Pass = RenderPass.Canvas,
+                CanvasLayer = _activeCanvasLayer,
                 BatchId = -1,
                 BatchSubmissionOrder = -1,
                 ViewportX = 0,
@@ -3944,8 +4228,6 @@ namespace LimitlessSquareEngine
             {
                 using (Image<Rgba32> image = Image.Load<Rgba32>(path))
                 {
-                    image.Mutate(x => x.Flip(FlipMode.Vertical));
-
                     uint texture = _gl.GenTexture();
                     _gl.BindTexture(TextureTarget.Texture2D, texture);
 
@@ -5513,8 +5795,31 @@ namespace LimitlessSquareEngine
         /// </summary>
         public void DrawUI(UIElement root)
         {
+            if (root == null)
+                return;
+
+            RenderSpace oldRenderSpace = _activeRenderSpace;
+            Matrix4x4 oldModel = _activeModelMatrix;
+            Matrix4x4 oldView = _activeViewMatrix;
+            Matrix4x4 oldProjection = _activeProjectionMatrix;
+            uint oldProgram = _currentProgram;
+            RenderCullMode oldCullMode = _currentCullMode;
+            Vector4 oldColor = _currentColor;
+
             UseCanvasSpace();
+            UseShader("Unlit");
+            SetCullBoth();
+
             DrawUIElement(root);
+
+            _activeRenderSpace = oldRenderSpace;
+            _activeModelMatrix = oldModel;
+            _activeViewMatrix = oldView;
+            _activeProjectionMatrix = oldProjection;
+            _currentProgram = oldProgram;
+            _gl.UseProgram(oldProgram);
+            _currentCullMode = oldCullMode;
+            _currentColor = oldColor;
         }
 
         /// <summary>
@@ -5522,78 +5827,95 @@ namespace LimitlessSquareEngine
         /// </summary>
         private void DrawUIElement(UIElement element)
         {
-            if (!element.Visible)
+            if (element == null || !element.Visible)
                 return;
 
             Vector4 oldColor = _currentColor;
+            int oldLayer = _activeCanvasLayer;
 
-            if (element.BackgroundColor.W > 0)
-            {
-                SetColor(element.BackgroundColor.X, element.BackgroundColor.Y, element.BackgroundColor.Z, element.BackgroundColor.W);
-                (float x1, float y1) = PixelToNDC(element.X, element.Y);
-                (float x2, float y2) = PixelToNDC(element.X + element.Width, element.Y + element.Height);
-                DrawQuad(x1, y1, 0, x2, y1, 0, x2, y2, 0, x1, y2, 0);
-            }
+            float px = element.GetGlobalX();
+            float py = element.GetGlobalY();
+            float pw = element.Width;
+            float ph = element.Height;
+
+            (float x1, float y1) = PixelToNDC(px, py);
+            (float x2, float y2) = PixelToNDC(px + pw, py + ph);
+
+            _activeCanvasLayer = element.Layer;
 
             switch (element.Type)
             {
-                case UIElementType.Label:
+                case UIElementType.Panel:
+                    break;
+
                 case UIElementType.Button:
-                    if (!string.IsNullOrEmpty(element.Text))
+                    break;
+
+                case UIElementType.ColorBlock:
+                    if (element.FillColor.W > 0f)
                     {
-                        SetColor(element.TextColor.X, element.TextColor.Y, element.TextColor.Z, element.TextColor.W);
-                        (float tx1, float ty1) = PixelToNDC(element.X + 5, element.Y + 5);
-                        (float tx2, float ty2) = PixelToNDC(element.X + element.Width - 5, element.Y + element.Height - 5);
-                        DrawQuad(tx1, ty1, 0, tx2, ty1, 0, tx2, ty2, 0, tx1, ty2, 0);
+                        SetColor(
+                            element.FillColor.X,
+                            element.FillColor.Y,
+                            element.FillColor.Z,
+                            element.FillColor.W);
+
+                        DrawQuad(
+                            x1, y1, 0,
+                            x2, y1, 0,
+                            x2, y2, 0,
+                            x1, y2, 0);
+                    }
+                    break;
+
+                case UIElementType.TextBlock:
+                    if (!string.IsNullOrWhiteSpace(element.Content) &&
+                        element.Width > 0f &&
+                        element.Height > 0f &&
+                        element.TextColor.W > 0f)
+                    {
+                        TextTextureInfo textTex = GetOrCreateTextTexture(element);
+                        if (textTex.TextureId != 0)
+                        {
+                            SetColor(1f, 1f, 1f, 1f);
+                            DrawTextureIdQuad(x1, y1, x2, y2, textTex.TextureId, true);
+                        }
                     }
                     break;
 
                 case UIElementType.Image:
-                    if (!string.IsNullOrEmpty(element.ImageSource))
+                    if (!string.IsNullOrWhiteSpace(element.ImageSource))
                     {
-                        if (!TryResolveTexturePath(element.ImageSource, out string fullPath))
+                        if (TryResolveTexturePath(element.ImageSource, out string fullPath))
                         {
-                            SetColor(element.BackgroundColor.X, element.BackgroundColor.Y, element.BackgroundColor.Z, element.BackgroundColor.W);
-                            (float x1, float y1) = PixelToNDC(element.X, element.Y);
-                            (float x2, float y2) = PixelToNDC(element.X + element.Width, element.Y + element.Height);
-                            DrawQuad(x1, y1, 0, x2, y1, 0, x2, y2, 0, x1, y2, 0);
-                            break;
-                        }
+                            TextureInfo tex = LoadTexture(fullPath);
+                            if (tex.Id != 0)
+                            {
+                                SetColor(
+                                    element.TintColor.X,
+                                    element.TintColor.Y,
+                                    element.TintColor.Z,
+                                    element.TintColor.W);
 
-                        TextureInfo tex = LoadTexture(fullPath);
-                        uint texId = tex.Id;
-                        if (texId != 0)
-                        {
-                            (float x1, float y1) = PixelToNDC(element.X, element.Y);
-                            (float x2, float y2) = PixelToNDC(element.X + element.Width, element.Y + element.Height);
-                            DrawTexturedQuad(x1, y1, x2, y2, element.ImageSource);
+                                DrawTextured(
+                                    x1, y2, 0,
+                                    x2, y2, 0,
+                                    x2, y1, 0,
+                                    x1, y1, 0,
+                                    element.ImageSource);
+                            }
                         }
-                        else
-                        {
-                            // 纹理加载失败，用背景色填充
-                            SetColor(element.BackgroundColor.X, element.BackgroundColor.Y, element.BackgroundColor.Z, element.BackgroundColor.W);
-                            (float x1, float y1) = PixelToNDC(element.X, element.Y);
-                            (float x2, float y2) = PixelToNDC(element.X + element.Width, element.Y + element.Height);
-                            DrawQuad(x1, y1, 0, x2, y1, 0, x2, y2, 0, x1, y2, 0);
-                        }
-                    }
-                    else
-                    {
-                        // 没有图片源，用背景色填充
-                        SetColor(element.BackgroundColor.X, element.BackgroundColor.Y, element.BackgroundColor.Z, element.BackgroundColor.W);
-                        (float x1, float y1) = PixelToNDC(element.X, element.Y);
-                        (float x2, float y2) = PixelToNDC(element.X + element.Width, element.Y + element.Height);
-                        DrawQuad(x1, y1, 0, x2, y1, 0, x2, y2, 0, x1, y2, 0);
                     }
                     break;
             }
 
-            SetColor(oldColor.X, oldColor.Y, oldColor.Z, oldColor.W);
-
-            foreach (var child in element.Children)
+            foreach (UIElement child in element.Children)
             {
                 DrawUIElement(child);
             }
+
+            _activeCanvasLayer = oldLayer;
+            SetColor(oldColor.X, oldColor.Y, oldColor.Z, oldColor.W);
         }
 
         // 相机系统调用接口
@@ -5994,7 +6316,63 @@ namespace LimitlessSquareEngine
                 return;
 
             _gl.Viewport(0, 0, (uint)_window.Size.X, (uint)_window.Size.Y);
-            ExecuteSortedCommands(canvasCommands);
+
+            _gl.Disable(GLEnum.DepthTest);
+            _gl.DepthMask(false);
+            _gl.Enable(GLEnum.Blend);
+            _gl.BlendFunc(GLEnum.SrcAlpha, GLEnum.OneMinusSrcAlpha);
+
+            var ordered = canvasCommands
+                .OrderBy(c => c.CanvasLayer)
+                .ThenBy(c => c.SubmissionIndex)
+                .ToList();
+
+            foreach (var cmd in ordered)
+            {
+                ExecuteCanvasCommand(cmd);
+            }
+
+            _gl.DepthMask(true);
+            _gl.Enable(GLEnum.DepthTest);
+            _gl.DepthFunc(GLEnum.Less);
+        }
+
+        private void ExecuteCanvasCommand(RenderCommand cmd)
+        {
+            _currentProgram = cmd.Program;
+            _gl.UseProgram(cmd.Program);
+
+            _activeRenderSpace = cmd.RenderSpace;
+            _activeModelMatrix = cmd.Model;
+            _activeViewMatrix = cmd.View;
+            _activeProjectionMatrix = cmd.Projection;
+
+            BindCommandGeometry(cmd);
+            ApplyCullMode(cmd.CullMode);
+
+            ApplyRenderUniforms(cmd.UseTexture);
+
+            if (cmd.UseTexture)
+            {
+                int texLoc = GetProgramLocationCache(cmd.Program).Texture;
+                if (texLoc != -1)
+                {
+                    _gl.ActiveTexture(TextureUnit.Texture0);
+                    _gl.BindTexture(TextureTarget.Texture2D, cmd.TextureId);
+                    _gl.Uniform1(texLoc, 0);
+                }
+            }
+            else
+            {
+                _gl.BindTexture(TextureTarget.Texture2D, 0);
+            }
+
+            _gl.DrawArrays(cmd.PrimitiveType, 0, (uint)(cmd.Vertices.Length / cmd.VertexStrideFloats));
+
+            _gl.ActiveTexture(TextureUnit.Texture0);
+            _gl.BindTexture(TextureTarget.Texture2D, 0);
+            _gl.BindBuffer(BufferTargetARB.ArrayBuffer, 0);
+            _gl.BindVertexArray(0);
         }
 
         private void BindCommandGeometry(RenderCommand cmd)
@@ -6402,7 +6780,7 @@ namespace LimitlessSquareEngine
 
                         // uv
                         vertices.Add(uv.X);
-                        vertices.Add(uv.Y);
+                        vertices.Add(1f - uv.Y);
 
                         // normal
                         vertices.Add(normal.X);
@@ -6709,6 +7087,7 @@ namespace LimitlessSquareEngine
                 SortDepth = ComputeSortDepth(vertices, 9, _activeModelMatrix, _activeViewMatrix, _activeRenderSpace),
                 SubmissionIndex = _submissionCounter++,
                 Pass = RenderPass.Canvas,
+                CanvasLayer = _activeCanvasLayer,
                 BatchId = -1,
                 BatchSubmissionOrder = -1,
                 ViewportX = 0,
@@ -6805,6 +7184,13 @@ namespace LimitlessSquareEngine
                 _gl.DeleteTexture(_lightingDummyTexture);
                 _lightingDummyTexture = 0;
             }
+
+            foreach (TextTextureInfo info in _textTextureCache.Values)
+            {
+                if (info.TextureId != 0)
+                    _gl.DeleteTexture(info.TextureId);
+            }
+            _textTextureCache.Clear();
 
             _lightingSupportInitialized = false;
 
