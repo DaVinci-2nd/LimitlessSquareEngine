@@ -120,6 +120,27 @@ namespace LimitlessSquareEngine
         {
             return Quaternion.Normalize(new Quaternion((float)X, (float)Y, (float)Z, (float)W));
         }
+
+        public Double3 ToEulerDegrees()
+        {
+            double ysqr = Y * Y;
+
+            double t0 = +2.0 * (W * X + Y * Z);
+            double t1 = +1.0 - 2.0 * (X * X + ysqr);
+            double rollX = Math.Atan2(t0, t1);
+
+            double t2 = +2.0 * (W * Y - Z * X);
+            t2 = t2 > 1.0 ? 1.0 : t2;
+            t2 = t2 < -1.0 ? -1.0 : t2;
+            double pitchY = Math.Asin(t2);
+
+            double t3 = +2.0 * (W * Z + X * Y);
+            double t4 = +1.0 - 2.0 * (ysqr + Z * Z);
+            double yawZ = Math.Atan2(t3, t4);
+
+            const double radToDeg = 180.0 / Math.PI;
+            return new Double3(rollX * radToDeg, pitchY * radToDeg, yawZ * radToDeg);
+        }
     }
 
     internal readonly struct SceneWorldState
@@ -181,6 +202,38 @@ namespace LimitlessSquareEngine
         public Double3 LocalScale { get; set; } = Double3.One;
     }
 
+    public class PhysicsBody
+    {
+        public bool Enabled { get; set; } = true;
+
+        // Static / Dynamic / Kinematic
+        public string MotionType { get; set; } = "Static";
+
+        // Box / Sphere / Capsule
+        public string ShapeType { get; set; } = "Box";
+
+        // Box
+        public Double3 Size { get; set; } = Double3.One;
+
+        // Sphere / Capsule
+        public double Radius { get; set; } = 0.5;
+
+        // Capsule
+        public double Length { get; set; } = 1.0;
+
+        // Dynamic
+        public double Mass { get; set; } = 1.0;
+
+        public double Friction { get; set; } = 0.2;
+        public double Restitution { get; set; } = 0.0;
+
+        public bool UseGravity { get; set; } = true;
+        public bool EnableSpeculativeContacts { get; set; } = false;
+
+        public double LinearDamping { get; set; } = 0.002;
+        public double AngularDamping { get; set; } = 0.005;
+    }
+
     public class SceneObject
     {
         public string Id { get; set; } = "";
@@ -194,6 +247,7 @@ namespace LimitlessSquareEngine
         public string? Mesh { get; set; }
         public bool Visible { get; set; } = true;
         public string RenderTag { get; set; } = "";
+        public PhysicsBody? Physics { get; set; }
         public List<string>? Materials { get; set; }
     }
 
@@ -239,7 +293,12 @@ namespace LimitlessSquareEngine
                 throw new InvalidDataException($"[X] Scene ID mismatch: file contains '{scene.SceneId}', expected '{sceneId}'.");
 
             _loadedScenes[sceneId] = scene;
-            _runtimeScenes[sceneId] = BuildRuntimeScene(scene);
+
+            SceneRuntimeData runtime = BuildRuntimeScene(scene);
+            _runtimeScenes[sceneId] = runtime;
+
+            Physics.RegisterScene(sceneId, runtime);
+
             MarkAllDirty(sceneId);
             Console.WriteLine($"[i] Loaded scene: {scene.SceneId} ({scene.Objects.Count} objects)");
             return scene;
@@ -787,6 +846,7 @@ namespace LimitlessSquareEngine
 
         public static void UnloadScene(string sceneId)
         {
+            Physics.RemoveScene(sceneId);
             _loadedScenes.TryRemove(sceneId, out _);
             _cameraQueues.TryRemove(sceneId, out _);
             _runtimeScenes.TryRemove(sceneId, out _);
@@ -797,6 +857,8 @@ namespace LimitlessSquareEngine
         {
             foreach (string sceneId in _loadedScenes.Keys.ToArray())
                 _boundGraphics?.RemoveSceneCache(sceneId);
+
+            Physics.ClearAll();
 
             _loadedScenes.Clear();
             _cameraQueues.Clear();

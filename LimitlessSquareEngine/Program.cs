@@ -863,10 +863,6 @@ namespace LimitlessSquareEngine
 
             // 清除颜色缓冲
             _graphics?.ClearBackground();
-            // 把场景层的脏transform同步到Graphics缓存
-            Scene.FlushDirtyToRenderer();
-            // 交场景相机渲染
-            _graphics?.QueueLoadedSceneRender();
             // 接收输入更新
             _input?.Update();
 
@@ -886,6 +882,13 @@ namespace LimitlessSquareEngine
                     }
                 }
             }
+            // 物理引擎
+            Physics.Step(deltaTime);
+            // 把场景层的脏transform同步到Graphics缓存
+            Scene.FlushDirtyToRenderer();
+            // 提交场景相机渲染
+            _graphics?.QueueLoadedSceneRender();
+            // 提交画布渲染
             RenderActiveUILayout();
 
             _graphics?.ExecuteRenderQueue();
@@ -1065,6 +1068,27 @@ namespace LimitlessSquareEngine
                     objectType = typeElement.GetString()?.Trim() ?? "Object";
                 }
 
+                if (TryGetProperty(obj, "physics", out JsonElement physicsElement))
+                {
+                    if (physicsElement.ValueKind == JsonValueKind.Null)
+                    {
+                        // null 视为没有物理
+                    }
+                    else if (physicsElement.ValueKind == JsonValueKind.Object)
+                    {
+                        if (!TryValidatePhysicsElement(physicsElement, objectId, out string physicsReason))
+                        {
+                            reason = physicsReason;
+                            return false;
+                        }
+                    }
+                    else
+                    {
+                        reason = $"Object '{objectId}' physics must be object or null.";
+                        return false;
+                    }
+                }
+
                 if (string.Equals(objectType, "Camera", StringComparison.Ordinal))
                 {
                     if (TryGetProperty(obj, "data", out JsonElement dataElement))
@@ -1187,6 +1211,253 @@ namespace LimitlessSquareEngine
         /// <summary>
         /// 读取JSON属性
         /// </summary>
+        static bool TryValidatePhysicsElement(JsonElement physicsElement, string objectId, out string reason)
+        {
+            reason = string.Empty;
+
+            if (physicsElement.ValueKind != JsonValueKind.Object)
+            {
+                reason = $"Object '{objectId}' physics must be a JSON object.";
+                return false;
+            }
+
+            string motionType = "Static";
+            string shapeType = "Box";
+
+            foreach (JsonProperty prop in physicsElement.EnumerateObject())
+            {
+                switch (prop.Name)
+                {
+                    case "enabled":
+                        if (prop.Value.ValueKind != JsonValueKind.True &&
+                            prop.Value.ValueKind != JsonValueKind.False)
+                        {
+                            reason = $"Object '{objectId}' physics.enabled must be true or false.";
+                            return false;
+                        }
+                        break;
+
+                    case "motionType":
+                        if (prop.Value.ValueKind != JsonValueKind.String)
+                        {
+                            reason = $"Object '{objectId}' physics.motionType must be string.";
+                            return false;
+                        }
+
+                        motionType = prop.Value.GetString()?.Trim() ?? string.Empty;
+                        if (motionType != "Static" &&
+                            motionType != "Dynamic" &&
+                            motionType != "Kinematic")
+                        {
+                            reason = $"Object '{objectId}' physics.motionType must be 'Static', 'Dynamic' or 'Kinematic'.";
+                            return false;
+                        }
+                        break;
+
+                    case "shapeType":
+                        if (prop.Value.ValueKind != JsonValueKind.String)
+                        {
+                            reason = $"Object '{objectId}' physics.shapeType must be string.";
+                            return false;
+                        }
+
+                        shapeType = prop.Value.GetString()?.Trim() ?? string.Empty;
+                        if (shapeType != "Box" &&
+                            shapeType != "Sphere" &&
+                            shapeType != "Capsule")
+                        {
+                            reason = $"Object '{objectId}' physics.shapeType must be 'Box', 'Sphere' or 'Capsule'.";
+                            return false;
+                        }
+                        break;
+
+                    case "size":
+                        if (!TryValidateStrictDouble3Object(prop.Value, $"Object '{objectId}' physics.size", requirePositive: true, out reason))
+                            return false;
+                        break;
+
+                    case "radius":
+                        if (prop.Value.ValueKind != JsonValueKind.Number ||
+                            !prop.Value.TryGetDouble(out double radius) ||
+                            radius <= 0.0)
+                        {
+                            reason = $"Object '{objectId}' physics.radius must be > 0.";
+                            return false;
+                        }
+                        break;
+
+                    case "length":
+                        if (prop.Value.ValueKind != JsonValueKind.Number ||
+                            !prop.Value.TryGetDouble(out double length) ||
+                            length < 0.0)
+                        {
+                            reason = $"Object '{objectId}' physics.length must be >= 0.";
+                            return false;
+                        }
+                        break;
+
+                    case "mass":
+                        if (prop.Value.ValueKind != JsonValueKind.Number ||
+                            !prop.Value.TryGetDouble(out double mass) ||
+                            mass <= 0.0)
+                        {
+                            reason = $"Object '{objectId}' physics.mass must be > 0.";
+                            return false;
+                        }
+                        break;
+
+                    case "friction":
+                        if (prop.Value.ValueKind != JsonValueKind.Number ||
+                            !prop.Value.TryGetDouble(out double friction) ||
+                            friction < 0.0)
+                        {
+                            reason = $"Object '{objectId}' physics.friction must be >= 0.";
+                            return false;
+                        }
+                        break;
+
+                    case "restitution":
+                        if (prop.Value.ValueKind != JsonValueKind.Number ||
+                            !prop.Value.TryGetDouble(out double restitution) ||
+                            restitution < 0.0 ||
+                            restitution > 1.0)
+                        {
+                            reason = $"Object '{objectId}' physics.restitution must be between 0 and 1.";
+                            return false;
+                        }
+                        break;
+
+                    case "useGravity":
+                        if (prop.Value.ValueKind != JsonValueKind.True &&
+                            prop.Value.ValueKind != JsonValueKind.False)
+                        {
+                            reason = $"Object '{objectId}' physics.useGravity must be true or false.";
+                            return false;
+                        }
+                        break;
+
+                    case "enableSpeculativeContacts":
+                        if (prop.Value.ValueKind != JsonValueKind.True &&
+                            prop.Value.ValueKind != JsonValueKind.False)
+                        {
+                            reason = $"Object '{objectId}' physics.enableSpeculativeContacts must be true or false.";
+                            return false;
+                        }
+                        break;
+
+                    case "linearDamping":
+                        if (prop.Value.ValueKind != JsonValueKind.Number ||
+                            !prop.Value.TryGetDouble(out double linearDamping) ||
+                            linearDamping < 0.0 ||
+                            linearDamping > 1.0)
+                        {
+                            reason = $"Object '{objectId}' physics.linearDamping must be between 0 and 1.";
+                            return false;
+                        }
+                        break;
+
+                    case "angularDamping":
+                        if (prop.Value.ValueKind != JsonValueKind.Number ||
+                            !prop.Value.TryGetDouble(out double angularDamping) ||
+                            angularDamping < 0.0 ||
+                            angularDamping > 1.0)
+                        {
+                            reason = $"Object '{objectId}' physics.angularDamping must be between 0 and 1.";
+                            return false;
+                        }
+                        break;
+
+                    default:
+                        reason = $"Object '{objectId}' physics contains unknown or wrong-cased property '{prop.Name}'.";
+                        return false;
+                }
+            }
+
+            if (shapeType == "Box")
+            {
+                
+            }
+            else if (shapeType == "Sphere")
+            {
+                
+            }
+            else if (shapeType == "Capsule")
+            {
+                
+            }
+
+            return true;
+        }
+
+        static bool TryValidateStrictDouble3Object(JsonElement element, string fieldName, bool requirePositive, out string reason)
+        {
+            reason = string.Empty;
+
+            if (element.ValueKind != JsonValueKind.Object)
+            {
+                reason = $"{fieldName} must be an object with lowercase x/y/z.";
+                return false;
+            }
+
+            bool hasX = false;
+            bool hasY = false;
+            bool hasZ = false;
+
+            double x = 0.0;
+            double y = 0.0;
+            double z = 0.0;
+
+            foreach (JsonProperty prop in element.EnumerateObject())
+            {
+                switch (prop.Name)
+                {
+                    case "x":
+                        if (prop.Value.ValueKind != JsonValueKind.Number || !prop.Value.TryGetDouble(out x))
+                        {
+                            reason = $"{fieldName}.x must be number.";
+                            return false;
+                        }
+                        hasX = true;
+                        break;
+
+                    case "y":
+                        if (prop.Value.ValueKind != JsonValueKind.Number || !prop.Value.TryGetDouble(out y))
+                        {
+                            reason = $"{fieldName}.y must be number.";
+                            return false;
+                        }
+                        hasY = true;
+                        break;
+
+                    case "z":
+                        if (prop.Value.ValueKind != JsonValueKind.Number || !prop.Value.TryGetDouble(out z))
+                        {
+                            reason = $"{fieldName}.z must be number.";
+                            return false;
+                        }
+                        hasZ = true;
+                        break;
+
+                    default:
+                        reason = $"{fieldName} contains unknown or wrong-cased property '{prop.Name}'.";
+                        return false;
+                }
+            }
+
+            if (!hasX || !hasY || !hasZ)
+            {
+                reason = $"{fieldName} must contain lowercase x/y/z.";
+                return false;
+            }
+
+            if (requirePositive && (x <= 0.0 || y <= 0.0 || z <= 0.0))
+            {
+                reason = $"{fieldName} components must be > 0.";
+                return false;
+            }
+
+            return true;
+        }
         static bool TryGetProperty(JsonElement element, string propertyName, out JsonElement value)
         {
             foreach (JsonProperty prop in element.EnumerateObject())
