@@ -859,6 +859,7 @@ namespace LimitlessSquareEngine
             // 帧间隔
             double currentTime = _window.Time;
             float deltaTime = (float)(currentTime - _lastFrameTime);
+            float fixedDeltaTime = 0.02f;
             _lastFrameTime = currentTime;
 
             // 清除颜色缓冲
@@ -874,6 +875,7 @@ namespace LimitlessSquareEngine
                     try
                     {
                         instance.LuaScript.Globals["deltaTime"] = deltaTime;
+                        instance.LuaScript.Globals["fixedDeltaTime"] = fixedDeltaTime;
                         instance.LoopFunction.Function.Call();
                     }
                     catch (ScriptRuntimeException ex)
@@ -883,7 +885,7 @@ namespace LimitlessSquareEngine
                 }
             }
             // 物理引擎
-            Physics.Step(deltaTime);
+            Physics.Step(deltaTime, fixedDeltaTime);
             // 把场景层的脏transform同步到Graphics缓存
             Scene.FlushDirtyToRenderer();
             // 提交场景相机渲染

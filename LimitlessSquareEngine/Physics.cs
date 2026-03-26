@@ -5,6 +5,7 @@ using Jitter2.LinearMath;
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
@@ -20,6 +21,10 @@ namespace LimitlessSquareEngine
             public World World { get; init; } = null!;
             public Dictionary<string, RigidBody> Bodies { get; } = new(StringComparer.Ordinal);
             public List<Scene.SceneRuntimeNode> OrderedPhysicsNodes { get; } = new();
+            public Dictionary<string, bool> ForceWakeState { get; } = new(StringComparer.Ordinal);
+
+            public double FixedDeltaAccumulator;
+            public bool SkipFirstPhysicsStep = true;
 
             public void Dispose()
             {
@@ -42,7 +47,6 @@ namespace LimitlessSquareEngine
             };
 
             physics.World.Gravity = new JVector(0.0, -9.81, 0.0);
-            physics.World.ThreadModel = World.ThreadModelType.Regular;
 
             foreach (var node in runtime.Nodes.Values.OrderBy(n => n.Depth))
             {
@@ -54,6 +58,7 @@ namespace LimitlessSquareEngine
 
                 physics.Bodies[node.Source.Id] = body;
                 physics.OrderedPhysicsNodes.Add(node);
+                physics.ForceWakeState[node.Source.Id] = false;
             }
 
             _sceneWorlds[sceneId] = physics;
@@ -73,13 +78,8 @@ namespace LimitlessSquareEngine
             _sceneWorlds.Clear();
         }
 
-        private static int _dynamicBodiesActivated = 0;
-
-        public static void Step(double deltaTime)
+        public static void Step(double deltaTime, float fixedDeltaTime)
         {
-            if (deltaTime <= 0.0)
-                return;
-
             foreach (var pair in _sceneWorlds)
             {
                 ScenePhysicsRuntime physics = pair.Value;
@@ -87,30 +87,28 @@ namespace LimitlessSquareEngine
                 if (physics.OrderedPhysicsNodes.Count == 0)
                     continue;
 
-                PushDirtySceneTransformsToPhysics(physics);
-
-                foreach (Scene.SceneRuntimeNode node in physics.OrderedPhysicsNodes)
+                if (physics.SkipFirstPhysicsStep)
                 {
-                    if (!physics.Bodies.TryGetValue(node.Source.Id, out var body))
-                        continue;
+                    physics.FixedDeltaAccumulator = 0.0;
+                    physics.SkipFirstPhysicsStep = false;
+                    continue;
                 }
 
-                if (_dynamicBodiesActivated < 2)
+                physics.FixedDeltaAccumulator += deltaTime;
+
+                double maxAccumulatedTime = fixedDeltaTime * 2.0;
+                if (physics.FixedDeltaAccumulator > maxAccumulatedTime)
+                    physics.FixedDeltaAccumulator = maxAccumulatedTime;
+
+                while (physics.FixedDeltaAccumulator >= fixedDeltaTime)
                 {
-                    var testBody = physics.Bodies.Values.First(b => b.MotionType == MotionType.Dynamic);
-                    foreach (var body in physics.Bodies.Values.Where(b => b.MotionType == MotionType.Dynamic))
-                    {
-                        body.SetActivationState(true);
-                        body.Velocity = JVector.Zero;
-                    }
-                    _dynamicBodiesActivated++;
+                    PushDirtySceneTransformsToPhysics(physics);
+                    WakeBodiesUnderForce(physics);
+                    physics.World.Step(fixedDeltaTime, false);
+                    PullPhysicsTransformsToScene(physics);
 
-                    if (_dynamicBodiesActivated < 2)
-                        continue;
+                    physics.FixedDeltaAccumulator -= fixedDeltaTime;
                 }
-
-                physics.World.Step(deltaTime, true);
-                PullPhysicsTransformsToScene(physics);
             }
         }
 
@@ -148,6 +146,7 @@ namespace LimitlessSquareEngine
                 case MotionType.Dynamic:
                     body.MotionType = MotionType.Dynamic;
                     body.AffectedByGravity = config.UseGravity;
+                    body.DeactivationThreshold = (0.001, 0.001);
                     break;
 
                 default:
@@ -172,14 +171,17 @@ namespace LimitlessSquareEngine
             if (physics.Runtime.DirtyNodes.Count == 0)
                 return;
 
+            bool movedNonDynamicBody = false;
             List<string> processedNodes = new List<string>();
 
             foreach (Scene.SceneRuntimeNode node in physics.OrderedPhysicsNodes)
             {
-                if (!physics.Runtime.DirtyNodes.Contains(node.Source.Id))
+                string id = node.Source.Id;
+
+                if (!physics.Runtime.DirtyNodes.Contains(id))
                     continue;
 
-                if (!physics.Bodies.TryGetValue(node.Source.Id, out var body))
+                if (!physics.Bodies.TryGetValue(id, out var body))
                     continue;
 
                 PhysicsBody? config = node.Source.Physics;
@@ -187,29 +189,104 @@ namespace LimitlessSquareEngine
                     continue;
 
                 MotionType motionType = NormalizeMotionType(config.MotionType);
-
-                processedNodes.Add(node.Source.Id);
+                processedNodes.Add(id);
 
                 if (motionType == MotionType.Dynamic)
                     continue;
 
                 SceneWorldState worldState = ResolveWorld(node);
 
-                body.Position = ToJVector(worldState.Position);
-                body.Orientation = ToJQuaternion(worldState.Rotation);
+                JVector newPos = ToJVector(worldState.Position);
+                JQuaternion newRot = ToJQuaternion(worldState.Rotation);
+
+                bool posChanged = !MathHelper.CloseToZero(body.Position - newPos);
+                bool rotChanged = !SameRotation(body.Orientation, newRot);
+
+                if (!posChanged && !rotChanged)
+                    continue;
+
+                RecreateNonDynamicBody(physics, node, config, body);
+                movedNonDynamicBody = true;
             }
+
             foreach (string id in processedNodes)
-            {
                 physics.Runtime.DirtyNodes.Remove(id);
-            }
         }
 
+        private static void RecreateNonDynamicBody(
+            ScenePhysicsRuntime physics,
+            Scene.SceneRuntimeNode node,
+            PhysicsBody config,
+            RigidBody oldBody)
+        {
+            physics.World.Remove(oldBody);
+
+            RigidBody newBody = CreateRigidBody(physics.World, node, config);
+
+            physics.Bodies[node.Source.Id] = newBody;
+            physics.ForceWakeState[node.Source.Id] = false;
+        }
+
+        private static bool SameRotation(JQuaternion a, JQuaternion b)
+        {
+            return
+                Math.Abs(a.X - b.X) <= 1e-9 &&
+                Math.Abs(a.Y - b.Y) <= 1e-9 &&
+                Math.Abs(a.Z - b.Z) <= 1e-9 &&
+                Math.Abs(a.W - b.W) <= 1e-9;
+        }
+
+        private static void WakeBodiesUnderForce(ScenePhysicsRuntime physics)
+        {
+            foreach (Scene.SceneRuntimeNode node in physics.OrderedPhysicsNodes)
+            {
+                string id = node.Source.Id;
+
+                if (!physics.Bodies.TryGetValue(id, out var body))
+                    continue;
+
+                PhysicsBody? config = node.Source.Physics;
+                if (config == null || !config.Enabled)
+                    continue;
+
+                if (NormalizeMotionType(config.MotionType) != MotionType.Dynamic)
+                    continue;
+
+                bool hasGravity =
+                    config.UseGravity &&
+                    body.AffectedByGravity;
+
+                bool hasExternalForce =
+                    !MathHelper.CloseToZero(body.Force);
+
+                bool hasExternalTorque =
+                    !MathHelper.CloseToZero(body.Torque);
+
+                bool underForce = hasGravity || hasExternalForce || hasExternalTorque;
+
+                bool wasUnderForce = physics.ForceWakeState.TryGetValue(id, out bool prev) && prev;
+
+                if (underForce && !wasUnderForce)
+                {
+                    body.SetActivationState(true);
+                }
+
+                physics.ForceWakeState[id] = underForce;
+            }
+        }
 
         private static void PullPhysicsTransformsToScene(ScenePhysicsRuntime physics)
         {
             foreach (Scene.SceneRuntimeNode node in physics.OrderedPhysicsNodes)
             {
                 if (!physics.Bodies.TryGetValue(node.Source.Id, out var body))
+                    continue;
+
+                PhysicsBody? config = node.Source.Physics;
+                if (config == null || !config.Enabled)
+                    continue;
+
+                if (NormalizeMotionType(config.MotionType) != MotionType.Dynamic)
                     continue;
 
                 Double3 worldPosition = ToDouble3(body.Position);
