@@ -2466,7 +2466,7 @@ namespace LimitlessSquareEngine
                     Vector3 relativePositionF = new(
                         (float)relativePosition.X,
                         (float)relativePosition.Y,
-                        (float)relativePosition.Z);
+                        (float)(-relativePosition.Z));
 
                     Vector3 viewSpacePosition = TransformPosition(cmd.View, relativePositionF);
 
@@ -2642,7 +2642,13 @@ namespace LimitlessSquareEngine
         {
             Quaternion rotation = light.World.Rotation.ToSingle();
 
-            Vector3 direction = Vector3.Transform(-Vector3.UnitY, rotation);
+            Matrix4x4 flipZ = Matrix4x4.Identity;
+            flipZ.M33 = -1f;
+
+            Matrix4x4 rotationLh = Matrix4x4.CreateFromQuaternion(rotation);
+            Matrix4x4 rotationRh = flipZ * rotationLh * flipZ;
+
+            Vector3 direction = Vector3.Transform(-Vector3.UnitY, rotationRh);
 
             if (direction.LengthSquared() <= 0.0000001f)
                 direction = -Vector3.UnitY;
@@ -5998,7 +6004,8 @@ namespace LimitlessSquareEngine
                 MeshSurfaceData skyboxSurface = skyboxMesh.Surfaces[0];
 
                 float skyboxScale = MathF.Max(1f, (float)cameraItem.Settings.FarClip * 0.5f);
-                Matrix4x4 skyboxModel = Matrix4x4.CreateScale(skyboxScale);
+                Matrix4x4 skyboxModel =
+                    Matrix4x4.CreateScale(skyboxScale) * Matrix4x4.CreateRotationY(MathF.PI);
 
                 _renderQueue.Add(new RenderCommand
                 {
@@ -6067,10 +6074,19 @@ namespace LimitlessSquareEngine
 
                 Double3 relativePosition = obj.WorldPosition - cameraWorld.Position;
 
+                Matrix4x4 flipZ = Matrix4x4.Identity;
+                flipZ.M33 = -1f;
+
+                Matrix4x4 objectRotationLh = Matrix4x4.CreateFromQuaternion(obj.WorldRotation.ToSingle());
+                Matrix4x4 objectRotationRh = flipZ * objectRotationLh * flipZ;
+
                 Matrix4x4 model =
                     Matrix4x4.CreateScale((float)obj.WorldScale.X, (float)obj.WorldScale.Y, (float)obj.WorldScale.Z) *
-                    Matrix4x4.CreateFromQuaternion(obj.WorldRotation.ToSingle()) *
-                    Matrix4x4.CreateTranslation((float)relativePosition.X, (float)relativePosition.Y, (float)relativePosition.Z);
+                    objectRotationRh *
+                    Matrix4x4.CreateTranslation(
+                        (float)relativePosition.X,
+                        (float)relativePosition.Y,
+                        (float)(-relativePosition.Z));
 
                 foreach (MeshSurfaceData surface in mesh.Surfaces)
                 {
@@ -6136,8 +6152,15 @@ namespace LimitlessSquareEngine
         private Matrix4x4 CreateSceneViewMatrix(SceneWorldState cameraWorld)
         {
             Quaternion cameraRotation = cameraWorld.Rotation.ToSingle();
-            Quaternion inverse = Quaternion.Inverse(cameraRotation);
-            return Matrix4x4.CreateFromQuaternion(inverse);
+
+            Matrix4x4 flipZ = Matrix4x4.Identity;
+            flipZ.M33 = -1f;
+
+            Matrix4x4 rotationLh = Matrix4x4.CreateFromQuaternion(cameraRotation);
+            Matrix4x4 rotationRh = flipZ * rotationLh * flipZ;
+
+            Matrix4x4.Invert(rotationRh, out Matrix4x4 view);
+            return view;
         }
 
         private Matrix4x4 CreateSceneProjection(CameraRenderSettings settings, float aspect)

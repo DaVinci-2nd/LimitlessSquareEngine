@@ -1,4 +1,5 @@
 ﻿using Jitter2;
+using Jitter2.Collision;
 using Jitter2.Collision.Shapes;
 using Jitter2.Dynamics;
 using Jitter2.LinearMath;
@@ -117,6 +118,7 @@ namespace LimitlessSquareEngine
             SceneWorldState initialWorld = ResolveWorld(node);
 
             RigidBody body = world.CreateRigidBody();
+            body.Tag = node.Source.Id;
 
             body.Position = ToJVector(initialWorld.Position);
             body.Orientation = ToJQuaternion(initialWorld.Rotation);
@@ -171,7 +173,6 @@ namespace LimitlessSquareEngine
             if (physics.Runtime.DirtyNodes.Count == 0)
                 return;
 
-            bool movedNonDynamicBody = false;
             List<string> processedNodes = new List<string>();
 
             foreach (Scene.SceneRuntimeNode node in physics.OrderedPhysicsNodes)
@@ -206,7 +207,6 @@ namespace LimitlessSquareEngine
                     continue;
 
                 RecreateNonDynamicBody(physics, node, config, body);
-                movedNonDynamicBody = true;
             }
 
             foreach (string id in processedNodes)
@@ -234,6 +234,259 @@ namespace LimitlessSquareEngine
                 Math.Abs(a.Y - b.Y) <= 1e-9 &&
                 Math.Abs(a.Z - b.Z) <= 1e-9 &&
                 Math.Abs(a.W - b.W) <= 1e-9;
+        }
+
+        internal static bool HasBody(string sceneId, string objectId)
+        {
+            sceneId = sceneId?.Trim() ?? string.Empty;
+            objectId = objectId?.Trim() ?? string.Empty;
+
+            if (string.IsNullOrWhiteSpace(sceneId) || string.IsNullOrWhiteSpace(objectId))
+                return false;
+
+            if (!_sceneWorlds.TryGetValue(sceneId, out var physics))
+                return false;
+
+            return physics.Bodies.ContainsKey(objectId);
+        }
+
+        private static bool TryGetScenePhysicsRuntime(string? sceneId, out ScenePhysicsRuntime physics)
+        {
+            physics = null!;
+
+            sceneId = sceneId?.Trim();
+
+            if (string.IsNullOrWhiteSpace(sceneId))
+            {
+                Console.WriteLine("[!] Physics skipped: sceneId is null or empty.");
+                return false;
+            }
+
+            if (!_sceneWorlds.TryGetValue(sceneId, out physics!))
+            {
+                Console.WriteLine($"[!] Physics skipped: scene '{sceneId}' is not registered.");
+                return false;
+            }
+
+            return true;
+        }
+
+        private static bool TryGetBody(
+            string? sceneId,
+            string? objectId,
+            out ScenePhysicsRuntime physics,
+            out Scene.SceneRuntimeNode node,
+            out RigidBody body,
+            out PhysicsBody config)
+        {
+            physics = null!;
+            node = null!;
+            body = null!;
+            config = null!;
+
+            objectId = objectId?.Trim();
+
+            if (!TryGetScenePhysicsRuntime(sceneId, out physics))
+                return false;
+
+            if (string.IsNullOrWhiteSpace(objectId))
+            {
+                Console.WriteLine($"[!] Physics skipped: objectId is null or empty. scene='{sceneId}'");
+                return false;
+            }
+
+            if (!physics.Runtime.Nodes.TryGetValue(objectId, out node!))
+            {
+                Console.WriteLine($"[!] Physics skipped: object '{objectId}' not found in scene '{sceneId}'.");
+                return false;
+            }
+
+            if (!physics.Bodies.TryGetValue(objectId, out body!))
+            {
+                Console.WriteLine($"[!] Physics skipped: object '{objectId}' has no rigid body in scene '{sceneId}'.");
+                return false;
+            }
+
+            config = node.Source.Physics!;
+            if (config == null || !config.Enabled)
+            {
+                Console.WriteLine($"[!] Physics skipped: object '{objectId}' physics is null or disabled in scene '{sceneId}'.");
+                return false;
+            }
+
+            return true;
+        }
+
+        private static void SyncBodyPoseToScene(ScenePhysicsRuntime physics, Scene.SceneRuntimeNode node, RigidBody body)
+        {
+            Double3 worldPosition = ToDouble3(body.Position);
+            DQuaternion worldRotation = ToDQuaternion(body.Orientation);
+
+            ApplyWorldPoseToNode(node, worldPosition, worldRotation);
+            MarkSubtreeDirtyFromPhysics(physics.Runtime, node);
+        }
+
+        private static bool TryNormalizeDirection(Double3 direction, out Double3 normalized)
+        {
+            double lenSq =
+                direction.X * direction.X +
+                direction.Y * direction.Y +
+                direction.Z * direction.Z;
+
+            if (lenSq <= 1e-24)
+            {
+                normalized = Double3.Zero;
+                return false;
+            }
+
+            double len = Math.Sqrt(lenSq);
+            normalized = direction / len;
+            return true;
+        }
+
+        internal static bool TrySetBodyWorldPosition(string sceneId, string objectId, Double3 worldPosition)
+        {
+            if (!TryGetBody(sceneId, objectId, out var physics, out var node, out var body, out _))
+                return false;
+
+            body.Position = ToJVector(worldPosition);
+            SyncBodyPoseToScene(physics, node, body);
+            return true;
+        }
+
+        internal static bool TrySetBodyWorldRotation(string sceneId, string objectId, DQuaternion worldRotation)
+        {
+            if (!TryGetBody(sceneId, objectId, out var physics, out var node, out var body, out _))
+                return false;
+
+            body.Orientation = ToJQuaternion(worldRotation.Normalized());
+            SyncBodyPoseToScene(physics, node, body);
+            return true;
+        }
+
+        public static Double3 GetVelocity(string sceneId, string objectId)
+        {
+            if (!TryGetBody(sceneId, objectId, out _, out _, out var body, out _))
+                return Double3.Zero;
+
+            return ToDouble3(body.Velocity);
+        }
+
+        public static void SetVelocity(string sceneId, string objectId, Double3 velocity)
+        {
+            if (!TryGetBody(sceneId, objectId, out _, out _, out var body, out _))
+                return;
+
+            body.Velocity = ToJVector(velocity);
+        }
+
+        public static Double3 GetAngularVelocity(string sceneId, string objectId)
+        {
+            if (!TryGetBody(sceneId, objectId, out _, out _, out var body, out _))
+                return Double3.Zero;
+
+            return ToDouble3(body.AngularVelocity);
+        }
+
+        public static void SetAngularVelocity(string sceneId, string objectId, Double3 angularVelocity)
+        {
+            if (!TryGetBody(sceneId, objectId, out _, out _, out var body, out _))
+                return;
+
+            body.AngularVelocity = ToJVector(angularVelocity);
+        }
+
+        public static void AddForce(string sceneId, string objectId, Double3 force)
+        {
+            if (!TryGetBody(sceneId, objectId, out _, out _, out var body, out _))
+                return;
+
+            body.AddForce(ToJVector(force));
+        }
+
+        public static void AddForceAtPosition(string sceneId, string objectId, Double3 force, Double3 worldPosition)
+        {
+            if (!TryGetBody(sceneId, objectId, out _, out _, out var body, out _))
+                return;
+
+            body.AddForce(ToJVector(force), ToJVector(worldPosition));
+        }
+
+        public static void ApplyImpulse(string sceneId, string objectId, Double3 impulse)
+        {
+            if (!TryGetBody(sceneId, objectId, out _, out _, out var body, out _))
+                return;
+
+            body.ApplyImpulse(ToJVector(impulse));
+        }
+
+        public static void ApplyImpulseAtPosition(string sceneId, string objectId, Double3 impulse, Double3 worldPosition)
+        {
+            if (!TryGetBody(sceneId, objectId, out _, out _, out var body, out _))
+                return;
+
+            body.ApplyImpulse(ToJVector(impulse), ToJVector(worldPosition));
+        }
+
+        public static void SetActivationState(string sceneId, string objectId, bool active)
+        {
+            if (!TryGetBody(sceneId, objectId, out _, out _, out var body, out _))
+                return;
+
+            body.SetActivationState(active);
+        }
+
+        public static PhysicsRaycastHit? Raycast(string sceneId, Double3 origin, Double3 direction, double maxDistance)
+        {
+            if (!TryGetScenePhysicsRuntime(sceneId, out var physics))
+                return null;
+
+            if (!(maxDistance > 0.0))
+            {
+                Console.WriteLine($"[!] Physics raycast skipped: maxDistance must be > 0. scene='{sceneId}'");
+                return null;
+            }
+
+            if (!TryNormalizeDirection(direction, out Double3 normalizedDirection))
+            {
+                Console.WriteLine($"[!] Physics raycast skipped: direction is zero. scene='{sceneId}'");
+                return null;
+            }
+
+            JVector rayOrigin = ToJVector(origin);
+            JVector rayDirection = ToJVector(normalizedDirection);
+
+            bool hit = physics.World.DynamicTree.RayCast(
+                rayOrigin,
+                rayDirection,
+                null,
+                null,
+                out IDynamicTreeProxy? proxy,
+                out JVector normal,
+                out double lambda);
+
+            if (!hit)
+                return null;
+
+            double distance = lambda;
+            if (distance > maxDistance)
+                return null;
+
+            string objectId = string.Empty;
+
+            if (proxy is RigidBodyShape shape && shape.RigidBody?.Tag is string hitObjectId)
+                objectId = hitObjectId;
+
+            Double3 point = origin + normalizedDirection * distance;
+
+            return new PhysicsRaycastHit
+            {
+                SceneId = sceneId,
+                ObjectId = objectId,
+                Point = point,
+                Normal = ToDouble3(normal),
+                Distance = distance
+            };
         }
 
         private static void WakeBodiesUnderForce(ScenePhysicsRuntime physics)
@@ -289,11 +542,7 @@ namespace LimitlessSquareEngine
                 if (NormalizeMotionType(config.MotionType) != MotionType.Dynamic)
                     continue;
 
-                Double3 worldPosition = ToDouble3(body.Position);
-                DQuaternion worldRotation = ToDQuaternion(body.Orientation);
-
-                ApplyWorldPoseToNode(node, worldPosition, worldRotation);
-                MarkSubtreeDirtyFromPhysics(physics.Runtime, node);
+                SyncBodyPoseToScene(physics, node, body);
             }
         }
 

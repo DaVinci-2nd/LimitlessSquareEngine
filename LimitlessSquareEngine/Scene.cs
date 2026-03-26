@@ -234,6 +234,15 @@ namespace LimitlessSquareEngine
         public double AngularDamping { get; set; } = 0.005;
     }
 
+    public sealed class PhysicsRaycastHit
+    {
+        public string SceneId { get; set; } = "";
+        public string ObjectId { get; set; } = "";
+        public Double3 Point { get; set; } = Double3.Zero;
+        public Double3 Normal { get; set; } = Double3.Zero;
+        public double Distance { get; set; }
+    }
+
     public class SceneObject
     {
         public string Id { get; set; } = "";
@@ -505,10 +514,48 @@ namespace LimitlessSquareEngine
                 throw new InvalidOperationException("[X] Scale component cannot be zero.");
         }
 
+        private static bool ShouldRouteTransformToPhysics(string sceneId, SceneRuntimeNode node)
+        {
+            PhysicsBody? physics = node.Source.Physics;
+            return physics != null &&
+                   physics.Enabled &&
+                   Physics.HasBody(sceneId, node.Source.Id);
+        }
+
+        private static Double3 LocalPositionToWorld(SceneRuntimeNode node, Double3 localPosition)
+        {
+            if (node.Parent == null)
+                return localPosition;
+
+            RecalculateWorld(node.Parent);
+            SceneWorldState parent = node.Parent.World;
+
+            Double3 scaledLocalPos = Double3.Multiply(localPosition, parent.Scale);
+            Double3 rotatedLocalPos = parent.Rotation.Rotate(scaledLocalPos);
+
+            return parent.Position + rotatedLocalPos;
+        }
+
+        private static DQuaternion LocalRotationToWorld(SceneRuntimeNode node, DQuaternion localRotation)
+        {
+            if (node.Parent == null)
+                return localRotation;
+
+            RecalculateWorld(node.Parent);
+            return (node.Parent.World.Rotation * localRotation).Normalized();
+        }
+
         public static void SetLocalPosition(string sceneId, string objectId, Double3 value)
         {
             if (!TryGetNode(sceneId, objectId, out var runtime, out var node))
                 return;
+
+            if (ShouldRouteTransformToPhysics(sceneId, node))
+            {
+                Double3 worldValue = LocalPositionToWorld(node, value);
+                Physics.TrySetBodyWorldPosition(sceneId, objectId, worldValue);
+                return;
+            }
 
             node.LocalPosition = value;
 
@@ -523,6 +570,12 @@ namespace LimitlessSquareEngine
         {
             if (!TryGetNode(sceneId, objectId, out var runtime, out var node))
                 return;
+
+            if (ShouldRouteTransformToPhysics(sceneId, node))
+            {
+                Physics.TrySetBodyWorldPosition(sceneId, objectId, value);
+                return;
+            }
 
             Double3 localValue;
 
@@ -563,8 +616,15 @@ namespace LimitlessSquareEngine
             if (!TryGetNode(sceneId, objectId, out var runtime, out var node))
                 return;
 
-            Double3 deltaInParentSpace = node.LocalRotation.Rotate(delta);
-            node.LocalPosition += deltaInParentSpace;
+            if (ShouldRouteTransformToPhysics(sceneId, node))
+            {
+                Double3 deltaInParentSpace = node.LocalRotation.Rotate(delta);
+                SetLocalPosition(sceneId, objectId, node.LocalPosition + deltaInParentSpace);
+                return;
+            }
+
+            Double3 deltaInParentSpaceOriginal = node.LocalRotation.Rotate(delta);
+            node.LocalPosition += deltaInParentSpaceOriginal;
 
             if (node.Source.Transform == null)
                 node.Source.Transform = new SceneTransform();
@@ -579,6 +639,13 @@ namespace LimitlessSquareEngine
                 return;
 
             RecalculateWorld(node);
+
+            if (ShouldRouteTransformToPhysics(sceneId, node))
+            {
+                Physics.TrySetBodyWorldPosition(sceneId, objectId, node.World.Position + delta);
+                return;
+            }
+
             SetPosition(sceneId, objectId, node.World.Position + delta);
         }
 
@@ -586,6 +653,14 @@ namespace LimitlessSquareEngine
         {
             if (!TryGetNode(sceneId, objectId, out var runtime, out var node))
                 return;
+
+            if (ShouldRouteTransformToPhysics(sceneId, node))
+            {
+                DQuaternion localRotation = DQuaternion.FromEulerDegrees(eulerDegrees);
+                DQuaternion worldRotation = LocalRotationToWorld(node, localRotation);
+                Physics.TrySetBodyWorldRotation(sceneId, objectId, worldRotation);
+                return;
+            }
 
             node.LocalRotation = DQuaternion.FromEulerDegrees(eulerDegrees);
 
@@ -601,18 +676,25 @@ namespace LimitlessSquareEngine
             if (!TryGetNode(sceneId, objectId, out var runtime, out var node))
                 return;
 
-            DQuaternion targetWorld = DQuaternion.FromEulerDegrees(eulerDegrees);
+            if (ShouldRouteTransformToPhysics(sceneId, node))
+            {
+                DQuaternion targetWorld = DQuaternion.FromEulerDegrees(eulerDegrees);
+                Physics.TrySetBodyWorldRotation(sceneId, objectId, targetWorld);
+                return;
+            }
+
+            DQuaternion targetWorldOriginal = DQuaternion.FromEulerDegrees(eulerDegrees);
             DQuaternion localRotation;
 
             if (node.Parent == null)
             {
-                localRotation = targetWorld;
+                localRotation = targetWorldOriginal;
             }
             else
             {
                 RecalculateWorld(node.Parent);
                 DQuaternion parentWorld = node.Parent.World.Rotation;
-                localRotation = (parentWorld.Inverse() * targetWorld).Normalized();
+                localRotation = (parentWorld.Inverse() * targetWorldOriginal).Normalized();
             }
 
             node.LocalRotation = localRotation;
@@ -629,8 +711,17 @@ namespace LimitlessSquareEngine
             if (!TryGetNode(sceneId, objectId, out var runtime, out var node))
                 return;
 
-            DQuaternion delta = DQuaternion.FromEulerDegrees(deltaEulerDegrees);
-            node.LocalRotation = (node.LocalRotation * delta).Normalized();
+            if (ShouldRouteTransformToPhysics(sceneId, node))
+            {
+                DQuaternion delta = DQuaternion.FromEulerDegrees(deltaEulerDegrees);
+                DQuaternion newLocal = (node.LocalRotation * delta).Normalized();
+                DQuaternion newWorld = LocalRotationToWorld(node, newLocal);
+                Physics.TrySetBodyWorldRotation(sceneId, objectId, newWorld);
+                return;
+            }
+
+            DQuaternion deltaOriginal = DQuaternion.FromEulerDegrees(deltaEulerDegrees);
+            node.LocalRotation = (node.LocalRotation * deltaOriginal).Normalized();
 
             if (node.Source.Transform == null)
                 node.Source.Transform = new SceneTransform();
@@ -646,17 +737,25 @@ namespace LimitlessSquareEngine
 
             RecalculateWorld(node);
 
-            DQuaternion delta = DQuaternion.FromEulerDegrees(deltaEulerDegrees);
-            DQuaternion newWorld = (delta * node.World.Rotation).Normalized();
+            if (ShouldRouteTransformToPhysics(sceneId, node))
+            {
+                DQuaternion delta = DQuaternion.FromEulerDegrees(deltaEulerDegrees);
+                DQuaternion newWorld = (delta * node.World.Rotation).Normalized();
+                Physics.TrySetBodyWorldRotation(sceneId, objectId, newWorld);
+                return;
+            }
+
+            DQuaternion deltaOriginal = DQuaternion.FromEulerDegrees(deltaEulerDegrees);
+            DQuaternion newWorldOriginal = (deltaOriginal * node.World.Rotation).Normalized();
 
             if (node.Parent == null)
             {
-                node.LocalRotation = newWorld;
+                node.LocalRotation = newWorldOriginal;
             }
             else
             {
                 RecalculateWorld(node.Parent);
-                node.LocalRotation = (node.Parent.World.Rotation.Inverse() * newWorld).Normalized();
+                node.LocalRotation = (node.Parent.World.Rotation.Inverse() * newWorldOriginal).Normalized();
             }
 
             if (node.Source.Transform == null)
@@ -749,6 +848,75 @@ namespace LimitlessSquareEngine
 
             RecalculateWorld(node);
             SetScale(sceneId, objectId, node.World.Scale + delta);
+        }
+
+        public static Double3 GetLocalPosition(string sceneId, string objectId)
+        {
+            if (!TryGetNode(sceneId, objectId, out _, out var node))
+                return Double3.Zero;
+
+            return node.LocalPosition;
+        }
+
+        public static Double3 GetPosition(string sceneId, string objectId)
+        {
+            if (!TryGetNode(sceneId, objectId, out _, out var node))
+                return Double3.Zero;
+
+            RecalculateWorld(node);
+            return node.World.Position;
+        }
+
+        public static Double3 GetLocalRotation(string sceneId, string objectId)
+        {
+            if (!TryGetNode(sceneId, objectId, out _, out var node))
+                return Double3.Zero;
+
+            return node.LocalRotation.ToEulerDegrees();
+        }
+
+        public static Double3 GetRotation(string sceneId, string objectId)
+        {
+            if (!TryGetNode(sceneId, objectId, out _, out var node))
+                return Double3.Zero;
+
+            RecalculateWorld(node);
+            return node.World.Rotation.ToEulerDegrees();
+        }
+
+        public static Double3 GetLocalScale(string sceneId, string objectId)
+        {
+            if (!TryGetNode(sceneId, objectId, out _, out var node))
+                return Double3.One;
+
+            return node.LocalScale;
+        }
+
+        public static Double3 GetScale(string sceneId, string objectId)
+        {
+            if (!TryGetNode(sceneId, objectId, out _, out var node))
+                return Double3.One;
+
+            RecalculateWorld(node);
+            return node.World.Scale;
+        }
+
+        public static string? GetParentId(string sceneId, string objectId)
+        {
+            if (!TryGetNode(sceneId, objectId, out _, out var node))
+                return null;
+
+            return node.Parent?.Source.Id;
+        }
+
+        public static string[] GetChildIds(string sceneId, string objectId)
+        {
+            if (!TryGetNode(sceneId, objectId, out _, out var node))
+                return Array.Empty<string>();
+
+            return node.Children
+                .Select(child => child.Source.Id)
+                .ToArray();
         }
 
         public static void FlushDirtyToRenderer()
@@ -886,45 +1054,45 @@ namespace LimitlessSquareEngine
         }
 
         public static void RebuildCameraQueue(string sceneId)
-{
-    if (!_loadedScenes.TryGetValue(sceneId, out var scene))
-    {
-        Console.WriteLine($"[!] Camera queue rebuild skipped: scene '{sceneId}' is not loaded.");
-        return;
-    }
-
-    var queue = new List<SceneCameraQueueItem>();
-    int order = 0;
-
-    foreach (var obj in scene.Objects)
-    {
-        if (!obj.Active)
-            continue;
-
-        if (!string.Equals(obj.Type, "Camera", StringComparison.Ordinal))
-            continue;
-
-        try
         {
-            CameraRenderSettings settings = ParseCameraSettings(obj.Data, obj.Id);
-
-            queue.Add(new SceneCameraQueueItem
+            if (!_loadedScenes.TryGetValue(sceneId, out var scene))
             {
-                SceneId = scene.SceneId,
-                ObjectId = obj.Id,
-                Settings = settings,
-                SubmissionOrder = order++
-            });
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"[!] Camera '{obj.Id}' skipped while rebuilding queue: {ex.Message}");
-        }
-    }
+                Console.WriteLine($"[!] Camera queue rebuild skipped: scene '{sceneId}' is not loaded.");
+                return;
+            }
 
-    _cameraQueues[sceneId] = queue;
-    //Console.WriteLine($"[i] Camera queue rebuilt for scene '{sceneId}', count={queue.Count}");
-}
+            var queue = new List<SceneCameraQueueItem>();
+            int order = 0;
+
+            foreach (var obj in scene.Objects)
+            {
+                if (!obj.Active)
+                    continue;
+
+                if (!string.Equals(obj.Type, "Camera", StringComparison.Ordinal))
+                    continue;
+
+                try
+                {
+                    CameraRenderSettings settings = ParseCameraSettings(obj.Data, obj.Id);
+
+                    queue.Add(new SceneCameraQueueItem
+                    {
+                        SceneId = scene.SceneId,
+                        ObjectId = obj.Id,
+                        Settings = settings,
+                        SubmissionOrder = order++
+                    });
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[!] Camera '{obj.Id}' skipped while rebuilding queue: {ex.Message}");
+                }
+            }
+
+            _cameraQueues[sceneId] = queue;
+            //Console.WriteLine($"[i] Camera queue rebuilt for scene '{sceneId}', count={queue.Count}");
+        }
 
         public static Dictionary<string, SceneWorldState> BuildWorldStates(SceneData scene)
         {

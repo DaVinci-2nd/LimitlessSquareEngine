@@ -369,6 +369,7 @@ namespace LimitlessSquareEngine
             UserData.RegisterType<SceneTransform>();
             UserData.RegisterType<Double3>();
             UserData.RegisterType<Input>();
+            UserData.RegisterType<PhysicsRaycastHit>();
             // 初始化窗口
             var options = WindowOptions.Default;
             options.Size = new Silk.NET.Maths.Vector2D<int>(800, 600);
@@ -543,6 +544,79 @@ namespace LimitlessSquareEngine
                             Scene.RemoveScene(sceneId);
                         });
 
+                        // 注入物理函数
+                        instance.LuaScript.Globals["get_rigidbody_velocity"] =
+                            (Func<string, string, Double3>)((sceneId, objectId) =>
+                            {
+                                return Physics.GetVelocity(sceneId, objectId);
+                            });
+
+                        instance.LuaScript.Globals["set_rigidbody_velocity"] =
+                            (Action<string, string, double, double, double>)((sceneId, objectId, x, y, z) =>
+                            {
+                                Physics.SetVelocity(sceneId, objectId, new Double3(x, y, z));
+                            });
+
+                        instance.LuaScript.Globals["get_rigidbody_angular_velocity"] =
+                            (Func<string, string, Double3>)((sceneId, objectId) =>
+                            {
+                                return Physics.GetAngularVelocity(sceneId, objectId);
+                            });
+
+                        instance.LuaScript.Globals["set_rigidbody_angular_velocity"] =
+                            (Action<string, string, double, double, double>)((sceneId, objectId, x, y, z) =>
+                            {
+                                Physics.SetAngularVelocity(sceneId, objectId, new Double3(x, y, z));
+                            });
+
+                        instance.LuaScript.Globals["add_rigidbody_force"] =
+                            (Action<string, string, double, double, double>)((sceneId, objectId, x, y, z) =>
+                            {
+                                Physics.AddForce(sceneId, objectId, new Double3(x, y, z));
+                            });
+
+                        instance.LuaScript.Globals["add_rigidbody_force_at_position"] =
+                            (Action<string, string, double, double, double, double, double, double>)((sceneId, objectId, fx, fy, fz, px, py, pz) =>
+                            {
+                                Physics.AddForceAtPosition(
+                                    sceneId,
+                                    objectId,
+                                    new Double3(fx, fy, fz),
+                                    new Double3(px, py, pz));
+                            });
+
+                        instance.LuaScript.Globals["add_rigidbody_impulse"] =
+                            (Action<string, string, double, double, double>)((sceneId, objectId, x, y, z) =>
+                            {
+                                Physics.ApplyImpulse(sceneId, objectId, new Double3(x, y, z));
+                            });
+
+                        instance.LuaScript.Globals["add_rigidbody_impulse_at_position"] =
+                            (Action<string, string, double, double, double, double, double, double>)((sceneId, objectId, ix, iy, iz, px, py, pz) =>
+                            {
+                                Physics.ApplyImpulseAtPosition(
+                                    sceneId,
+                                    objectId,
+                                    new Double3(ix, iy, iz),
+                                    new Double3(px, py, pz));
+                            });
+
+                        instance.LuaScript.Globals["set_rigidbody_active"] =
+                            (Action<string, string, bool>)((sceneId, objectId, active) =>
+                            {
+                                Physics.SetActivationState(sceneId, objectId, active);
+                            });
+
+                        instance.LuaScript.Globals["raycast"] =
+                            (Func<string, double, double, double, double, double, double, double, PhysicsRaycastHit?>)((sceneId, ox, oy, oz, dx, dy, dz, maxDistance) =>
+                            {
+                                return Physics.Raycast(
+                                    sceneId,
+                                    new Double3(ox, oy, oz),
+                                    new Double3(dx, dy, dz),
+                                    maxDistance);
+                            });
+
                         // 注入手动重扫摄像机函数
                         instance.LuaScript.Globals["rescan_scene_cameras"] = (Action<string>)((sceneId) =>
                         {
@@ -632,6 +706,62 @@ namespace LimitlessSquareEngine
                             (Action<string, string, double, double, double>)((sceneId, objectId, x, y, z) =>
                             {
                                 Scene.AlterScale(sceneId, objectId, new Double3(x, y, z));
+                            });
+
+                        // 注入变换读取函数
+                        instance.LuaScript.Globals["get_local_position"] =
+                            (Func<string, string, Double3>)((sceneId, objectId) =>
+                            {
+                                return Scene.GetLocalPosition(sceneId, objectId);
+                            });
+
+                        instance.LuaScript.Globals["get_position"] =
+                            (Func<string, string, Double3>)((sceneId, objectId) =>
+                            {
+                                return Scene.GetPosition(sceneId, objectId);
+                            });
+
+                        instance.LuaScript.Globals["get_local_rotation"] =
+                            (Func<string, string, Double3>)((sceneId, objectId) =>
+                            {
+                                return Scene.GetLocalRotation(sceneId, objectId);
+                            });
+
+                        instance.LuaScript.Globals["get_rotation"] =
+                            (Func<string, string, Double3>)((sceneId, objectId) =>
+                            {
+                                return Scene.GetRotation(sceneId, objectId);
+                            });
+
+                        instance.LuaScript.Globals["get_local_scale"] =
+                            (Func<string, string, Double3>)((sceneId, objectId) =>
+                            {
+                                return Scene.GetLocalScale(sceneId, objectId);
+                            });
+
+                        instance.LuaScript.Globals["get_scale"] =
+                            (Func<string, string, Double3>)((sceneId, objectId) =>
+                            {
+                                return Scene.GetScale(sceneId, objectId);
+                            });
+
+                        // 注入节点关系获取函数
+                        instance.LuaScript.Globals["get_parent_id"] =
+                            (Func<string, string, string?>)((sceneId, objectId) =>
+                            {
+                                return Scene.GetParentId(sceneId, objectId);
+                            });
+
+                        instance.LuaScript.Globals["get_child_ids"] =
+                            (Func<string, string, Table>)((sceneId, objectId) =>
+                            {
+                                string[] ids = Scene.GetChildIds(sceneId, objectId);
+
+                                Table table = new Table(instance.LuaScript);
+                                foreach (string id in ids)
+                                    table.Append(DynValue.NewString(id));
+
+                                return table;
                             });
 
                         // 注入输入
