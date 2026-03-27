@@ -4271,8 +4271,8 @@ namespace LimitlessSquareEngine
         {
             public string Name { get; set; } = "";
             public Vector3 DiffuseColor { get; set; } = Vector3.One;
-            public Vector3 SpecularColor { get; set; } = Vector3.One;
-            public Vector3 AmbientColor { get; set; } = Vector3.One;
+            public Vector3 SpecularColor { get; set; } = Vector3.Zero;
+            public Vector3 AmbientColor { get; set; } = Vector3.Zero;
             public float Alpha { get; set; } = 1f;
             public float Shininess { get; set; } = 0f;
 
