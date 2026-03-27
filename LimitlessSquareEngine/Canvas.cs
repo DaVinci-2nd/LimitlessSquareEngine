@@ -11,7 +11,7 @@ namespace LimitlessSquareEngine
 {
     // UI元素类型
     [JsonConverter(typeof(JsonStringEnumConverter))]
-    public enum UIElementType
+    public enum CanvasElementType
     {
         Panel,
         Button,
@@ -22,7 +22,7 @@ namespace LimitlessSquareEngine
 
     // 布局模式
     [JsonConverter(typeof(JsonStringEnumConverter))]
-    public enum LayoutMode
+    public enum CanvasLayoutMode
     {
         None,
         Vertical,
@@ -30,7 +30,7 @@ namespace LimitlessSquareEngine
     }
 
     [JsonConverter(typeof(JsonStringEnumConverter))]
-    public enum UITextHorizontalAlign
+    public enum CanvasTextHorizontalAlign
     {
         Left,
         Center,
@@ -38,7 +38,7 @@ namespace LimitlessSquareEngine
     }
 
     [JsonConverter(typeof(JsonStringEnumConverter))]
-    public enum UITextVerticalAlign
+    public enum CanvasTextVerticalAlign
     {
         Top,
         Middle,
@@ -47,10 +47,10 @@ namespace LimitlessSquareEngine
 
     // UI元素类
     [MoonSharpUserData]
-    public class UIElement
+    public class CanvasElement
     {
         // 元素类型
-        public UIElementType Type { get; set; }
+        public CanvasElementType Type { get; set; }
 
         // 图层
         public int Layer { get; set; }
@@ -68,13 +68,13 @@ namespace LimitlessSquareEngine
 
         // 父元素
         [JsonIgnore]
-        public UIElement? Parent { get; set; }
+        public CanvasElement? Parent { get; set; }
 
         // 子元素
-        public List<UIElement> Children { get; set; } = new();
+        public List<CanvasElement> Children { get; set; } = new();
 
         // 布局模式
-        public LayoutMode Layout { get; set; }
+        public CanvasLayoutMode Layout { get; set; }
 
         // 内边距
         public float PaddingLeft { get; set; }
@@ -103,8 +103,8 @@ namespace LimitlessSquareEngine
         // 是否裁剪到元素矩形内
         public bool ClipText { get; set; }
 
-        public UITextHorizontalAlign TextHorizontalAlign { get; set; }
-        public UITextVerticalAlign TextVerticalAlign { get; set; }
+        public CanvasTextHorizontalAlign TextHorizontalAlign { get; set; }
+        public CanvasTextVerticalAlign TextVerticalAlign { get; set; }
 
         public string ImageSource { get; set; }
 
@@ -114,7 +114,7 @@ namespace LimitlessSquareEngine
 
         public bool Interactable { get; set; }
 
-        public UIElement()
+        public CanvasElement()
         {
             Visible = true;
             Layer = 0;
@@ -124,7 +124,7 @@ namespace LimitlessSquareEngine
             Width = 0f;
             Height = 0f;
 
-            Layout = LayoutMode.None;
+            Layout = CanvasLayoutMode.None;
 
             PaddingLeft = 0f;
             PaddingTop = 0f;
@@ -143,7 +143,7 @@ namespace LimitlessSquareEngine
             Interactable = true;
         }
 
-        public void AddChild(UIElement child)
+        public void AddChild(CanvasElement child)
         {
             if (child == null)
                 return;
@@ -155,7 +155,7 @@ namespace LimitlessSquareEngine
             Children.Add(child);
         }
 
-        public void RemoveChild(UIElement child)
+        public void RemoveChild(CanvasElement child)
         {
             if (child == null)
                 return;
@@ -201,8 +201,8 @@ namespace LimitlessSquareEngine
 
             switch (Layout)
             {
-                case LayoutMode.Vertical:
-                    foreach (UIElement child in Children)
+                case CanvasLayoutMode.Vertical:
+                    foreach (CanvasElement child in Children)
                     {
                         if (!child.Visible)
                             continue;
@@ -216,8 +216,8 @@ namespace LimitlessSquareEngine
                     }
                     break;
 
-                case LayoutMode.Horizontal:
-                    foreach (UIElement child in Children)
+                case CanvasLayoutMode.Horizontal:
+                    foreach (CanvasElement child in Children)
                     {
                         if (!child.Visible)
                             continue;
@@ -231,9 +231,9 @@ namespace LimitlessSquareEngine
                     }
                     break;
 
-                case LayoutMode.None:
+                case CanvasLayoutMode.None:
                 default:
-                    foreach (UIElement child in Children)
+                    foreach (CanvasElement child in Children)
                     {
                         if (!child.Visible)
                             continue;
@@ -246,16 +246,16 @@ namespace LimitlessSquareEngine
     }
 
     [MoonSharpUserData]
-    internal class UI
+    internal class Canvas
     {
-        public List<UIElement> RootElements { get; private set; }
+        public List<CanvasElement> RootElements { get; private set; }
 
-        public UI()
+        public Canvas()
         {
-            RootElements = new List<UIElement>();
+            RootElements = new List<CanvasElement>();
         }
 
-        public void AddElement(UIElement element)
+        public void AddElement(CanvasElement element)
         {
             if (element == null)
                 return;
@@ -267,7 +267,7 @@ namespace LimitlessSquareEngine
             RootElements.Add(element);
         }
 
-        public void RemoveElement(UIElement element)
+        public void RemoveElement(CanvasElement element)
         {
             if (element == null)
                 return;
@@ -278,7 +278,7 @@ namespace LimitlessSquareEngine
 
         public void Clear()
         {
-            foreach (UIElement element in RootElements)
+            foreach (CanvasElement element in RootElements)
                 element.Parent = null;
 
             RootElements.Clear();
@@ -286,7 +286,7 @@ namespace LimitlessSquareEngine
 
         public void UpdateLayout()
         {
-            foreach (UIElement element in RootElements)
+            foreach (CanvasElement element in RootElements)
             {
                 if (!element.Visible)
                     continue;

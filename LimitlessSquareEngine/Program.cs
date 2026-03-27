@@ -15,22 +15,31 @@ using System.Drawing;
 namespace LimitlessSquareEngine
 {
     /// <summary>
-    /// lua脚本类
+    /// Lua脚本实例
     /// </summary>
     public class LuaScriptInstance
     {
+        // 脚本文件路径
         public string FilePath { get; private set; }
+        // Lua解释器实例
         public Script LuaScript { get; private set; }
+        // 脚本初始化函数
         public DynValue InitFunction { get; set; }
+        // 脚本循环函数
         public DynValue LoopFunction { get; set; }
 
+        /// <summary>
+        /// 创建Lua脚本实例
+        /// </summary>
+        /// <param name="filePath"></param>
         public LuaScriptInstance(string filePath)
         {
             FilePath = filePath;
-            // 配置Lua设置
+            // 配置Lua访问权限
             Script.GlobalOptions.Platform = new LimitedPlatformAccessor();
             // 创建独立Lua解释器环境
             LuaScript = new Script(CoreModules.Basic | CoreModules.Math | CoreModules.String | CoreModules.Table | CoreModules.Coroutine);
+            
             // 防止开发者顺网线爬进你的系统
             LuaScript.Globals["os"] = DynValue.Nil;
             LuaScript.Globals["io"] = DynValue.Nil;
@@ -46,8 +55,19 @@ namespace LimitlessSquareEngine
         }
     }
 
+    /// <summary>
+    /// Vector4 Json转换器
+    /// </summary>
     public class Vector4JsonConverter : JsonConverter<Vector4>
     {
+        /// <summary>
+        /// 从JSON读取Vector4
+        /// </summary>
+        /// <param name="reader"></param>
+        /// <param name="typeToConvert"></param>
+        /// <param name="options"></param>
+        /// <returns></returns>
+        /// <exception cref="JsonException"></exception>
         public override Vector4 Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
         {
             if (reader.TokenType != JsonTokenType.StartArray)
@@ -66,6 +86,12 @@ namespace LimitlessSquareEngine
             return new Vector4(values[0], values[1], values[2], values[3]);
         }
 
+        /// <summary>
+        /// 将Vector4写入JSON
+        /// </summary>
+        /// <param name="writer"></param>
+        /// <param name="value"></param>
+        /// <param name="options"></param>
         public override void Write(Utf8JsonWriter writer, Vector4 value, JsonSerializerOptions options)
         {
             writer.WriteStartArray();
@@ -77,67 +103,72 @@ namespace LimitlessSquareEngine
         }
     }
 
+    /// <summary>
+    /// 入口类
+    /// </summary>
     internal class Program
     {
-        // Lua脚本定义
+        // Lua脚本实例列表
         static List<LuaScriptInstance> _luaScriptInstances = new List<LuaScriptInstance>();
-        // 窗口定义
+        // 主窗口实例
         static IWindow? _window;
-        // 图形定义
+        // OpenGL实例
         static GL? _gl;
 
-        // 定义任务队列
-        static BlockingCollection<Action> taskQueue = new BlockingCollection<Action>();
-        // 存储任务结果
-        static ConcurrentDictionary<int, TaskCompletionSource<DynValue>> taskResults = new ConcurrentDictionary<int, TaskCompletionSource<DynValue>>();
+        // 主线程任务队列
+        static BlockingCollection<Action> _taskQueue = new BlockingCollection<Action>();
+        // 任务结果表
+        static ConcurrentDictionary<int, TaskCompletionSource<DynValue>> _taskResults = new ConcurrentDictionary<int, TaskCompletionSource<DynValue>>();
         // 任务ID
-        static int nextTaskId = 0;
-
+        static int _nextTaskId = 0;
+        // 图形系统实例
         static Graphics? _graphics;
-        // 定义纹理路径集合
+        // 纹理路径列表
         internal static List<string> _texturePaths = new List<string>();
-        // 定义布局集合
-        internal static Dictionary<string, List<UIElement>> _uiLayouts = new Dictionary<string, List<UIElement>>();
+        // UI布局表
+        internal static Dictionary<string, List<CanvasElement>> _uiLayouts = new Dictionary<string, List<CanvasElement>>();
         // 当前激活的UI布局Key
         static string? _activeUILayoutKey = null;
-        // 当前激活的UI根节点缓存
-        static List<UIElement>? _activeUILayoutRoots = null;
+        // 当前激活的UI根节点列表
+        static List<CanvasElement>? _activeUILayoutRoots = null;
         // 场景文件注册表
         internal static Dictionary<string, string> _sceneFileRegistry = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         // 材质文件注册表
         internal static Dictionary<string, string> _materialFileRegistry = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        // 材质注册表
+        // 材质生成注册表
         internal static Dictionary<string, string> _generatedMaterialJsonRegistry = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         // 纹理文件注册表
         internal static Dictionary<string, string> _textureFileRegistry = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        // 场景文件验证信息
+        // 场景文件显示名表
         static Dictionary<string, string> _sceneFileDisplayName = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        // 输入系统
+        // 输入系统实例
         static Input? _input;
 
-        // 定义前一帧时间
+        // 上一帧时间
         private static double _lastFrameTime;
 
-        // 启动Logo选项
-        static bool showStartupLogo = true;
-        static string? startupLogoPath = null;
-        static Color startupBackgroundColor = Color.SkyBlue;
+        // 启动Logo显示选项
+        static bool _showStartupLogo = true;
+        // 启动Logo路径
+        static string? _startupLogoPath = null;
+        // 启动画面背景色
+        static Color _startupBackgroundColor = Color.SkyBlue;
 
         /// <summary>
         /// 显示启动Logo
         /// </summary>
         static void ShowStartupLogo()
         {
-            if (!showStartupLogo || _window == null || _gl == null)
+            if (!_showStartupLogo || _window == null || _gl == null)
                 return;
 
             byte[]? logoBytes = null;
 
-            if (!string.IsNullOrWhiteSpace(startupLogoPath))
+            if (!string.IsNullOrWhiteSpace(_startupLogoPath))
             {
                 try
                 {
-                    string fullPath = Path.Combine(AppContext.BaseDirectory, startupLogoPath);
+                    string fullPath = Path.Combine(AppContext.BaseDirectory, _startupLogoPath);
                     if (File.Exists(fullPath))
                         logoBytes = File.ReadAllBytes(fullPath);
                 }
@@ -342,11 +373,11 @@ namespace LimitlessSquareEngine
         }
 
         /// <summary>
-        /// 初始化方法
+        /// 初始化程序
         /// </summary>
         static void Initialize()
         {
-            // 文件结构创建
+            // 基础目录结构创建
             try
             {
                 Directory.CreateDirectory("Assets/Scene");
@@ -370,7 +401,7 @@ namespace LimitlessSquareEngine
             UserData.RegisterType<Double3>();
             UserData.RegisterType<Input>();
             UserData.RegisterType<PhysicsRaycastHit>();
-            // 初始化窗口
+            // 初始化窗口参数
             var options = WindowOptions.Default;
             options.Size = new Silk.NET.Maths.Vector2D<int>(800, 600);
             options.Title = "Limitless Square Engine";
@@ -378,12 +409,12 @@ namespace LimitlessSquareEngine
             options.ShouldSwapAutomatically = false;
             _window = Window.Create(options);
 
-            // 加载事件
+            // 窗口加载事件
             _window.Load += () =>
             {
-                // 图标设置
+                // 图标数据
                 byte[]? iconBytes = null;
-                // 搜索图标文件夹
+                // 搜索图标目录
                 string gameIconPath = Path.Combine(AppContext.BaseDirectory, "icon.png");
                 if (Directory.Exists(gameIconPath))
                 {
@@ -398,7 +429,7 @@ namespace LimitlessSquareEngine
                         try
                         {
                             iconBytes = File.ReadAllBytes(firstIcon);
-                            // 尝试解码验证有效性
+                            // 验证图标解码有效性
                             using var testCodec = SKCodec.Create(new SKMemoryStream(iconBytes));
                             if (testCodec == null)
                             {
@@ -412,7 +443,7 @@ namespace LimitlessSquareEngine
                     }
                 }
 
-                // 如果文件图标加载失败或未找到，使用默认图标
+                // 如果外部图标解码失败或未找到则使用默认图标
                 if (iconBytes == null)
                 {
                     iconBytes = Properties.Resources.LimitlessSquareEngineIcon;
@@ -434,13 +465,13 @@ namespace LimitlessSquareEngine
 
                 // 初始化OpenGL
                 _gl = _window.CreateOpenGL();
-                _gl.ClearColor(startupBackgroundColor);
+                _gl.ClearColor(_startupBackgroundColor);
                 var graphics = new Graphics(_gl, _window);
                 graphics.Initialize();
                 _graphics = graphics;
                 Scene.BindGraphics(graphics);
 
-                // 初始化帧时间
+                // 初始化帧时间   
                 _lastFrameTime = _window.Time;
 
                 // 显示启动Logo
@@ -449,11 +480,11 @@ namespace LimitlessSquareEngine
                 // 任务提交函数
                 Func<string, int> submitTaskFunc = (luaCode) =>
                 {
-                    int taskId = Interlocked.Increment(ref nextTaskId);
+                    int taskId = Interlocked.Increment(ref _nextTaskId);
                     var tcs = new TaskCompletionSource<DynValue>();
-                    taskResults[taskId] = tcs;
+                    _taskResults[taskId] = tcs;
 
-                    taskQueue.Add(() =>
+                    _taskQueue.Add(() =>
                     {
                         try
                         {
@@ -471,10 +502,10 @@ namespace LimitlessSquareEngine
                     return taskId;
                 };
 
-                // 获取任务结果函数
+                // 获取后台任务结果函数
                 Func<int, DynValue[]> getTaskResultFunc = (taskId) =>
                 {
-                    if (taskResults.TryGetValue(taskId, out var tcs))
+                    if (_taskResults.TryGetValue(taskId, out var tcs))
                     {
                         if (tcs.Task.IsCompleted)
                         {
@@ -491,17 +522,17 @@ namespace LimitlessSquareEngine
                     return [DynValue.Nil];
                 };
 
-                // 定义游戏数据
+                // 游戏数据实例
                 GameData gameData = new GameData();
 
-                // 输入对象
+                // 输入系统实例
                 _input = new Input(_window);
 
-                // 扫描脚本文件夹
+                // 扫描脚本目录
                 string scriptPath = Path.Combine(AppContext.BaseDirectory, "Scripts");
                 if (Directory.Exists(scriptPath))
                 {
-                    // 获取所有lua脚本
+                    // 获取所有Lua脚本
                     string[] luaFiles = Directory.GetFiles(scriptPath, "*.lua", SearchOption.AllDirectories);
                     foreach (string file in luaFiles)
                     {
@@ -509,24 +540,24 @@ namespace LimitlessSquareEngine
 
                         // 注入数据
                         instance.LuaScript.Globals["game_data"] = gameData;
-                        // 注入线程工具函数
+                        // 注入后台任务函数
                         instance.LuaScript.Globals["submit_task"] = submitTaskFunc;
                         instance.LuaScript.Globals["get_task_result"] = getTaskResultFunc;
-                        // 注入图形对象
+                        // 注入图形系统
                         instance.LuaScript.Globals["graphics"] = graphics;
-                        // 注入打印输出
+                        // 注入打印函数
                         instance.LuaScript.Globals["print"] = (Action<object>)((obj) => Console.Write(obj));
                         // 注入UI设置函数
                         instance.LuaScript.Globals["set_ui"] = (Action<string>)((layoutKey) =>
                         {
                             SetActiveUILayout(layoutKey);
                         });
-                        // 注入UI清除函数
+                        // 注入UI清空函数
                         instance.LuaScript.Globals["clear_ui"] = (Action)(() =>
                         {
                             ClearActiveUILayout();
                         });
-                        // 注入纹理目录
+                        // 注入纹理路径表
                         Table textureTable = new Table(instance.LuaScript);
                         foreach (var path in _texturePaths)
                             textureTable.Append(DynValue.NewString(path));
@@ -544,37 +575,42 @@ namespace LimitlessSquareEngine
                             Scene.RemoveScene(sceneId);
                         });
 
-                        // 注入物理函数
+                        // 注入刚体速度读取函数
                         instance.LuaScript.Globals["get_rigidbody_velocity"] =
                             (Func<string, string, Double3>)((sceneId, objectId) =>
                             {
                                 return Physics.GetVelocity(sceneId, objectId);
                             });
 
+                        // 注入刚体速度设置函数
                         instance.LuaScript.Globals["set_rigidbody_velocity"] =
                             (Action<string, string, double, double, double>)((sceneId, objectId, x, y, z) =>
                             {
                                 Physics.SetVelocity(sceneId, objectId, new Double3(x, y, z));
                             });
 
+                        // 注入刚体角速度读取函数
                         instance.LuaScript.Globals["get_rigidbody_angular_velocity"] =
                             (Func<string, string, Double3>)((sceneId, objectId) =>
                             {
                                 return Physics.GetAngularVelocity(sceneId, objectId);
                             });
 
+                        // 注入刚体角速度设置函数
                         instance.LuaScript.Globals["set_rigidbody_angular_velocity"] =
                             (Action<string, string, double, double, double>)((sceneId, objectId, x, y, z) =>
                             {
                                 Physics.SetAngularVelocity(sceneId, objectId, new Double3(x, y, z));
                             });
 
+                        // 注入力函数
                         instance.LuaScript.Globals["add_rigidbody_force"] =
                             (Action<string, string, double, double, double>)((sceneId, objectId, x, y, z) =>
                             {
                                 Physics.AddForce(sceneId, objectId, new Double3(x, y, z));
                             });
 
+                        // 注入作用点力函数
                         instance.LuaScript.Globals["add_rigidbody_force_at_position"] =
                             (Action<string, string, double, double, double, double, double, double>)((sceneId, objectId, fx, fy, fz, px, py, pz) =>
                             {
@@ -585,12 +621,14 @@ namespace LimitlessSquareEngine
                                     new Double3(px, py, pz));
                             });
 
+                        // 注入冲量函数
                         instance.LuaScript.Globals["add_rigidbody_impulse"] =
                             (Action<string, string, double, double, double>)((sceneId, objectId, x, y, z) =>
                             {
                                 Physics.ApplyImpulse(sceneId, objectId, new Double3(x, y, z));
                             });
 
+                        // 注入作用点冲量函数
                         instance.LuaScript.Globals["add_rigidbody_impulse_at_position"] =
                             (Action<string, string, double, double, double, double, double, double>)((sceneId, objectId, ix, iy, iz, px, py, pz) =>
                             {
@@ -601,12 +639,14 @@ namespace LimitlessSquareEngine
                                     new Double3(px, py, pz));
                             });
 
+                        // 注入刚体激活设置函数
                         instance.LuaScript.Globals["set_rigidbody_active"] =
                             (Action<string, string, bool>)((sceneId, objectId, active) =>
                             {
                                 Physics.SetActivationState(sceneId, objectId, active);
                             });
 
+                        // 注入射线检测函数
                         instance.LuaScript.Globals["raycast"] =
                             (Func<string, double, double, double, double, double, double, double, PhysicsRaycastHit?>)((sceneId, ox, oy, oz, dx, dy, dz, maxDistance) =>
                             {
@@ -617,7 +657,7 @@ namespace LimitlessSquareEngine
                                     maxDistance);
                             });
 
-                        // 注入手动重扫摄像机函数
+                        // 注入重建摄像机队列函数
                         instance.LuaScript.Globals["rescan_scene_cameras"] = (Action<string>)((sceneId) =>
                         {
                             Scene.RebuildCameraQueue(sceneId);
@@ -629,129 +669,146 @@ namespace LimitlessSquareEngine
                             graphics.SetScreenSkybox(shaderName, parametersJson);
                         });
 
-                        // 注入天空盒卸载函数
+                        // 注入天空盒清除函数
                         instance.LuaScript.Globals["clear_skybox"] = (Action)(() =>
                         {
                             graphics.ClearScreenSkybox();
                         });
 
-                        // 注入变换控制函数
+                        // 注入局部位置设置函数
                         instance.LuaScript.Globals["set_local_position"] =
                             (Action<string, string, double, double, double>)((sceneId, objectId, x, y, z) =>
                             {
                                 Scene.SetLocalPosition(sceneId, objectId, new Double3(x, y, z));
                             });
 
+                        // 注入世界位置设置函数
                         instance.LuaScript.Globals["set_position"] =
                             (Action<string, string, double, double, double>)((sceneId, objectId, x, y, z) =>
                             {
                                 Scene.SetPosition(sceneId, objectId, new Double3(x, y, z));
                             });
 
+                        // 注入局部位置增量函数
                         instance.LuaScript.Globals["alter_local_position"] =
                             (Action<string, string, double, double, double>)((sceneId, objectId, x, y, z) =>
                             {
                                 Scene.AlterLocalPosition(sceneId, objectId, new Double3(x, y, z));
                             });
 
+                        // 注入世界位置增量函数
                         instance.LuaScript.Globals["alter_position"] =
                             (Action<string, string, double, double, double>)((sceneId, objectId, x, y, z) =>
                             {
                                 Scene.AlterPosition(sceneId, objectId, new Double3(x, y, z));
                             });
 
+                        // 注入局部旋转设置函数
                         instance.LuaScript.Globals["set_local_rotation"] =
                             (Action<string, string, double, double, double>)((sceneId, objectId, x, y, z) =>
                             {
                                 Scene.SetLocalRotation(sceneId, objectId, new Double3(x, y, z));
                             });
 
+                        // 注入世界旋转设置函数
                         instance.LuaScript.Globals["set_rotation"] =
                             (Action<string, string, double, double, double>)((sceneId, objectId, x, y, z) =>
                             {
                                 Scene.SetRotation(sceneId, objectId, new Double3(x, y, z));
                             });
 
+                        // 注入局部旋转增量函数
                         instance.LuaScript.Globals["alter_local_rotation"] =
                             (Action<string, string, double, double, double>)((sceneId, objectId, x, y, z) =>
                             {
                                 Scene.AlterLocalRotate(sceneId, objectId, new Double3(x, y, z));
                             });
 
+                        // 注入世界旋转增量函数
                         instance.LuaScript.Globals["alter_rotation"] =
                             (Action<string, string, double, double, double>)((sceneId, objectId, x, y, z) =>
                             {
                                 Scene.AlterRotate(sceneId, objectId, new Double3(x, y, z));
                             });
 
+                        // 注入局部缩放设置函数
                         instance.LuaScript.Globals["set_local_scale"] =
                             (Action<string, string, double, double, double>)((sceneId, objectId, x, y, z) =>
                             {
                                 Scene.SetLocalScale(sceneId, objectId, new Double3(x, y, z));
                             });
 
+                        // 注入世界缩放设置函数
                         instance.LuaScript.Globals["set_scale"] =
                             (Action<string, string, double, double, double>)((sceneId, objectId, x, y, z) =>
                             {
                                 Scene.SetScale(sceneId, objectId, new Double3(x, y, z));
                             });
 
+                        // 注入局部缩放增量函数
                         instance.LuaScript.Globals["alter_local_scale"] =
                             (Action<string, string, double, double, double>)((sceneId, objectId, x, y, z) =>
                             {
                                 Scene.AlterLocalScale(sceneId, objectId, new Double3(x, y, z));
                             });
 
+                        // 注入世界缩放增量函数
                         instance.LuaScript.Globals["alter_scale"] =
                             (Action<string, string, double, double, double>)((sceneId, objectId, x, y, z) =>
                             {
                                 Scene.AlterScale(sceneId, objectId, new Double3(x, y, z));
                             });
 
-                        // 注入变换读取函数
+                        // 注入局部位置读取函数
                         instance.LuaScript.Globals["get_local_position"] =
                             (Func<string, string, Double3>)((sceneId, objectId) =>
                             {
                                 return Scene.GetLocalPosition(sceneId, objectId);
                             });
 
+                        // 注入世界位置读取函数
                         instance.LuaScript.Globals["get_position"] =
                             (Func<string, string, Double3>)((sceneId, objectId) =>
                             {
                                 return Scene.GetPosition(sceneId, objectId);
                             });
 
+                        // 注入局部旋转读取函数
                         instance.LuaScript.Globals["get_local_rotation"] =
                             (Func<string, string, Double3>)((sceneId, objectId) =>
                             {
                                 return Scene.GetLocalRotation(sceneId, objectId);
                             });
 
+                        // 注入世界旋转读取函数
                         instance.LuaScript.Globals["get_rotation"] =
                             (Func<string, string, Double3>)((sceneId, objectId) =>
                             {
                                 return Scene.GetRotation(sceneId, objectId);
                             });
 
+                        // 注入局部缩放读取函数
                         instance.LuaScript.Globals["get_local_scale"] =
                             (Func<string, string, Double3>)((sceneId, objectId) =>
                             {
                                 return Scene.GetLocalScale(sceneId, objectId);
                             });
 
+                        // 注入世界缩放读取函数
                         instance.LuaScript.Globals["get_scale"] =
                             (Func<string, string, Double3>)((sceneId, objectId) =>
                             {
                                 return Scene.GetScale(sceneId, objectId);
                             });
 
-                        // 注入节点关系获取函数
+                        // 注入父节点读取函数
                         instance.LuaScript.Globals["get_parent_id"] =
                             (Func<string, string, string?>)((sceneId, objectId) =>
                             {
                                 return Scene.GetParentId(sceneId, objectId);
                             });
 
+                        // 注入子节点读取函数
                         instance.LuaScript.Globals["get_child_ids"] =
                             (Func<string, string, Table>)((sceneId, objectId) =>
                             {
@@ -764,17 +821,18 @@ namespace LimitlessSquareEngine
                                 return table;
                             });
 
-                        // 注入输入
+                        // 注入输入系统
                         instance.LuaScript.Globals["input"] = _input;
 
                         // 执行脚本文件
                         instance.LuaScript.DoFile(file);
 
-                        // 缓存init和loop函数
+                        // 缓存init
                         DynValue initFunc = instance.LuaScript.Globals.Get("init");
                         if (initFunc?.Type == DataType.Function)
                             instance.InitFunction = initFunc;
 
+                        // 缓存loop函数
                         DynValue loopFunc = instance.LuaScript.Globals.Get("loop");
                         if (loopFunc?.Type == DataType.Function)
                             instance.LoopFunction = loopFunc;
@@ -784,7 +842,7 @@ namespace LimitlessSquareEngine
                     }
                 }
 
-                // 扫描资源文件夹
+                // 扫描资源目录
                 string assetsPath = Path.Combine(AppContext.BaseDirectory, "Assets");
                 if (Directory.Exists(assetsPath))
                 {
@@ -816,7 +874,7 @@ namespace LimitlessSquareEngine
                         if (string.IsNullOrWhiteSpace(directory))
                             continue;
 
-                        // UI布局文件
+                        // 处理UI布局文件
                         if (directory.StartsWith(uiBasePath, StringComparison.OrdinalIgnoreCase))
                         {
                             if (Path.GetExtension(file).Equals(".json", StringComparison.OrdinalIgnoreCase))
@@ -824,10 +882,10 @@ namespace LimitlessSquareEngine
                                 try
                                 {
                                     string json = File.ReadAllText(file);
-                                    var elements = JsonSerializer.Deserialize<List<UIElement>>(json, options);
+                                    var elements = JsonSerializer.Deserialize<List<CanvasElement>>(json, options);
                                     if (elements != null)
                                     {
-                                        void SetParent(UIElement element, UIElement? parent = null)
+                                        void SetParent(CanvasElement element, CanvasElement? parent = null)
                                         {
                                             if (parent != null)
                                                 element.Parent = parent;
@@ -1078,7 +1136,7 @@ namespace LimitlessSquareEngine
             while (true)
             {
                 // 抽取任务
-                Action task = taskQueue.Take();
+                Action task = _taskQueue.Take();
                 // 执行任务
                 task();
             }
