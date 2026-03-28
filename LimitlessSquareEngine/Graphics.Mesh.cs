@@ -335,7 +335,7 @@ namespace LimitlessSquareEngine
             InvalidateMeshGpuResources(meshKey);
             _meshes[meshKey] = new MeshData(meshKey, surfaces.ToArray());
 
-            Console.WriteLine($"[i] Registered OBJ mesh: {meshKey} -> {objFilePath} ({surfaces.Count} surfaces)");
+            Console.WriteLine($"[i] Registered OBJ mesh: {meshKey}.obj ({surfaces.Count} surfaces)");
         }
 
         [MoonSharpHidden]

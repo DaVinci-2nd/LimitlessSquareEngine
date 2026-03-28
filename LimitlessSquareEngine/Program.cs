@@ -575,6 +575,82 @@ namespace LimitlessSquareEngine
                             Scene.RemoveScene(sceneId);
                         });
 
+                        // 注入雾设置函数
+                        instance.LuaScript.Globals["set_camera_fog_enabled"] = (Action<string, bool>)((cameraObjectId, enabled) =>
+                        {
+                            graphics.SetCameraFogEnabled(cameraObjectId, enabled);
+                        });
+
+                        instance.LuaScript.Globals["set_main_camera_fog_enabled"] = (Action<bool>)((enabled) =>
+                        {
+                            graphics.SetMainCameraFogEnabled(enabled);
+                        });
+
+                        instance.LuaScript.Globals["set_camera_fog_mode"] = (Action<string, string>)((cameraObjectId, mode) =>
+                        {
+                            graphics.SetCameraFogMode(cameraObjectId, mode);
+                        });
+
+                        instance.LuaScript.Globals["set_main_camera_fog_mode"] = (Action<string>)((mode) =>
+                        {
+                            graphics.SetMainCameraFogMode(mode);
+                        });
+
+                        instance.LuaScript.Globals["set_camera_fog_color"] = (Action<string, double, double, double, double>)((cameraObjectId, r, g, b, a) =>
+                        {
+                            graphics.SetCameraFogColor(cameraObjectId, (float)r, (float)g, (float)b, (float)a);
+                        });
+
+                        instance.LuaScript.Globals["set_camera_fog_color_rgb"] = (Action<string, int, int, int, int>)((cameraObjectId, r, g, b, a) =>
+                        {
+                            graphics.SetCameraFogColorRGB(cameraObjectId, r, g, b, a);
+                        });
+
+                        instance.LuaScript.Globals["set_main_camera_fog_color"] = (Action<double, double, double, double>)((r, g, b, a) =>
+                        {
+                            graphics.SetMainCameraFogColor((float)r, (float)g, (float)b, (float)a);
+                        });
+
+                        instance.LuaScript.Globals["set_main_camera_fog_color_rgb"] = (Action<int, int, int, int>)((r, g, b, a) =>
+                        {
+                            graphics.SetMainCameraFogColorRGB(r, g, b, a);
+                        });
+
+                        instance.LuaScript.Globals["set_camera_fog_texture"] = (Action<string, string>)((cameraObjectId, texturePath) =>
+                        {
+                            graphics.SetCameraFogCylindricalTexture(cameraObjectId, texturePath);
+                        });
+
+                        instance.LuaScript.Globals["set_main_camera_fog_texture"] = (Action<string>)((texturePath) =>
+                        {
+                            graphics.SetMainCameraFogCylindricalTexture(texturePath);
+                        });
+
+                        instance.LuaScript.Globals["set_camera_fog_edge_transition_to_skybox"] = (Action<string, bool>)((cameraObjectId, enabled) =>
+                        {
+                            graphics.SetCameraFogEdgeTransitionToSkybox(cameraObjectId, enabled);
+                        });
+
+                        instance.LuaScript.Globals["set_main_camera_fog_edge_transition_to_skybox"] = (Action<bool>)((enabled) =>
+                        {
+                            graphics.SetMainCameraFogEdgeTransitionToSkybox(enabled);
+                        });
+
+                        instance.LuaScript.Globals["set_camera_fog_range"] = (Action<string, double, double>)((cameraObjectId, start, end) =>
+                        {
+                            graphics.SetCameraFogRange(cameraObjectId, (float)start, (float)end);
+                        });
+
+                        instance.LuaScript.Globals["set_main_camera_fog_range"] = (Action<double, double>)((start, end) =>
+                        {
+                            graphics.SetMainCameraFogRange((float)start, (float)end);
+                        });
+
+                        instance.LuaScript.Globals["clear_camera_fog"] = (Action<string>)((cameraObjectId) =>
+                        {
+                            graphics.ClearCameraFog(cameraObjectId);
+                        });
+
                         // 注入刚体速度读取函数
                         instance.LuaScript.Globals["get_rigidbody_velocity"] =
                             (Func<string, string, Double3>)((sceneId, objectId) =>
@@ -801,6 +877,90 @@ namespace LimitlessSquareEngine
                                 return Scene.GetScale(sceneId, objectId);
                             });
 
+                        // 注入局部右方向读取函数
+                        instance.LuaScript.Globals["get_local_right"] =
+                            (Func<string, string, Double3>)((sceneId, objectId) =>
+                            {
+                                return Scene.GetLocalRight(sceneId, objectId);
+                            });
+
+                        // 注入局部左方向读取函数
+                        instance.LuaScript.Globals["get_local_left"] =
+                            (Func<string, string, Double3>)((sceneId, objectId) =>
+                            {
+                                return Scene.GetLocalLeft(sceneId, objectId);
+                            });
+
+                        // 注入局部上方向读取函数
+                        instance.LuaScript.Globals["get_local_up"] =
+                            (Func<string, string, Double3>)((sceneId, objectId) =>
+                            {
+                                return Scene.GetLocalUp(sceneId, objectId);
+                            });
+
+                        // 注入局部下方向读取函数
+                        instance.LuaScript.Globals["get_local_down"] =
+                            (Func<string, string, Double3>)((sceneId, objectId) =>
+                            {
+                                return Scene.GetLocalDown(sceneId, objectId);
+                            });
+
+                        // 注入局部前方向读取函数
+                        instance.LuaScript.Globals["get_local_forward"] =
+                            (Func<string, string, Double3>)((sceneId, objectId) =>
+                            {
+                                return Scene.GetLocalForward(sceneId, objectId);
+                            });
+
+                        // 注入局部后方向读取函数
+                        instance.LuaScript.Globals["get_local_back"] =
+                            (Func<string, string, Double3>)((sceneId, objectId) =>
+                            {
+                                return Scene.GetLocalBack(sceneId, objectId);
+                            });
+
+                        // 注入世界右方向读取函数
+                        instance.LuaScript.Globals["get_right"] =
+                            (Func<string, string, Double3>)((sceneId, objectId) =>
+                            {
+                                return Scene.GetRight(sceneId, objectId);
+                            });
+
+                        // 注入世界左方向读取函数
+                        instance.LuaScript.Globals["get_left"] =
+                            (Func<string, string, Double3>)((sceneId, objectId) =>
+                            {
+                                return Scene.GetLeft(sceneId, objectId);
+                            });
+
+                        // 注入世界上方向读取函数
+                        instance.LuaScript.Globals["get_up"] =
+                            (Func<string, string, Double3>)((sceneId, objectId) =>
+                            {
+                                return Scene.GetUp(sceneId, objectId);
+                            });
+
+                        // 注入世界下方向读取函数
+                        instance.LuaScript.Globals["get_down"] =
+                            (Func<string, string, Double3>)((sceneId, objectId) =>
+                            {
+                                return Scene.GetDown(sceneId, objectId);
+                            });
+
+                        // 注入世界前方向读取函数
+                        instance.LuaScript.Globals["get_forward"] =
+                            (Func<string, string, Double3>)((sceneId, objectId) =>
+                            {
+                                return Scene.GetForward(sceneId, objectId);
+                            });
+
+                        // 注入世界后方向读取函数
+                        instance.LuaScript.Globals["get_back"] =
+                            (Func<string, string, Double3>)((sceneId, objectId) =>
+                            {
+                                return Scene.GetBack(sceneId, objectId);
+                            });
+
                         // 注入父节点读取函数
                         instance.LuaScript.Globals["get_parent_id"] =
                             (Func<string, string, string?>)((sceneId, objectId) =>
@@ -979,7 +1139,7 @@ namespace LimitlessSquareEngine
                             _textureFileRegistry[key] = file;
                             _texturePaths.Add(key);
 
-                            Console.WriteLine($"[i] Registered texture: {key} -> {file}");
+                            Console.WriteLine($"[i] Registered texture: {key}");
                             continue;
                         }
 
@@ -1001,6 +1161,8 @@ namespace LimitlessSquareEngine
 
                     Console.WriteLine($"[i] Scene scan completed. Registered scenes: {_sceneFileRegistry.Count}, materials: {_materialFileRegistry.Count}");
                 }
+
+                graphics.ConfigureDefaultMainCameraFog();
 
                 // 关闭启动Logo
                 CloseStartupLogo();

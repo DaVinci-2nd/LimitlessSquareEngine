@@ -263,6 +263,28 @@ namespace LimitlessSquareEngine
             Clamp = 1
         }
 
+        private enum FogMode
+        {
+            SolidColor = 0,
+            CylindricalTexture = 1,
+            Skybox = 2
+        }
+
+        private sealed class FogSettings
+        {
+            public string CameraObjectId { get; set; } = "";
+            public bool Enabled { get; set; } = true;
+            public FogMode Mode { get; set; } = FogMode.SolidColor;
+
+            public Vector4 Color { get; set; } = new Vector4(135f / 255f, 206f / 255f, 235f / 255f, 1f); // skyblue
+            public string CylindricalTexturePath { get; set; } = "";
+
+            public bool EdgeTransitionToSkybox { get; set; } = true;
+
+            public float Start { get; set; } = 100f;
+            public float End { get; set; } = 1000f;
+        }
+
         private sealed class MaterialData
         {
             public string Id { get; init; } = "";
@@ -538,6 +560,40 @@ namespace LimitlessSquareEngine
 
         private SkyboxData _screenSkybox;
         private readonly Dictionary<string, SkyboxData> _cameraSkyboxes = new(StringComparer.Ordinal);
+
+        private readonly Dictionary<string, FogSettings> _cameraFogSettings = new(StringComparer.Ordinal);
+
+        private uint _fogSceneFramebuffer = 0;
+        private uint _fogSceneColorTexture = 0;
+        private uint _fogSceneDepthTexture = 0;
+        private uint _fogSceneDepthStencilTexture = 0;
+
+        private uint _fogBackgroundFramebuffer = 0;
+        private uint _fogBackgroundColorTexture = 0;
+
+        private uint _fogCompositeProgram = 0;
+        private uint _fogFullscreenVao = 0;
+
+        private int _fogCompositeSceneColorLoc = -1;
+        private int _fogCompositeSceneDepthLoc = -1;
+        private int _fogCompositeBackgroundColorLoc = -1;
+        private int _fogCompositeCylindricalTextureLoc = -1;
+
+        private int _fogCompositeModeLoc = -1;
+        private int _fogCompositeEnabledLoc = -1;
+        private int _fogCompositeColorLoc = -1;
+        private int _fogCompositeStartLoc = -1;
+        private int _fogCompositeEndLoc = -1;
+        private int _fogCompositeEdgeTransitionLoc = -1;
+        private int _fogCompositeNearLoc = -1;
+        private int _fogCompositeFarLoc = -1;
+        private int _fogCompositeProjectionTypeLoc = -1;
+        private int _fogCompositeInvProjectionLoc = -1;
+        private int _fogCompositeInvViewRotationLoc = -1;
+        private int _fogCompositeViewportSizeLoc = -1;
+
+        private int _fogOffscreenAllocatedWidth = 0;
+        private int _fogOffscreenAllocatedHeight = 0;
 
         private void InitializeReflectionCaptureResources()
         {
@@ -910,7 +966,6 @@ namespace LimitlessSquareEngine
             public bool CastShadow { get; set; } = false;
         }
 
-        
         [MoonSharpHidden]
         public void UpsertSceneObject(SceneRenderObjectSnapshot snapshot)
         {
@@ -975,6 +1030,8 @@ namespace LimitlessSquareEngine
             public float ClusterFar;
             public string SceneId;
             public Double3 CameraWorldPosition;
+
+            public string CameraObjectId;
 
             public RenderQueueType QueueType;
             public float SortDepth;
@@ -1335,6 +1392,7 @@ namespace LimitlessSquareEngine
                 CullMode = _currentCullMode,
                 MeshId = "",
                 MeshSurfaceId = "",
+                CameraObjectId = "",
                 MeshVertexColorsAreWhite = false
             };
 
@@ -2878,6 +2936,7 @@ namespace LimitlessSquareEngine
         private void ApplyLightingSupportUniforms(in RenderCommand cmd)
         {
             InitializeLightingSupportResources();
+            InitializeFogPostProcessResources();
 
             ProgramUniformLocationCache loc = GetProgramLocationCache(_currentProgram);
 
@@ -3014,6 +3073,178 @@ namespace LimitlessSquareEngine
                 return;
 
             _cameraSkyboxes.Remove(cameraObjectId.Trim());
+        }
+
+        private FogSettings GetOrCreateFogSettings(string cameraObjectId)
+        {
+            if (string.IsNullOrWhiteSpace(cameraObjectId))
+                throw new ArgumentException("[X] Camera id cannot be null or empty.", nameof(cameraObjectId));
+
+            string key = cameraObjectId.Trim();
+
+            if (!_cameraFogSettings.TryGetValue(key, out FogSettings settings))
+            {
+                settings = new FogSettings
+                {
+                    CameraObjectId = key
+                };
+                _cameraFogSettings[key] = settings;
+            }
+
+            return settings;
+        }
+
+        public void SetCameraFogEnabled(string cameraObjectId, bool enabled)
+        {
+            FogSettings settings = GetOrCreateFogSettings(cameraObjectId);
+            settings.Enabled = enabled;
+        }
+
+        public void SetMainCameraFogEnabled(bool enabled)
+        {
+            string mainCameraId = ResolveMainScreenCameraId();
+            if (string.IsNullOrWhiteSpace(mainCameraId))
+                return;
+
+            SetCameraFogEnabled(mainCameraId, enabled);
+        }
+
+        public void SetCameraFogMode(string cameraObjectId, string mode)
+        {
+            FogSettings settings = GetOrCreateFogSettings(cameraObjectId);
+
+            settings.Mode = mode switch
+            {
+                "color" => FogMode.SolidColor,
+                "texture" => FogMode.CylindricalTexture,
+                "skybox" => FogMode.Skybox,
+                _ => throw new ArgumentException("[X] Fog mode must be 'color', 'texture', or 'skybox'.", nameof(mode))
+            };
+        }
+
+        public void SetMainCameraFogMode(string mode)
+        {
+            string mainCameraId = ResolveMainScreenCameraId();
+            if (string.IsNullOrWhiteSpace(mainCameraId))
+                return;
+
+            SetCameraFogMode(mainCameraId, mode);
+        }
+
+        public void SetCameraFogColor(string cameraObjectId, float r, float g, float b, float a = 1.0f)
+        {
+            FogSettings settings = GetOrCreateFogSettings(cameraObjectId);
+            settings.Color = new Vector4(
+                Math.Clamp(r, 0f, 1f),
+                Math.Clamp(g, 0f, 1f),
+                Math.Clamp(b, 0f, 1f),
+                Math.Clamp(a, 0f, 1f));
+        }
+
+        public void SetCameraFogColorRGB(string cameraObjectId, int r, int g, int b, int a = 255)
+        {
+            SetCameraFogColor(cameraObjectId, r / 255f, g / 255f, b / 255f, a / 255f);
+        }
+
+        public void SetMainCameraFogColor(float r, float g, float b, float a = 1.0f)
+        {
+            string mainCameraId = ResolveMainScreenCameraId();
+            if (string.IsNullOrWhiteSpace(mainCameraId))
+                return;
+
+            SetCameraFogColor(mainCameraId, r, g, b, a);
+        }
+
+        public void SetMainCameraFogColorRGB(int r, int g, int b, int a = 255)
+        {
+            string mainCameraId = ResolveMainScreenCameraId();
+            if (string.IsNullOrWhiteSpace(mainCameraId))
+                return;
+
+            SetCameraFogColorRGB(mainCameraId, r, g, b, a);
+        }
+
+        public void SetCameraFogCylindricalTexture(string cameraObjectId, string texturePath)
+        {
+            FogSettings settings = GetOrCreateFogSettings(cameraObjectId);
+            settings.CylindricalTexturePath = texturePath?.Trim() ?? "";
+        }
+
+        public void SetMainCameraFogCylindricalTexture(string texturePath)
+        {
+            string mainCameraId = ResolveMainScreenCameraId();
+            if (string.IsNullOrWhiteSpace(mainCameraId))
+                return;
+
+            SetCameraFogCylindricalTexture(mainCameraId, texturePath);
+        }
+
+        public void SetCameraFogEdgeTransitionToSkybox(string cameraObjectId, bool enabled)
+        {
+            FogSettings settings = GetOrCreateFogSettings(cameraObjectId);
+            settings.EdgeTransitionToSkybox = enabled;
+        }
+
+        public void SetMainCameraFogEdgeTransitionToSkybox(bool enabled)
+        {
+            string mainCameraId = ResolveMainScreenCameraId();
+            if (string.IsNullOrWhiteSpace(mainCameraId))
+                return;
+
+            SetCameraFogEdgeTransitionToSkybox(mainCameraId, enabled);
+        }
+
+        public void SetCameraFogRange(string cameraObjectId, float start, float end)
+        {
+            if (end < start)
+                throw new ArgumentException("[X] Fog end must be >= start.");
+
+            FogSettings settings = GetOrCreateFogSettings(cameraObjectId);
+            settings.Start = Math.Max(0f, start);
+            settings.End = Math.Max(settings.Start + 0.0001f, end);
+        }
+
+        public void SetMainCameraFogRange(float start, float end)
+        {
+            string mainCameraId = ResolveMainScreenCameraId();
+            if (string.IsNullOrWhiteSpace(mainCameraId))
+                return;
+
+            SetCameraFogRange(mainCameraId, start, end);
+        }
+
+        public void ClearCameraFog(string cameraObjectId)
+        {
+            if (string.IsNullOrWhiteSpace(cameraObjectId))
+                return;
+
+            _cameraFogSettings.Remove(cameraObjectId.Trim());
+        }
+
+        public void ConfigureDefaultMainCameraFog()
+        {
+            string mainCameraId = ResolveMainScreenCameraId();
+            if (string.IsNullOrWhiteSpace(mainCameraId))
+                return;
+
+            FogSettings settings = GetOrCreateFogSettings(mainCameraId);
+            settings.Enabled = true;
+            settings.Mode = FogMode.SolidColor;
+            settings.Color = new Vector4(135f / 255f, 206f / 255f, 235f / 255f, 1f);
+            settings.EdgeTransitionToSkybox = true;
+            settings.Start = 100f;
+            settings.End = 1000f;
+        }
+
+        private FogSettings? ResolveFogForCamera(string cameraObjectId)
+        {
+            if (string.IsNullOrWhiteSpace(cameraObjectId))
+                return null;
+
+            if (_cameraFogSettings.TryGetValue(cameraObjectId, out FogSettings settings))
+                return settings;
+
+            return null;
         }
 
         /// <summary>
@@ -3357,6 +3588,373 @@ namespace LimitlessSquareEngine
             return program;
         }
 
+        private uint CreateFogCompositeProgram()
+        {
+            string vertexSource = @"
+                #version 430 core
+                out vec2 vUv;
+
+                vec2 positions[6] = vec2[6](
+                    vec2(-1.0, -1.0),
+                    vec2( 1.0, -1.0),
+                    vec2( 1.0,  1.0),
+                    vec2( 1.0,  1.0),
+                    vec2(-1.0,  1.0),
+                    vec2(-1.0, -1.0)
+                );
+
+                vec2 uvs[6] = vec2[6](
+                    vec2(0.0, 0.0),
+                    vec2(1.0, 0.0),
+                    vec2(1.0, 1.0),
+                    vec2(1.0, 1.0),
+                    vec2(0.0, 1.0),
+                    vec2(0.0, 0.0)
+                );
+
+                void main()
+                {
+                    gl_Position = vec4(positions[gl_VertexID], 0.0, 1.0);
+                    vUv = uvs[gl_VertexID];
+                }";
+
+            string fragmentSource = @"
+                #version 430 core
+
+                in vec2 vUv;
+                out vec4 FragColor;
+
+                uniform sampler2D uSceneColor;
+                uniform sampler2D uSceneDepth;
+                uniform sampler2D uBackgroundColor;
+                uniform sampler2D uCylindricalTexture;
+
+                uniform int uFogMode;
+                uniform int uFogEnabled;
+                uniform vec4 uFogColor;
+                uniform float uFogStart;
+                uniform float uFogEnd;
+                uniform int uEdgeTransitionToSkybox;
+
+                uniform float uNear;
+                uniform float uFar;
+                uniform int uProjectionType;
+                uniform mat4 uInvProjection;
+                uniform mat4 uInvViewRotation;
+                uniform vec2 uViewportSize;
+
+                float LinearizeDepth(float depth)
+                {
+                    if (uProjectionType == 1)
+                    {
+                        return mix(uNear, uFar, depth);
+                    }
+
+                    float z = depth * 2.0 - 1.0;
+                    return (2.0 * uNear * uFar) / (uFar + uNear - z * (uFar - uNear));
+                }
+
+                vec3 ReconstructViewPosition(vec2 uv, float depth)
+                {
+                    vec2 ndcXY = uv * 2.0 - 1.0;
+                    float ndcZ = depth * 2.0 - 1.0;
+                    vec4 clip = vec4(ndcXY, ndcZ, 1.0);
+                    vec4 view = uInvProjection * clip;
+                    view /= max(abs(view.w), 0.00001);
+                    return view.xyz;
+                }
+
+                vec3 ReconstructViewDirection(vec2 uv)
+                {
+                    vec2 ndc = uv * 2.0 - 1.0;
+                    vec4 clip = vec4(ndc, 1.0, 1.0);
+                    vec4 view = uInvProjection * clip;
+                    view /= max(abs(view.w), 0.00001);
+                    return normalize(view.xyz);
+                }
+
+                vec2 DirectionToCylindricalUv(vec3 worldDir)
+                {
+                    vec3 d = normalize(worldDir);
+                    float u = atan(d.z, d.x) / (2.0 * 3.14159265358979323846) + 0.5;
+                    float v = clamp(d.y * 0.5 + 0.5, 0.0, 1.0);
+                    return vec2(u, v);
+                }
+
+                void main()
+                {
+                    vec4 sceneColor = texture(uSceneColor, vUv);
+                    float depth = texture(uSceneDepth, vUv).r;
+                    vec4 skyboxColor = texture(uBackgroundColor, vUv);
+
+                    if (uFogEnabled == 0)
+                    {
+                        FragColor = sceneColor;
+                        return;
+                    }
+
+                    bool isBackgroundPixel = depth >= 1.0;
+
+                    if (isBackgroundPixel)
+                    {
+                        FragColor = skyboxColor;
+                        return;
+                    }
+
+                    vec3 viewPos = ReconstructViewPosition(vUv, depth);
+                    float distanceToCamera = length(viewPos);
+
+                    float fogFactor = clamp(
+                        (distanceToCamera - uFogStart) / max(uFogEnd - uFogStart, 0.0001),
+                        0.0,
+                        1.0);
+
+                    vec4 fogColor = uFogColor;
+
+                    if (uFogMode == 1)
+                    {
+                        vec3 viewDir = normalize(viewPos);
+                        vec3 worldDir = normalize((uInvViewRotation * vec4(viewDir, 0.0)).xyz);
+                        vec2 fogUv = DirectionToCylindricalUv(worldDir);
+                        fogColor = texture(uCylindricalTexture, fogUv);
+                    }
+                    else if (uFogMode == 2)
+                    {
+                        fogColor = skyboxColor;
+                    }
+
+                    if (uFogMode != 2 && uEdgeTransitionToSkybox != 0)
+                    {
+                        float fogRange = max(uFogEnd - uFogStart, 0.0001);
+                        float skyboxBlendStart = uFogEnd - fogRange * 0.25;
+
+                        float skyboxBlendFactor = clamp(
+                            (distanceToCamera - skyboxBlendStart) / max(uFogEnd - skyboxBlendStart, 0.0001),
+                            0.0,
+                            1.0);
+
+                        skyboxBlendFactor = smoothstep(0.0, 1.0, skyboxBlendFactor);
+
+                        fogColor = mix(fogColor, skyboxColor, skyboxBlendFactor);
+                    }
+
+                    FragColor = mix(sceneColor, fogColor, fogFactor);
+                }";
+
+            uint vs = CompileShader(ShaderType.VertexShader, vertexSource);
+            uint fs = CompileShader(ShaderType.FragmentShader, fragmentSource);
+
+            uint program = _gl.CreateProgram();
+            _gl.AttachShader(program, vs);
+            _gl.AttachShader(program, fs);
+            _gl.LinkProgram(program);
+
+            _gl.GetProgram(program, ProgramPropertyARB.LinkStatus, out int success);
+            if (success == 0)
+            {
+                string infoLog = _gl.GetProgramInfoLog(program);
+                throw new Exception($"[X] Fog composite shader link failed: {infoLog}");
+            }
+
+            _gl.DetachShader(program, vs);
+            _gl.DetachShader(program, fs);
+            _gl.DeleteShader(vs);
+            _gl.DeleteShader(fs);
+
+            return program;
+        }
+
+        private void CacheFogCompositeLocations()
+        {
+            _fogCompositeSceneColorLoc = _gl.GetUniformLocation(_fogCompositeProgram, "uSceneColor");
+            _fogCompositeSceneDepthLoc = _gl.GetUniformLocation(_fogCompositeProgram, "uSceneDepth");
+            _fogCompositeBackgroundColorLoc = _gl.GetUniformLocation(_fogCompositeProgram, "uBackgroundColor");
+            _fogCompositeCylindricalTextureLoc = _gl.GetUniformLocation(_fogCompositeProgram, "uCylindricalTexture");
+
+            _fogCompositeModeLoc = _gl.GetUniformLocation(_fogCompositeProgram, "uFogMode");
+            _fogCompositeEnabledLoc = _gl.GetUniformLocation(_fogCompositeProgram, "uFogEnabled");
+            _fogCompositeColorLoc = _gl.GetUniformLocation(_fogCompositeProgram, "uFogColor");
+            _fogCompositeStartLoc = _gl.GetUniformLocation(_fogCompositeProgram, "uFogStart");
+            _fogCompositeEndLoc = _gl.GetUniformLocation(_fogCompositeProgram, "uFogEnd");
+            _fogCompositeEdgeTransitionLoc = _gl.GetUniformLocation(_fogCompositeProgram, "uEdgeTransitionToSkybox");
+            _fogCompositeNearLoc = _gl.GetUniformLocation(_fogCompositeProgram, "uNear");
+            _fogCompositeFarLoc = _gl.GetUniformLocation(_fogCompositeProgram, "uFar");
+            _fogCompositeProjectionTypeLoc = _gl.GetUniformLocation(_fogCompositeProgram, "uProjectionType");
+            _fogCompositeInvProjectionLoc = _gl.GetUniformLocation(_fogCompositeProgram, "uInvProjection");
+            _fogCompositeInvViewRotationLoc = _gl.GetUniformLocation(_fogCompositeProgram, "uInvViewRotation");
+            _fogCompositeViewportSizeLoc = _gl.GetUniformLocation(_fogCompositeProgram, "uViewportSize");
+        }
+
+        private void InitializeFogPostProcessResources()
+        {
+            if (_fogCompositeProgram == 0)
+            {
+                _fogCompositeProgram = CreateFogCompositeProgram();
+                CacheFogCompositeLocations();
+            }
+
+            if (_fogFullscreenVao == 0)
+            {
+                _fogFullscreenVao = _gl.GenVertexArray();
+            }
+        }
+
+        private void EnsureFogOffscreenTargets(int width, int height)
+        {
+            width = Math.Max(1, width);
+            height = Math.Max(1, height);
+
+            if (_fogOffscreenAllocatedWidth == width &&
+                _fogOffscreenAllocatedHeight == height &&
+                _fogSceneFramebuffer != 0 &&
+                _fogBackgroundFramebuffer != 0 &&
+                _fogSceneColorTexture != 0 &&
+                _fogSceneDepthTexture != 0 &&
+                _fogBackgroundColorTexture != 0)
+            {
+                return;
+            }
+
+            ReleaseFogOffscreenTargets();
+
+            _fogSceneColorTexture = _gl.GenTexture();
+            _gl.BindTexture(TextureTarget.Texture2D, _fogSceneColorTexture);
+            byte[] emptyColor = new byte[width * height * 4];
+            _gl.TexImage2D(
+                TextureTarget.Texture2D,
+                0,
+                InternalFormat.Rgba,
+                (uint)width,
+                (uint)height,
+                0,
+                PixelFormat.Rgba,
+                PixelType.UnsignedByte,
+                (ReadOnlySpan<byte>)emptyColor);
+            _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.Linear);
+            _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMagFilter, (int)TextureMagFilter.Linear);
+            _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapS, (int)TextureWrapMode.ClampToEdge);
+            _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapT, (int)TextureWrapMode.ClampToEdge);
+
+            _fogSceneDepthStencilTexture = _gl.GenTexture();
+            _fogSceneDepthTexture = _fogSceneDepthStencilTexture;
+            _gl.BindTexture(TextureTarget.Texture2D, _fogSceneDepthStencilTexture);
+            uint[] emptyDepthStencil = new uint[width * height];
+            _gl.TexImage2D(
+                TextureTarget.Texture2D,
+                0,
+                InternalFormat.Depth24Stencil8,
+                (uint)width,
+                (uint)height,
+                0,
+                PixelFormat.DepthStencil,
+                PixelType.UnsignedInt248,
+                (ReadOnlySpan<uint>)emptyDepthStencil);
+            _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.Nearest);
+            _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMagFilter, (int)TextureMagFilter.Nearest);
+            _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapS, (int)TextureWrapMode.ClampToEdge);
+            _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapT, (int)TextureWrapMode.ClampToEdge);
+
+            _fogBackgroundColorTexture = _gl.GenTexture();
+            _gl.BindTexture(TextureTarget.Texture2D, _fogBackgroundColorTexture);
+            byte[] emptyBackground = new byte[width * height * 4];
+            _gl.TexImage2D(
+                TextureTarget.Texture2D,
+                0,
+                InternalFormat.Rgba,
+                (uint)width,
+                (uint)height,
+                0,
+                PixelFormat.Rgba,
+                PixelType.UnsignedByte,
+                (ReadOnlySpan<byte>)emptyBackground);
+            _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.Linear);
+            _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMagFilter, (int)TextureMagFilter.Linear);
+            _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapS, (int)TextureWrapMode.ClampToEdge);
+            _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapT, (int)TextureWrapMode.ClampToEdge);
+
+            _fogSceneFramebuffer = _gl.GenFramebuffer();
+            _gl.BindFramebuffer(FramebufferTarget.Framebuffer, _fogSceneFramebuffer);
+            _gl.FramebufferTexture2D(
+                FramebufferTarget.Framebuffer,
+                FramebufferAttachment.ColorAttachment0,
+                TextureTarget.Texture2D,
+                _fogSceneColorTexture,
+                0);
+            _gl.FramebufferTexture2D(
+                FramebufferTarget.Framebuffer,
+                FramebufferAttachment.DepthStencilAttachment,
+                TextureTarget.Texture2D,
+                _fogSceneDepthStencilTexture,
+                0);
+
+            _gl.DrawBuffer(GLEnum.ColorAttachment0);
+            _gl.ReadBuffer(GLEnum.ColorAttachment0);
+
+            GLEnum sceneStatus = _gl.CheckFramebufferStatus(FramebufferTarget.Framebuffer);
+            if (sceneStatus != GLEnum.FramebufferComplete)
+                throw new Exception($"[X] Fog scene framebuffer incomplete: {sceneStatus}");
+
+            _fogBackgroundFramebuffer = _gl.GenFramebuffer();
+            _gl.BindFramebuffer(FramebufferTarget.Framebuffer, _fogBackgroundFramebuffer);
+            _gl.FramebufferTexture2D(
+                FramebufferTarget.Framebuffer,
+                FramebufferAttachment.ColorAttachment0,
+                TextureTarget.Texture2D,
+                _fogBackgroundColorTexture,
+                0);
+
+            _gl.DrawBuffer(GLEnum.ColorAttachment0);
+            _gl.ReadBuffer(GLEnum.ColorAttachment0);
+
+            GLEnum backgroundStatus = _gl.CheckFramebufferStatus(FramebufferTarget.Framebuffer);
+            if (backgroundStatus != GLEnum.FramebufferComplete)
+                throw new Exception($"[X] Fog background framebuffer incomplete: {backgroundStatus}");
+
+            _gl.BindFramebuffer(FramebufferTarget.Framebuffer, 0);
+            _gl.BindTexture(TextureTarget.Texture2D, 0);
+
+            _fogOffscreenAllocatedWidth = width;
+            _fogOffscreenAllocatedHeight = height;
+        }
+
+        private void ReleaseFogOffscreenTargets()
+        {
+            if (_fogSceneFramebuffer != 0)
+            {
+                _gl.DeleteFramebuffer(_fogSceneFramebuffer);
+                _fogSceneFramebuffer = 0;
+            }
+
+            if (_fogBackgroundFramebuffer != 0)
+            {
+                _gl.DeleteFramebuffer(_fogBackgroundFramebuffer);
+                _fogBackgroundFramebuffer = 0;
+            }
+
+            if (_fogSceneColorTexture != 0)
+            {
+                _gl.DeleteTexture(_fogSceneColorTexture);
+                _fogSceneColorTexture = 0;
+            }
+
+            if (_fogSceneDepthStencilTexture != 0)
+            {
+                _gl.DeleteTexture(_fogSceneDepthStencilTexture);
+                _fogSceneDepthStencilTexture = 0;
+            }
+
+            _fogSceneDepthTexture = 0;
+
+            if (_fogBackgroundColorTexture != 0)
+            {
+                _gl.DeleteTexture(_fogBackgroundColorTexture);
+                _fogBackgroundColorTexture = 0;
+            }
+
+            _fogOffscreenAllocatedWidth = 0;
+            _fogOffscreenAllocatedHeight = 0;
+        }
+
         private void RenderEquirectTextureToCube(uint equirectTextureId, uint targetCube)
         {
             if (equirectTextureId == 0 || targetCube == 0)
@@ -3494,12 +4092,12 @@ namespace LimitlessSquareEngine
         }
 
         private void RestoreStateAfterReflectionUtility(
-    in RenderCommand cmd,
-    uint previousProgram,
-    RenderSpace previousRenderSpace,
-    Matrix4x4 previousModel,
-    Matrix4x4 previousView,
-    Matrix4x4 previousProjection)
+            in RenderCommand cmd,
+            uint previousProgram,
+            RenderSpace previousRenderSpace,
+            Matrix4x4 previousModel,
+            Matrix4x4 previousView,
+            Matrix4x4 previousProjection)
         {
             _gl.BindFramebuffer(FramebufferTarget.Framebuffer, 0);
             _gl.Viewport(
@@ -3890,6 +4488,7 @@ namespace LimitlessSquareEngine
                 CullMode = _currentCullMode,
                 MeshId = "",
                 MeshSurfaceId = "",
+                CameraObjectId = "",
                 MeshVertexColorsAreWhite = false
             };
 
@@ -3971,6 +4570,7 @@ namespace LimitlessSquareEngine
                 CullMode = _currentCullMode,
                 MeshId = "",
                 MeshSurfaceId = "",
+                CameraObjectId = "",
                 MeshVertexColorsAreWhite = false
             };
 
@@ -4290,7 +4890,7 @@ namespace LimitlessSquareEngine
         {
             value = Vector3.One;
 
-            string[] parts = raw.Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
+            string[] parts = raw.Split([' ', '\t'], StringSplitOptions.RemoveEmptyEntries);
             if (parts.Length < 3)
                 return false;
 
@@ -5788,6 +6388,7 @@ namespace LimitlessSquareEngine
                     CullMode = skybox.CullMode,
                     MeshId = skyboxMesh.Id,
                     MeshSurfaceId = skyboxSurface.Id,
+                    CameraObjectId = cameraItem.ObjectId,
                     MeshVertexColorsAreWhite = skyboxSurface.VertexColorsAreWhite
                 });
             }
@@ -5877,6 +6478,7 @@ namespace LimitlessSquareEngine
                         CullMode = material.CullMode,
                         MeshId = obj.Mesh ?? "",
                         MeshSurfaceId = surface.Id,
+                        CameraObjectId = cameraItem.ObjectId,
                         MeshVertexColorsAreWhite = surface.VertexColorsAreWhite
                     });
                 }
@@ -6037,6 +6639,162 @@ namespace LimitlessSquareEngine
             _renderQueue.Clear();
         }
 
+        private bool ShouldUseFogPostProcessForBatch(RenderCommand batchFirst)
+        {
+            if (string.IsNullOrWhiteSpace(batchFirst.CameraObjectId))
+                return false;
+
+            FogSettings? fog = ResolveFogForCamera(batchFirst.CameraObjectId);
+            return fog != null && fog.Enabled;
+        }
+
+        private void RenderSkyboxBackgroundToFogTarget(RenderCommand batchFirst, List<RenderCommand> batchCommands)
+        {
+            _gl.BindFramebuffer(FramebufferTarget.Framebuffer, _fogBackgroundFramebuffer);
+            _gl.Viewport(0, 0, (uint)Math.Max(1, batchFirst.ViewportWidth), (uint)Math.Max(1, batchFirst.ViewportHeight));
+
+            _gl.Disable(GLEnum.ScissorTest);
+            _gl.Disable(GLEnum.Blend);
+            _gl.Disable(GLEnum.DepthTest);
+            _gl.DepthMask(false);
+
+            _gl.ClearColor(_backgroundColor.X, _backgroundColor.Y, _backgroundColor.Z, _backgroundColor.W);
+            _gl.Clear(ClearBufferMask.ColorBufferBit);
+
+            var skyboxes = batchCommands
+                .Where(c => c.IsSkybox)
+                .OrderBy(c => c.SubmissionIndex)
+                .ToList();
+
+            foreach (var cmd in skyboxes)
+                ExecuteSkyboxCommand(cmd);
+        }
+
+        private void RenderSceneToFogSceneTarget(RenderCommand batchFirst, List<RenderCommand> batchCommands)
+        {
+            _gl.BindFramebuffer(FramebufferTarget.Framebuffer, _fogSceneFramebuffer);
+            _gl.Viewport(0, 0, (uint)Math.Max(1, batchFirst.ViewportWidth), (uint)Math.Max(1, batchFirst.ViewportHeight));
+
+            _gl.Disable(GLEnum.ScissorTest);
+            _gl.Enable(GLEnum.DepthTest);
+            _gl.DepthFunc(GLEnum.Less);
+            _gl.DepthMask(true);
+            _gl.Enable(GLEnum.Blend);
+            _gl.BlendFunc(GLEnum.SrcAlpha, GLEnum.OneMinusSrcAlpha);
+
+            _gl.ClearColor(_backgroundColor.X, _backgroundColor.Y, _backgroundColor.Z, _backgroundColor.W);
+            _gl.Clear(ClearBufferMask.ColorBufferBit | ClearBufferMask.DepthBufferBit);
+
+            ExecuteSortedCommands(batchCommands);
+        }
+
+        private void CompositeFogToMainFramebuffer(RenderCommand batchFirst, FogSettings fog)
+        {
+            _gl.BindFramebuffer(FramebufferTarget.Framebuffer, 0);
+            _gl.Viewport(
+                batchFirst.ViewportX,
+                batchFirst.ViewportY,
+                (uint)Math.Max(1, batchFirst.ViewportWidth),
+                (uint)Math.Max(1, batchFirst.ViewportHeight));
+
+            _gl.Disable(GLEnum.ScissorTest);
+            _gl.Disable(GLEnum.DepthTest);
+            _gl.DepthMask(false);
+            _gl.Disable(GLEnum.CullFace);
+            _gl.Disable(GLEnum.Blend);
+
+            _gl.UseProgram(_fogCompositeProgram);
+            _gl.BindVertexArray(_fogFullscreenVao);
+
+            _gl.ActiveTexture(TextureUnit.Texture0);
+            _gl.BindTexture(TextureTarget.Texture2D, _fogSceneColorTexture);
+            if (_fogCompositeSceneColorLoc != -1) _gl.Uniform1(_fogCompositeSceneColorLoc, 0);
+
+            _gl.ActiveTexture(TextureUnit.Texture1);
+            _gl.BindTexture(TextureTarget.Texture2D, _fogSceneDepthTexture);
+            if (_fogCompositeSceneDepthLoc != -1) _gl.Uniform1(_fogCompositeSceneDepthLoc, 1);
+
+            _gl.ActiveTexture(TextureUnit.Texture2);
+            _gl.BindTexture(TextureTarget.Texture2D, _fogBackgroundColorTexture);
+            if (_fogCompositeBackgroundColorLoc != -1) _gl.Uniform1(_fogCompositeBackgroundColorLoc, 2);
+
+            uint cylindricalTextureId = 0;
+            if (fog.Mode == FogMode.CylindricalTexture &&
+                !string.IsNullOrWhiteSpace(fog.CylindricalTexturePath) &&
+                TryResolveTexturePath(fog.CylindricalTexturePath, out string fogTextureFullPath))
+            {
+                TextureInfo tex = LoadTexture(fogTextureFullPath);
+                cylindricalTextureId = tex.Id;
+            }
+
+            _gl.ActiveTexture(TextureUnit.Texture3);
+            _gl.BindTexture(TextureTarget.Texture2D, cylindricalTextureId != 0 ? cylindricalTextureId : _lightingDummyTexture);
+            if (_fogCompositeCylindricalTextureLoc != -1) _gl.Uniform1(_fogCompositeCylindricalTextureLoc, 3);
+
+            if (_fogCompositeModeLoc != -1) _gl.Uniform1(_fogCompositeModeLoc, (int)fog.Mode);
+            if (_fogCompositeEnabledLoc != -1) _gl.Uniform1(_fogCompositeEnabledLoc, fog.Enabled ? 1 : 0);
+            if (_fogCompositeColorLoc != -1) _gl.Uniform4(_fogCompositeColorLoc, fog.Color.X, fog.Color.Y, fog.Color.Z, fog.Color.W);
+            if (_fogCompositeStartLoc != -1) _gl.Uniform1(_fogCompositeStartLoc, fog.Start);
+            if (_fogCompositeEndLoc != -1) _gl.Uniform1(_fogCompositeEndLoc, fog.End);
+            if (_fogCompositeEdgeTransitionLoc != -1) _gl.Uniform1(_fogCompositeEdgeTransitionLoc, fog.EdgeTransitionToSkybox ? 1 : 0);
+            if (_fogCompositeNearLoc != -1) _gl.Uniform1(_fogCompositeNearLoc, batchFirst.ClusterNear);
+            if (_fogCompositeFarLoc != -1) _gl.Uniform1(_fogCompositeFarLoc, batchFirst.ClusterFar);
+
+            bool isOrthographic =
+                MathF.Abs(batchFirst.Projection.M34) < 0.0001f &&
+                MathF.Abs(batchFirst.Projection.M44 - 1f) < 0.0001f;
+
+            if (_fogCompositeProjectionTypeLoc != -1)
+                _gl.Uniform1(_fogCompositeProjectionTypeLoc, isOrthographic ? 1 : 0);
+
+            if (Matrix4x4.Invert(batchFirst.Projection, out Matrix4x4 invProjection))
+            {
+                if (_fogCompositeInvProjectionLoc != -1)
+                    SetMatrixUniform(_fogCompositeInvProjectionLoc, invProjection);
+            }
+            else
+            {
+                if (_fogCompositeInvProjectionLoc != -1)
+                    SetMatrixUniform(_fogCompositeInvProjectionLoc, Matrix4x4.Identity);
+            }
+
+            Matrix4x4 invView = Matrix4x4.Identity;
+            if (Matrix4x4.Invert(batchFirst.View, out Matrix4x4 computedInvView))
+                invView = computedInvView;
+
+            invView.M41 = 0f;
+            invView.M42 = 0f;
+            invView.M43 = 0f;
+
+            if (_fogCompositeInvViewRotationLoc != -1)
+                SetMatrixUniform(_fogCompositeInvViewRotationLoc, invView);
+
+            if (_fogCompositeViewportSizeLoc != -1)
+                _gl.Uniform2(_fogCompositeViewportSizeLoc, (float)batchFirst.ViewportWidth, (float)batchFirst.ViewportHeight);
+
+            _gl.DrawArrays(PrimitiveType.Triangles, 0, 6);
+
+            _gl.ActiveTexture(TextureUnit.Texture3);
+            _gl.BindTexture(TextureTarget.Texture2D, 0);
+
+            _gl.ActiveTexture(TextureUnit.Texture2);
+            _gl.BindTexture(TextureTarget.Texture2D, 0);
+
+            _gl.ActiveTexture(TextureUnit.Texture1);
+            _gl.BindTexture(TextureTarget.Texture2D, 0);
+
+            _gl.ActiveTexture(TextureUnit.Texture0);
+            _gl.BindTexture(TextureTarget.Texture2D, 0);
+
+            _gl.BindVertexArray(0);
+
+            _gl.Enable(GLEnum.DepthTest);
+            _gl.DepthFunc(GLEnum.Less);
+            _gl.DepthMask(true);
+            _gl.Enable(GLEnum.Blend);
+            _gl.BlendFunc(GLEnum.SrcAlpha, GLEnum.OneMinusSrcAlpha);
+        }
+
         private void ExecuteScenePass(List<RenderCommand> sceneCommands)
         {
             if (sceneCommands.Count == 0)
@@ -6052,30 +6810,64 @@ namespace LimitlessSquareEngine
                 List<RenderCommand> batchCommands = batch.ToList();
                 RenderCommand first = batchCommands.First();
 
-                int vpX = first.ViewportX;
-                int vpY = first.ViewportY;
-                uint vpW = (uint)Math.Max(1, first.ViewportWidth);
-                uint vpH = (uint)Math.Max(1, first.ViewportHeight);
+                SkyboxData batchSkybox = batchCommands
+                    .Where(c => c.IsSkybox && c.Skybox != null)
+                    .Select(c => c.Skybox)
+                    .FirstOrDefault();
 
-                _gl.Viewport(vpX, vpY, vpW, vpH);
+                CaptureSkyboxReflectionForBatch(first, batchSkybox);
+                PrepareDirectionalShadowBatch(first, batchCommands);
+
+                bool useFog = ShouldUseFogPostProcessForBatch(first);
+                FogSettings? fog = useFog ? ResolveFogForCamera(first.CameraObjectId) : null;
+
+                if (!useFog || fog == null)
+                {
+                    int vpX = first.ViewportX;
+                    int vpY = first.ViewportY;
+                    uint vpW = (uint)Math.Max(1, first.ViewportWidth);
+                    uint vpH = (uint)Math.Max(1, first.ViewportHeight);
+
+                    _gl.BindFramebuffer(FramebufferTarget.Framebuffer, 0);
+                    _gl.Viewport(vpX, vpY, vpW, vpH);
+
+                    _gl.Enable(GLEnum.ScissorTest);
+                    _gl.Scissor(vpX, vpY, vpW, vpH);
+                    _gl.ClearColor(_backgroundColor.X, _backgroundColor.Y, _backgroundColor.Z, _backgroundColor.W);
+                    _gl.Clear(ClearBufferMask.ColorBufferBit | ClearBufferMask.DepthBufferBit);
+                    _gl.Disable(GLEnum.ScissorTest);
+
+                    ExecuteSortedCommands(batchCommands);
+                    continue;
+                }
+
+                InitializeFogPostProcessResources();
+                EnsureFogOffscreenTargets(first.ViewportWidth, first.ViewportHeight);
+
+                RenderSkyboxBackgroundToFogTarget(first, batchCommands);
+                RenderSceneToFogSceneTarget(first, batchCommands);
+
+                _gl.BindFramebuffer(FramebufferTarget.Framebuffer, 0);
+                _gl.Viewport(
+                    first.ViewportX,
+                    first.ViewportY,
+                    (uint)Math.Max(1, first.ViewportWidth),
+                    (uint)Math.Max(1, first.ViewportHeight));
 
                 _gl.Enable(GLEnum.ScissorTest);
-                _gl.Scissor(vpX, vpY, vpW, vpH);
+                _gl.Scissor(
+                    first.ViewportX,
+                    first.ViewportY,
+                    (uint)Math.Max(1, first.ViewportWidth),
+                    (uint)Math.Max(1, first.ViewportHeight));
                 _gl.ClearColor(_backgroundColor.X, _backgroundColor.Y, _backgroundColor.Z, _backgroundColor.W);
                 _gl.Clear(ClearBufferMask.ColorBufferBit | ClearBufferMask.DepthBufferBit);
                 _gl.Disable(GLEnum.ScissorTest);
 
-                SkyboxData batchSkybox = batchCommands
-                .Where(c => c.IsSkybox && c.Skybox != null)
-                .Select(c => c.Skybox)
-                .FirstOrDefault();
-
-                CaptureSkyboxReflectionForBatch(first, batchSkybox);
-                PrepareDirectionalShadowBatch(first, batchCommands);
-                ExecuteSortedCommands(batchCommands);
+                CompositeFogToMainFramebuffer(first, fog);
             }
 
-            // 场景结束后恢复整窗viewport并清一次深度
+            _gl.BindFramebuffer(FramebufferTarget.Framebuffer, 0);
             _gl.Viewport(0, 0, (uint)_window.Size.X, (uint)_window.Size.Y);
             _gl.Clear(ClearBufferMask.DepthBufferBit);
         }
@@ -6447,6 +7239,7 @@ namespace LimitlessSquareEngine
                 CullMode = _currentCullMode,
                 MeshId = "",
                 MeshSurfaceId = "",
+                CameraObjectId = "",
                 MeshVertexColorsAreWhite = false
             };
 
@@ -6674,6 +7467,22 @@ namespace LimitlessSquareEngine
                 _gl.DeleteBuffer(_directionalShadowCascadeBuffer);
                 _directionalShadowCascadeBuffer = 0;
             }
+
+            ReleaseFogOffscreenTargets();
+
+            if (_fogCompositeProgram != 0)
+            {
+                _gl.DeleteProgram(_fogCompositeProgram);
+                _fogCompositeProgram = 0;
+            }
+
+            if (_fogFullscreenVao != 0)
+            {
+                _gl.DeleteVertexArray(_fogFullscreenVao);
+                _fogFullscreenVao = 0;
+            }
+
+            _cameraFogSettings.Clear();
 
             _shadowSupportInitialized = false;
             _directionalShadowAtlasAllocatedSize = 0;

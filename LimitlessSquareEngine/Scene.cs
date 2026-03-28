@@ -901,6 +901,96 @@ namespace LimitlessSquareEngine
             return node.World.Scale;
         }
 
+        private static readonly Double3 RightBasis = new Double3(1.0, 0.0, 0.0);
+        private static readonly Double3 UpBasis = new Double3(0.0, 1.0, 0.0);
+        private static readonly Double3 ForwardBasis = new Double3(0.0, 0.0, 1.0);
+
+        private static Double3 Negate(Double3 v)
+        {
+            return new Double3(-v.X, -v.Y, -v.Z);
+        }
+
+        public static Double3 GetLocalRight(string sceneId, string objectId)
+        {
+            if (!TryGetNode(sceneId, objectId, out _, out var node))
+                return RightBasis;
+
+            return node.LocalRotation.Rotate(RightBasis);
+        }
+
+        public static Double3 GetLocalLeft(string sceneId, string objectId)
+        {
+            return Negate(GetLocalRight(sceneId, objectId));
+        }
+
+        public static Double3 GetLocalUp(string sceneId, string objectId)
+        {
+            if (!TryGetNode(sceneId, objectId, out _, out var node))
+                return UpBasis;
+
+            return node.LocalRotation.Rotate(UpBasis);
+        }
+
+        public static Double3 GetLocalDown(string sceneId, string objectId)
+        {
+            return Negate(GetLocalUp(sceneId, objectId));
+        }
+
+        public static Double3 GetLocalForward(string sceneId, string objectId)
+        {
+            if (!TryGetNode(sceneId, objectId, out _, out var node))
+                return ForwardBasis;
+
+            return node.LocalRotation.Rotate(ForwardBasis);
+        }
+
+        public static Double3 GetLocalBack(string sceneId, string objectId)
+        {
+            return Negate(GetLocalForward(sceneId, objectId));
+        }
+
+        public static Double3 GetRight(string sceneId, string objectId)
+        {
+            if (!TryGetNode(sceneId, objectId, out _, out var node))
+                return RightBasis;
+
+            RecalculateWorld(node);
+            return node.World.Rotation.Rotate(RightBasis);
+        }
+
+        public static Double3 GetLeft(string sceneId, string objectId)
+        {
+            return Negate(GetRight(sceneId, objectId));
+        }
+
+        public static Double3 GetUp(string sceneId, string objectId)
+        {
+            if (!TryGetNode(sceneId, objectId, out _, out var node))
+                return UpBasis;
+
+            RecalculateWorld(node);
+            return node.World.Rotation.Rotate(UpBasis);
+        }
+
+        public static Double3 GetDown(string sceneId, string objectId)
+        {
+            return Negate(GetUp(sceneId, objectId));
+        }
+
+        public static Double3 GetForward(string sceneId, string objectId)
+        {
+            if (!TryGetNode(sceneId, objectId, out _, out var node))
+                return ForwardBasis;
+
+            RecalculateWorld(node);
+            return node.World.Rotation.Rotate(ForwardBasis);
+        }
+
+        public static Double3 GetBack(string sceneId, string objectId)
+        {
+            return Negate(GetForward(sceneId, objectId));
+        }
+
         public static string? GetParentId(string sceneId, string objectId)
         {
             if (!TryGetNode(sceneId, objectId, out _, out var node))
