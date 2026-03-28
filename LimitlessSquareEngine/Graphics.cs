@@ -138,6 +138,8 @@ namespace LimitlessSquareEngine
         private uint _shadowDepthProgram = 0;
         private uint _directionalShadowCascadeBuffer = 0;
         private bool _shadowSupportInitialized = false;
+        private int _shadowDepthLightViewProjectionLoc = -1;
+        private int _shadowDepthModelLoc = -1;
 
         private readonly List<float> _gpuDirectionalShadowCascadeUploadScratch = new(256);
 
@@ -203,6 +205,10 @@ namespace LimitlessSquareEngine
         private readonly Dictionary<string, ReflectionTextureEnvironmentCacheEntry> _reflectionTextureEnvironmentCache = new(StringComparer.Ordinal);
 
         private bool _capturedSkyboxReflectionValid = false;
+        private string _capturedSkyboxReflectionCameraObjectId = "";
+        private string _capturedSkyboxReflectionSkyboxId = "";
+        private uint _capturedSkyboxReflectionProgram = 0;
+        private string _capturedSkyboxReflectionParametersRaw = "";
 
         private const int _gpuPointLightStrideFloats = 52;
         private const int _clusterCount = _clusterGridSizeX * _clusterGridSizeY * _clusterGridSizeZ;
@@ -687,7 +693,11 @@ namespace LimitlessSquareEngine
             int requiredAtlasSize = GetDirectionalShadowAtlasSize();
 
             if (_shadowDepthProgram == 0)
+            {
                 _shadowDepthProgram = CreateDirectionalShadowDepthProgram();
+                _shadowDepthLightViewProjectionLoc = _gl.GetUniformLocation(_shadowDepthProgram, "uLightViewProjection");
+                _shadowDepthModelLoc = _gl.GetUniformLocation(_shadowDepthProgram, "uModel");
+            }
 
             if (_directionalShadowCascadeBuffer == 0)
             {
@@ -771,6 +781,47 @@ namespace LimitlessSquareEngine
                 Location = location;
                 Type = type;
             }
+        }
+
+        private void BindCommandGeometryForShadow(in RenderCommand cmd)
+        {
+            if (!string.IsNullOrWhiteSpace(cmd.MeshId) &&
+                !string.IsNullOrWhiteSpace(cmd.MeshSurfaceId))
+            {
+                MeshSurfaceGpuResource resource = GetOrCreateMeshSurfaceGpuResource(
+                    cmd.MeshId,
+                    cmd.MeshSurfaceId,
+                    cmd.Vertices,
+                    cmd.VertexStrideFloats);
+
+                _gl.BindVertexArray(resource.Vao);
+                return;
+            }
+
+            InitializeDynamicGeometryResources();
+
+            _gl.BindBuffer(BufferTargetARB.ArrayBuffer, _dynamicGeometryVbo);
+
+            nuint requiredBytes = (nuint)(cmd.Vertices.Length * sizeof(float));
+            if (requiredBytes > _dynamicGeometryCapacityBytes)
+            {
+                _gl.BufferData(
+                    BufferTargetARB.ArrayBuffer,
+                    (ReadOnlySpan<float>)cmd.Vertices,
+                    BufferUsageARB.DynamicDraw);
+
+                _dynamicGeometryCapacityBytes = requiredBytes;
+            }
+            else
+            {
+                _gl.BufferSubData(
+                    BufferTargetARB.ArrayBuffer,
+                    0,
+                    (ReadOnlySpan<float>)cmd.Vertices);
+            }
+
+            uint vao = GetDynamicGeometryVAO(cmd.VertexStrideFloats);
+            _gl.BindVertexArray(vao);
         }
 
         private sealed class ProgramUniformLocationCache
@@ -966,6 +1017,18 @@ namespace LimitlessSquareEngine
             public bool CastShadow { get; set; } = false;
         }
 
+        private static string SerializeSkyboxParametersForCacheKey(SkyboxData skybox)
+        {
+            if (skybox == null)
+                return "";
+
+            if (skybox.Parameters.ValueKind == JsonValueKind.Undefined ||
+                skybox.Parameters.ValueKind == JsonValueKind.Null)
+                return "";
+
+            return skybox.Parameters.GetRawText();
+        }
+
         [MoonSharpHidden]
         public void UpsertSceneObject(SceneRenderObjectSnapshot snapshot)
         {
@@ -1064,6 +1127,10 @@ namespace LimitlessSquareEngine
         }
         private readonly List<RenderCommand> _renderQueue = new();
         private long _submissionCounter = 0;
+        private readonly List<RenderCommand> _shadowCasterScratch = new();
+        private readonly List<RenderCommand> _sceneCommandsScratch = new();
+        private readonly List<RenderCommand> _canvasCommandsScratch = new();
+        private readonly List<RenderCommand> _fogSceneCommandsScratch = new();
 
         private void EnsureDynamicGeometryScratchCapacity(int requiredFloatCount)
         {
@@ -1159,6 +1226,15 @@ namespace LimitlessSquareEngine
                 element.TextColor.Y.ToString(CultureInfo.InvariantCulture),
                 element.TextColor.Z.ToString(CultureInfo.InvariantCulture),
                 element.TextColor.W.ToString(CultureInfo.InvariantCulture));
+        }
+
+        private void ResetCapturedSkyboxReflectionCache()
+        {
+            _capturedSkyboxReflectionValid = false;
+            _capturedSkyboxReflectionCameraObjectId = "";
+            _capturedSkyboxReflectionSkyboxId = "";
+            _capturedSkyboxReflectionProgram = 0;
+            _capturedSkyboxReflectionParametersRaw = "";
         }
 
         private FontFamily ResolveDefaultUIFontFamily()
@@ -2084,6 +2160,27 @@ namespace LimitlessSquareEngine
             if (shadowLights.Count == 0)
                 return;
 
+            _shadowCasterScratch.Clear();
+
+            for (int i = 0; i < batchCommands.Count; i++)
+            {
+                RenderCommand cmd = batchCommands[i];
+
+                if (cmd.IsSkybox)
+                    continue;
+
+                if (cmd.QueueType != RenderQueueType.Opaque)
+                    continue;
+
+                if (!ShouldCastShadow(cmd.Material))
+                    continue;
+
+                _shadowCasterScratch.Add(cmd);
+            }
+
+            if (_shadowCasterScratch.Count == 0)
+                return;
+
             uint previousProgram = _currentProgram;
             RenderSpace previousRenderSpace = _activeRenderSpace;
             Matrix4x4 previousModel = _activeModelMatrix;
@@ -2103,8 +2200,8 @@ namespace LimitlessSquareEngine
             _currentProgram = _shadowDepthProgram;
             _gl.UseProgram(_shadowDepthProgram);
 
-            int lightViewProjectionLoc = _gl.GetUniformLocation(_shadowDepthProgram, "uLightViewProjection");
-            int modelLoc = _gl.GetUniformLocation(_shadowDepthProgram, "uModel");
+            int lightViewProjectionLoc = _shadowDepthLightViewProjectionLoc;
+            int modelLoc = _shadowDepthModelLoc;
 
             for (int lightIndex = 0; lightIndex < shadowLights.Count; lightIndex++)
             {
@@ -2155,7 +2252,7 @@ namespace LimitlessSquareEngine
 
                     SetMatrixUniform(lightViewProjectionLoc, cascadeInfo.ShadowMatrix);
 
-                    foreach (RenderCommand cmd in batchCommands)
+                    foreach (RenderCommand cmd in _shadowCasterScratch)
                     {
                         if (cmd.IsSkybox)
                             continue;
@@ -2166,7 +2263,7 @@ namespace LimitlessSquareEngine
                         if (!ShouldCastShadow(cmd.Material))
                             continue;
 
-                        BindCommandGeometry(cmd);
+                        BindCommandGeometryForShadow(cmd);
                         SetMatrixUniform(modelLoc, cmd.Model);
                         _gl.DrawArrays(cmd.PrimitiveType, 0, (uint)(cmd.Vertices.Length / cmd.VertexStrideFloats));
                     }
@@ -3090,11 +3187,13 @@ namespace LimitlessSquareEngine
         public void SetScreenSkybox(string shaderName, string parametersJson = "{}")
         {
             _screenSkybox = BuildSkyboxData("__screen__", shaderName, parametersJson);
+            ResetCapturedSkyboxReflectionCache();
         }
 
         public void ClearScreenSkybox()
         {
             _screenSkybox = null;
+            ResetCapturedSkyboxReflectionCache();
         }
 
         public void SetCameraSkybox(string cameraObjectId, string shaderName, string parametersJson = "{}")
@@ -3104,6 +3203,7 @@ namespace LimitlessSquareEngine
 
             string key = cameraObjectId.Trim();
             _cameraSkyboxes[key] = BuildSkyboxData(key, shaderName, parametersJson);
+            ResetCapturedSkyboxReflectionCache();
         }
 
         public void ClearCameraSkybox(string cameraObjectId)
@@ -3112,6 +3212,7 @@ namespace LimitlessSquareEngine
                 return;
 
             _cameraSkyboxes.Remove(cameraObjectId.Trim());
+            ResetCapturedSkyboxReflectionCache();
         }
 
         private FogSettings GetOrCreateFogSettings(string cameraObjectId)
@@ -3734,7 +3835,11 @@ namespace LimitlessSquareEngine
 
                     if (isBackgroundPixel)
                     {
-                        FragColor = skyboxColor;
+                        vec4 compositedSceneOverSkybox;
+                        compositedSceneOverSkybox.rgb = sceneColor.rgb + skyboxColor.rgb * (1.0 - sceneColor.a);
+                        compositedSceneOverSkybox.a = sceneColor.a + skyboxColor.a * (1.0 - sceneColor.a);
+
+                        FragColor = compositedSceneOverSkybox;
                         return;
                     }
 
@@ -5152,7 +5257,7 @@ namespace LimitlessSquareEngine
             var root = new Dictionary<string, object?>
             {
                 ["assetType"] = "Material",
-                ["shader"] = "Shaders/Lit",
+                ["shader"] = "Shaders/Builtin/Lit",
                 ["parameters"] = parameters
             };
 
@@ -5538,15 +5643,50 @@ namespace LimitlessSquareEngine
                    string.Equals(uniformName, _uniformUseOutlineNormal, StringComparison.Ordinal);
         }
 
+        private bool CanReuseCapturedSkyboxReflection(in RenderCommand batchCmd, SkyboxData skybox)
+        {
+            if (!_capturedSkyboxReflectionValid)
+                return false;
+
+            if (skybox == null)
+                return false;
+
+            string currentCameraObjectId = batchCmd.CameraObjectId ?? "";
+            string currentSkyboxId = skybox.Id ?? "";
+            uint currentProgram = skybox.Program;
+            string currentParametersRaw =
+                skybox.Parameters.ValueKind == JsonValueKind.Undefined ||
+                skybox.Parameters.ValueKind == JsonValueKind.Null
+                    ? ""
+                    : skybox.Parameters.GetRawText();
+
+            if (!string.Equals(_capturedSkyboxReflectionCameraObjectId, currentCameraObjectId, StringComparison.Ordinal))
+                return false;
+
+            if (!string.Equals(_capturedSkyboxReflectionSkyboxId, currentSkyboxId, StringComparison.Ordinal))
+                return false;
+
+            if (_capturedSkyboxReflectionProgram != currentProgram)
+                return false;
+
+            if (!string.Equals(_capturedSkyboxReflectionParametersRaw, currentParametersRaw, StringComparison.Ordinal))
+                return false;
+
+            return true;
+        }
+
         private void CaptureSkyboxReflectionForBatch(in RenderCommand batchCmd, SkyboxData skybox)
         {
             InitializeReflectionCaptureResources();
 
             if (skybox == null)
             {
-                _capturedSkyboxReflectionValid = false;
+                ResetCapturedSkyboxReflectionCache();
                 return;
             }
+
+            if (CanReuseCapturedSkyboxReflection(batchCmd, skybox))
+                return;
 
             _capturedSkyboxReflectionValid = false;
 
@@ -5614,6 +5754,14 @@ namespace LimitlessSquareEngine
                 previousProjection);
 
             _capturedSkyboxReflectionValid = true;
+            _capturedSkyboxReflectionCameraObjectId = batchCmd.CameraObjectId ?? "";
+            _capturedSkyboxReflectionSkyboxId = skybox.Id ?? "";
+            _capturedSkyboxReflectionProgram = skybox.Program;
+            _capturedSkyboxReflectionParametersRaw =
+                skybox.Parameters.ValueKind == JsonValueKind.Undefined ||
+                skybox.Parameters.ValueKind == JsonValueKind.Null
+                    ? ""
+                    : skybox.Parameters.GetRawText();
         }
 
         private void UpdatePrefilteredReflectionCube()
@@ -6652,26 +6800,21 @@ namespace LimitlessSquareEngine
         [MoonSharpHidden]
         public void ExecuteRenderQueue()
         {
-            if (!_isInitialized)
-                Initialize();
+            _sceneCommandsScratch.Clear();
+            _canvasCommandsScratch.Clear();
 
-            _directionalShadowBatchCache.Clear();
+            for (int i = 0; i < _renderQueue.Count; i++)
+            {
+                RenderCommand cmd = _renderQueue[i];
 
-            if (_renderQueue.Count == 0)
-                return;
+                if (cmd.Pass == RenderPass.Scene)
+                    _sceneCommandsScratch.Add(cmd);
+                else
+                    _canvasCommandsScratch.Add(cmd);
+            }
 
-            InitializeQuadRenderer();
-
-            List<RenderCommand> sceneCommands = _renderQueue
-                .Where(c => c.Pass == RenderPass.Scene)
-                .ToList();
-
-            List<RenderCommand> canvasCommands = _renderQueue
-                .Where(c => c.Pass == RenderPass.Canvas)
-                .ToList();
-
-            ExecuteScenePass(sceneCommands);
-            ExecuteCanvasPass(canvasCommands);
+            ExecuteScenePass(_sceneCommandsScratch);
+            ExecuteCanvasPass(_canvasCommandsScratch);
 
             _renderQueue.Clear();
         }
@@ -6719,10 +6862,25 @@ namespace LimitlessSquareEngine
             _gl.Enable(GLEnum.Blend);
             _gl.BlendFunc(GLEnum.SrcAlpha, GLEnum.OneMinusSrcAlpha);
 
-            _gl.ClearColor(_backgroundColor.X, _backgroundColor.Y, _backgroundColor.Z, _backgroundColor.W);
+            _gl.ClearColor(0f, 0f, 0f, 0f);
             _gl.Clear(ClearBufferMask.ColorBufferBit | ClearBufferMask.DepthBufferBit);
 
-            ExecuteSortedCommands(batchCommands);
+            _fogSceneCommandsScratch.Clear();
+
+            for (int i = 0; i < batchCommands.Count; i++)
+            {
+                RenderCommand cmd = batchCommands[i];
+
+                if (cmd.IsSkybox)
+                    continue;
+
+                _fogSceneCommandsScratch.Add(cmd);
+            }
+
+            if (_fogSceneCommandsScratch.Count == 0)
+                return;
+
+            ExecuteSortedCommands(_fogSceneCommandsScratch);
         }
 
         private void CompositeFogToMainFramebuffer(RenderCommand batchFirst, FogSettings fog)
@@ -7372,6 +7530,12 @@ namespace LimitlessSquareEngine
 
             _uploadedLightingBatchId = long.MinValue;
             _uploadedLightCount = 0;
+
+            _capturedSkyboxReflectionValid = false;
+            _capturedSkyboxReflectionCameraObjectId = "";
+            _capturedSkyboxReflectionSkyboxId = "";
+            _capturedSkyboxReflectionProgram = 0;
+            _capturedSkyboxReflectionParametersRaw = "";
 
             if (_reflectionSkyboxCube != 0)
             {

@@ -8,6 +8,11 @@
     <StartupObject>LimitlessSquareEngine.Program</StartupObject>
   </PropertyGroup>
 
+	<PropertyGroup>
+		<AssemblyName>Limitless Square Engine</AssemblyName>
+		<ApplicationIcon>Resources\LimitlessSquareEngineIcon.ico</ApplicationIcon>
+	</PropertyGroup>
+
   <ItemGroup>
     <PackageReference Include="AssimpNet" Version="4.1.0" />
     <PackageReference Include="Jitter2.Double" Version="2.8.1" />

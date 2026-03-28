@@ -157,6 +157,17 @@ namespace LimitlessSquareEngine
         // 启动画面背景色
         static Color _startupBackgroundColor = Color.SkyBlue;
 
+        // 窗口标题段
+        private static string _windowBaseTitle = "";
+        // 标题统计累计时间
+        private static double _titleStatAccumulatedSeconds = 0.0;
+        // 标题统计累计帧数
+        private static int _titleStatFrameCount = 0;
+        // 标题显示FPS
+        private static int _titleDisplayedFps = 0;
+        // 标题立即刷新标志
+        private static bool _windowTitleDirty = true;
+
         /// <summary>
         /// 显示启动Logo
         /// </summary>
@@ -375,6 +386,47 @@ namespace LimitlessSquareEngine
             _window?.SwapBuffers();
         }
 
+        static void UpdateWindowTitleNow()
+        {
+            if (_window == null)
+                return;
+
+            string baseTitle = string.IsNullOrWhiteSpace(_windowBaseTitle)
+                ? (Path.GetFileNameWithoutExtension(Environment.ProcessPath) ?? "Limitless Square Engine")
+                : _windowBaseTitle;
+
+            int width = _window.Size.X;
+            int height = _window.Size.Y;
+
+            _window.Title = $"{baseTitle}  <>  {width}x{height}  |  FPS {_titleDisplayedFps}";
+            _windowTitleDirty = false;
+        }
+
+        static void TickWindowTitle(float deltaTime)
+        {
+            if (_window == null)
+                return;
+
+            _titleStatAccumulatedSeconds += deltaTime;
+            _titleStatFrameCount++;
+
+            if (_windowTitleDirty)
+            {
+                UpdateWindowTitleNow();
+                return;
+            }
+
+            if (_titleStatAccumulatedSeconds >= 1.0)
+            {
+                _titleDisplayedFps = (int)MathF.Round(_titleStatFrameCount / (float)_titleStatAccumulatedSeconds);
+
+                _titleStatAccumulatedSeconds = 0.0;
+                _titleStatFrameCount = 0;
+
+                UpdateWindowTitleNow();
+            }
+        }
+
         /// <summary>
         /// 初始化程序
         /// </summary>
@@ -401,8 +453,8 @@ namespace LimitlessSquareEngine
             UserData.RegisterType<PhysicsRaycastHit>();
             // 初始化窗口参数
             var options = WindowOptions.Default;
-            options.Size = new Silk.NET.Maths.Vector2D<int>(800, 600);
-            options.Title = "Limitless Square Engine";
+            _windowBaseTitle = Path.GetFileNameWithoutExtension(Environment.ProcessPath) ?? "Limitless Square Engine";
+            options.Title = _windowBaseTitle;
             options.IsVisible = true;
             options.ShouldSwapAutomatically = false;
             _window = Window.Create(options);
@@ -443,6 +495,12 @@ namespace LimitlessSquareEngine
 
                 // 初始化帧时间   
                 _lastFrameTime = _window.Time;
+
+                _titleDisplayedFps = 0;
+                _titleStatAccumulatedSeconds = 0.0;
+                _titleStatFrameCount = 0;
+                _windowTitleDirty = true;
+                UpdateWindowTitleNow();
 
                 // 显示启动Logo
                 ShowStartupLogo();
@@ -1135,6 +1193,11 @@ namespace LimitlessSquareEngine
                 }
             };
 
+            _window.Resize += (size) =>
+            {
+                _windowTitleDirty = true;
+            };
+
             // 关闭事件
             _window.Closing += () =>
             {
@@ -1162,6 +1225,7 @@ namespace LimitlessSquareEngine
             float deltaTime = (float)(currentTime - _lastFrameTime);
             float fixedDeltaTime = 0.02f;
             _lastFrameTime = currentTime;
+            TickWindowTitle(deltaTime);
 
             // 清除颜色缓冲
             _graphics?.ClearBackground();
