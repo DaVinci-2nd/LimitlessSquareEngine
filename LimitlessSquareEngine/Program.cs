@@ -125,6 +125,8 @@ namespace LimitlessSquareEngine
         static Graphics? _graphics;
         // 纹理路径列表
         internal static List<string> _texturePaths = new List<string>();
+        // Shader顶点文件表
+        internal static List<string> _shaderVertexFiles = new List<string>();
         // UI布局表
         internal static Dictionary<string, List<CanvasElement>> _uiLayouts = new Dictionary<string, List<CanvasElement>>();
         // 当前激活的UI布局Key
@@ -139,6 +141,7 @@ namespace LimitlessSquareEngine
         internal static Dictionary<string, string> _generatedMaterialJsonRegistry = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         // 纹理文件注册表
         internal static Dictionary<string, string> _textureFileRegistry = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
         // 场景文件显示名表
         static Dictionary<string, string> _sceneFileDisplayName = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         // 输入系统实例
@@ -380,12 +383,7 @@ namespace LimitlessSquareEngine
             // 基础目录结构创建
             try
             {
-                Directory.CreateDirectory("Assets/Scene");
-                Directory.CreateDirectory("Assets/Textures/Icon");
-                Directory.CreateDirectory("Assets/UI");
-                Directory.CreateDirectory("Assets/Materials");
-                Directory.CreateDirectory("Scripts");
-                Directory.CreateDirectory("Assets/Shaders");
+                Directory.CreateDirectory(Path.Combine(AppContext.BaseDirectory, "Assets"));
             }
             catch 
             {
@@ -413,35 +411,7 @@ namespace LimitlessSquareEngine
             _window.Load += () =>
             {
                 // 图标数据
-                byte[]? iconBytes = null;
-                // 搜索图标目录
-                string gameIconPath = Path.Combine(AppContext.BaseDirectory, "icon.png");
-                if (Directory.Exists(gameIconPath))
-                {
-                    var iconFiles = Directory.GetFiles(gameIconPath, "*.*", SearchOption.TopDirectoryOnly)
-                        .Where(f => f.EndsWith(".ico", StringComparison.OrdinalIgnoreCase) ||
-                                    f.EndsWith(".png", StringComparison.OrdinalIgnoreCase))
-                        .OrderBy(f => f)
-                        .ToList();
-                    if (iconFiles.Count > 0)
-                    {
-                        string firstIcon = iconFiles[0];
-                        try
-                        {
-                            iconBytes = File.ReadAllBytes(firstIcon);
-                            // 验证图标解码有效性
-                            using var testCodec = SKCodec.Create(new SKMemoryStream(iconBytes));
-                            if (testCodec == null)
-                            {
-                                iconBytes = null;
-                            }
-                        }
-                        catch
-                        {
-                            iconBytes = null;
-                        }
-                    }
-                }
+                byte[]? iconBytes = TryLoadIconFromBaseDirectory();
 
                 // 如果外部图标解码失败或未找到则使用默认图标
                 if (iconBytes == null)
@@ -529,11 +499,13 @@ namespace LimitlessSquareEngine
                 _input = new Input(_window);
 
                 // 扫描脚本目录
-                string scriptPath = Path.Combine(AppContext.BaseDirectory, "Scripts");
+                string scriptPath = Path.Combine(AppContext.BaseDirectory, "Assets");
                 if (Directory.Exists(scriptPath))
                 {
                     // 获取所有Lua脚本
                     string[] luaFiles = Directory.GetFiles(scriptPath, "*.lua", SearchOption.AllDirectories);
+                    Array.Sort(luaFiles, StringComparer.OrdinalIgnoreCase);
+
                     foreach (string file in luaFiles)
                     {
                         var instance = new LuaScriptInstance(file);
@@ -1012,129 +984,94 @@ namespace LimitlessSquareEngine
                         PropertyNameCaseInsensitive = true
                     };
 
-                    string uiBasePath = Path.Combine(assetsPath, "UI");
-                    string sceneBasePath = Path.Combine(assetsPath, "Scene");
-
                     _sceneFileRegistry.Clear();
                     _sceneFileDisplayName.Clear();
                     _materialFileRegistry.Clear();
                     _generatedMaterialJsonRegistry.Clear();
                     _textureFileRegistry.Clear();
                     _texturePaths.Clear();
-
-                    _sceneFileRegistry.Clear();
-                    _sceneFileDisplayName.Clear();
+                    _uiLayouts.Clear();
+                    _shaderVertexFiles.Clear();
 
                     string[] allFiles = Directory.GetFiles(assetsPath, "*.*", SearchOption.AllDirectories);
                     Array.Sort(allFiles, StringComparer.OrdinalIgnoreCase);
 
                     foreach (string file in allFiles)
                     {
-                        string? directory = Path.GetDirectoryName(file);
-                        if (string.IsNullOrWhiteSpace(directory))
-                            continue;
+                        string ext = Path.GetExtension(file);
 
-                        // 处理UI布局文件
-                        if (directory.StartsWith(uiBasePath, StringComparison.OrdinalIgnoreCase))
-                        {
-                            if (Path.GetExtension(file).Equals(".json", StringComparison.OrdinalIgnoreCase))
-                            {
-                                try
-                                {
-                                    string json = File.ReadAllText(file);
-                                    var elements = JsonSerializer.Deserialize<List<CanvasElement>>(json, options);
-                                    if (elements != null)
-                                    {
-                                        void SetParent(CanvasElement element, CanvasElement? parent = null)
-                                        {
-                                            if (parent != null)
-                                                element.Parent = parent;
-                                            foreach (var child in element.Children)
-                                                SetParent(child, element);
-                                        }
-
-                                        foreach (var element in elements)
-                                            SetParent(element);
-
-                                        string key = Path.GetFileNameWithoutExtension(file);
-                                        _uiLayouts[key] = elements;
-                                        Console.WriteLine($"[i] Loaded UI layout: {key}");
-                                    }
-                                }
-                                catch (Exception ex)
-                                {
-                                    Console.WriteLine($"[!] Failed to load UI layout from {file}: {ex.Message}");
-                                }
-                            }
-
-                            continue;
-                        }
-
-                        // 场景文件
-                        if (directory.StartsWith(sceneBasePath, StringComparison.OrdinalIgnoreCase) &&
-                            Path.GetExtension(file).Equals(".json", StringComparison.OrdinalIgnoreCase))
+                        if (ext.Equals(".json", StringComparison.OrdinalIgnoreCase))
                         {
                             try
                             {
-                                if (!TryValidateSceneFile(file, out string sceneId, out string reason))
+                                if (TryValidateSceneFile(file, out string sceneId, out string sceneReason))
                                 {
-                                    Console.WriteLine($"[!] Invalid scene file skipped: {file} | Reason: {reason}");
+                                    if (_sceneFileRegistry.TryGetValue(sceneId, out string? oldPath))
+                                    {
+                                        Console.WriteLine($"[!] Duplicate scene id '{sceneId}' found. Replacing:");
+                                        Console.WriteLine($"    Old: {oldPath}");
+                                        Console.WriteLine($"    New: {file}");
+                                    }
+
+                                    _sceneFileRegistry[sceneId] = file;
+                                    _sceneFileDisplayName[sceneId] = Path.GetFileName(file);
+
+                                    Console.WriteLine($"[i] Registered scene: {sceneId} -> {file}");
                                     continue;
                                 }
-
-                                if (_sceneFileRegistry.TryGetValue(sceneId, out string? oldPath))
-                                {
-                                    Console.WriteLine($"[!] Duplicate scene id '{sceneId}' found. Replacing:");
-                                    Console.WriteLine($"    Old: {oldPath}");
-                                    Console.WriteLine($"    New: {file}");
-                                }
-
-                                _sceneFileRegistry[sceneId] = file;
-                                _sceneFileDisplayName[sceneId] = Path.GetFileName(file);
-
-                                Console.WriteLine($"[i] Registered scene: {sceneId} -> {file}");
                             }
                             catch (Exception ex)
                             {
-                                Console.WriteLine($"[!] Failed to scan scene file {file}: {ex.Message}");
+                                Console.WriteLine($"[!] Scene scan failed for {file}: {ex.Message}");
                             }
 
-                            continue;
-                        }
-
-                        // 材质文件
-                        if (Path.GetExtension(file).Equals(".json", StringComparison.OrdinalIgnoreCase))
-                        {
                             try
                             {
-                                if (TryValidateMaterialFile(file, out _))
+                                if (TryValidateMaterialFile(file, out string materialReason))
                                 {
-                                    string key = Path.GetRelativePath(assetsPath, file)
-                                        .Replace('\\', '/');
-
-                                    if (key.EndsWith(".json", StringComparison.OrdinalIgnoreCase))
-                                        key = key[..^5];
-
+                                    string key = BuildAssetKey(assetsPath, file, removeExtension: true);
                                     _materialFileRegistry[key] = file;
+
                                     Console.WriteLine($"[i] Registered material: {key} -> {file}");
                                     continue;
                                 }
                             }
                             catch (Exception ex)
                             {
-                                Console.WriteLine($"[!] Failed to scan material file {file}: {ex.Message}");
-                                continue;
+                                Console.WriteLine($"[!] Material scan failed for {file}: {ex.Message}");
                             }
-                        }
 
-                        // 纹理文件
-                        string ext = Path.GetExtension(file);
+                            try
+                            {
+                                if (TryLoadCanvasLayoutFile(file, options, out List<CanvasElement>? elements, out string canvasReason)
+                                    && elements != null)
+                                {
+                                    string key = BuildAssetKey(assetsPath, file, removeExtension: true);
+
+                                    if (_uiLayouts.ContainsKey(key))
+                                    {
+                                        Console.WriteLine($"[!] Duplicate UI layout key '{key}' found. Replacing with: {file}");
+                                    }
+
+                                    _uiLayouts[key] = elements;
+                                    Console.WriteLine($"[i] Loaded UI layout: {key} -> {file}");
+                                    continue;
+                                }
+                            }
+                            catch (Exception ex)
+                            {
+                                Console.WriteLine($"[!] UI layout scan failed for {file}: {ex.Message}");
+                            }
+
+                            Console.WriteLine($"[i] Unknown json asset skipped: {file}");
+                            continue;
+                        }
 
                         if (ext.Equals(".png", StringComparison.OrdinalIgnoreCase) ||
                             ext.Equals(".jpg", StringComparison.OrdinalIgnoreCase) ||
                             ext.Equals(".jpeg", StringComparison.OrdinalIgnoreCase))
                         {
-                            string key = Path.GetRelativePath(assetsPath, file).Replace('\\', '/');
+                            string key = BuildAssetKey(assetsPath, file, removeExtension: false);
 
                             _textureFileRegistry[key] = file;
                             _texturePaths.Add(key);
@@ -1143,8 +1080,7 @@ namespace LimitlessSquareEngine
                             continue;
                         }
 
-                        // OBJ网格
-                        if (Path.GetExtension(file).Equals(".obj", StringComparison.OrdinalIgnoreCase))
+                        if (ext.Equals(".obj", StringComparison.OrdinalIgnoreCase))
                         {
                             try
                             {
@@ -1157,9 +1093,24 @@ namespace LimitlessSquareEngine
 
                             continue;
                         }
+
+                        if (IsShaderFile(file))
+                        {
+                            string shaderKey = BuildAssetKey(assetsPath, file, removeExtension: false);
+
+                            Console.WriteLine($"[i] Found shader file: {shaderKey}");
+
+                            if (ext.Equals(".vert", StringComparison.OrdinalIgnoreCase))
+                            {
+                                _shaderVertexFiles.Add(file);
+                            }
+
+                            continue;
+                        }
                     }
 
-                    Console.WriteLine($"[i] Scene scan completed. Registered scenes: {_sceneFileRegistry.Count}, materials: {_materialFileRegistry.Count}");
+                    Console.WriteLine($"[i] Asset scan completed. Scenes={_sceneFileRegistry.Count}, Materials={_materialFileRegistry.Count}, UI={_uiLayouts.Count}, Textures={_textureFileRegistry.Count}");
+                    graphics.LoadShaders(_shaderVertexFiles, assetsPath);
                 }
 
                 graphics.ConfigureDefaultMainCameraFog();
@@ -1559,6 +1510,117 @@ namespace LimitlessSquareEngine
 
             return true;
         }
+
+        static bool TryLoadCanvasLayoutFile(
+            string filePath,
+            JsonSerializerOptions options,
+            out List<CanvasElement>? elements,
+            out string reason)
+        {
+            elements = null;
+            reason = string.Empty;
+
+            try
+            {
+                string json = File.ReadAllText(filePath);
+                using JsonDocument doc = JsonDocument.Parse(json);
+
+                if (doc.RootElement.ValueKind != JsonValueKind.Array)
+                {
+                    reason = "Root is not a JSON array.";
+                    return false;
+                }
+
+                var parsed = JsonSerializer.Deserialize<List<CanvasElement>>(json, options);
+                if (parsed == null)
+                {
+                    reason = "Deserialized result is null.";
+                    return false;
+                }
+
+                void SetParent(CanvasElement element, CanvasElement? parent = null)
+                {
+                    if (parent != null)
+                        element.Parent = parent;
+
+                    foreach (var child in element.Children)
+                        SetParent(child, element);
+                }
+
+                foreach (var element in parsed)
+                    SetParent(element);
+
+                elements = parsed;
+                return true;
+            }
+            catch (Exception ex)
+            {
+                reason = ex.Message;
+                return false;
+            }
+        }
+
+        static string BuildAssetKey(string assetsPath, string filePath, bool removeExtension = false)
+        {
+            string key = Path.GetRelativePath(assetsPath, filePath)
+                .Replace('\\', '/');
+
+            if (removeExtension)
+            {
+                string ext = Path.GetExtension(key);
+                if (!string.IsNullOrEmpty(ext))
+                    key = key[..^ext.Length];
+            }
+
+            return key;
+        }
+
+        static bool IsShaderFile(string filePath)
+        {
+            string ext = Path.GetExtension(filePath);
+
+            return ext.Equals(".vert", StringComparison.OrdinalIgnoreCase) ||
+                   ext.Equals(".frag", StringComparison.OrdinalIgnoreCase) ||
+                   ext.Equals(".glsl", StringComparison.OrdinalIgnoreCase) ||
+                   ext.Equals(".vs", StringComparison.OrdinalIgnoreCase) ||
+                   ext.Equals(".fs", StringComparison.OrdinalIgnoreCase) ||
+                   ext.Equals(".shader", StringComparison.OrdinalIgnoreCase);
+        }
+
+        static byte[]? TryLoadIconFromBaseDirectory()
+        {
+            try
+            {
+                string baseDir = AppContext.BaseDirectory;
+
+                string[] candidates =
+                [
+                    Path.Combine(baseDir, "icon.png"),
+            Path.Combine(baseDir, "icon.ico"),
+            Path.Combine(baseDir, "Icon.png"),
+            Path.Combine(baseDir, "Icon.ico")
+                ];
+
+                foreach (string path in candidates)
+                {
+                    if (!File.Exists(path))
+                        continue;
+
+                    byte[] bytes = File.ReadAllBytes(path);
+
+                    using var testCodec = SKCodec.Create(new SKMemoryStream(bytes));
+                    if (testCodec != null)
+                        return bytes;
+                }
+            }
+            catch
+            {
+            }
+
+            return null;
+        }
+
+
 
         /// <summary>
         /// 读取JSON属性

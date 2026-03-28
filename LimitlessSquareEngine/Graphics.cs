@@ -1543,61 +1543,100 @@ namespace LimitlessSquareEngine
         /// </summary>
         /// <exception cref="DirectoryNotFoundException"></exception>
         /// <exception cref="Exception"></exception>
-        private void LoadShaders()
+        internal void LoadShaders(IEnumerable<string> vertexFiles, string assetsPath)
         {
-            string shadersPath = Path.Combine(AppContext.BaseDirectory, "Assets", "Shaders");
-            if (!Directory.Exists(shadersPath))
-                throw new DirectoryNotFoundException("[X] Shaders folder not found.");
+            if (vertexFiles == null)
+                throw new ArgumentNullException(nameof(vertexFiles));
 
-            // 获取所有着色器
-            string[] vertexFiles = Directory.GetFiles(shadersPath, "*.vert", SearchOption.AllDirectories);
-            foreach (string vertFile in vertexFiles)
+            if (string.IsNullOrWhiteSpace(assetsPath))
+                throw new ArgumentException("[X] Assets path cannot be null or empty.", nameof(assetsPath));
+
+            bool loadedAny = false;
+            const string fallbackKey = "__internal_fallback_purple__";
+
+            foreach (string vertFile in vertexFiles
+                .Where(File.Exists)
+                .OrderBy(f => f, StringComparer.OrdinalIgnoreCase))
             {
-                string directory = Path.GetDirectoryName(vertFile);
+                string? directory = Path.GetDirectoryName(vertFile);
+                if (string.IsNullOrWhiteSpace(directory))
+                    continue;
+
                 string name = Path.GetFileNameWithoutExtension(vertFile);
                 string fragFile = Path.Combine(directory, name + ".frag");
                 if (!File.Exists(fragFile))
                 {
-                    Console.WriteLine($"[!] The frag file corresponding to {vertFile} cannot be found, Skipped.");
+                    Console.WriteLine($"[!] The frag file corresponding to {vertFile} cannot be found, skipped.");
                     continue;
                 }
 
-                string vertexSource = File.ReadAllText(vertFile);
-                string fragmentSource = File.ReadAllText(fragFile);
-
-                uint vertexShader = CompileShader(ShaderType.VertexShader, vertexSource);
-                uint fragmentShader = CompileShader(ShaderType.FragmentShader, fragmentSource);
-
-                uint program = _gl.CreateProgram();
-                _gl.AttachShader(program, vertexShader);
-                _gl.AttachShader(program, fragmentShader);
-                _gl.LinkProgram(program);
-
-                _gl.GetProgram(program, ProgramPropertyARB.LinkStatus, out int success);
-                if (success == 0)
+                try
                 {
-                    string infoLog = _gl.GetProgramInfoLog(program);
-                    throw new Exception($"[X] Shader '{name}' failed to link: {infoLog}");
+                    string vertexSource = File.ReadAllText(vertFile);
+                    string fragmentSource = File.ReadAllText(fragFile);
+
+                    uint vertexShader = CompileShader(ShaderType.VertexShader, vertexSource);
+                    uint fragmentShader = CompileShader(ShaderType.FragmentShader, fragmentSource);
+
+                    uint program = _gl.CreateProgram();
+                    _gl.AttachShader(program, vertexShader);
+                    _gl.AttachShader(program, fragmentShader);
+                    _gl.LinkProgram(program);
+
+                    _gl.GetProgram(program, ProgramPropertyARB.LinkStatus, out int success);
+                    if (success == 0)
+                    {
+                        string infoLog = _gl.GetProgramInfoLog(program);
+
+                        _gl.DetachShader(program, vertexShader);
+                        _gl.DetachShader(program, fragmentShader);
+                        _gl.DeleteShader(vertexShader);
+                        _gl.DeleteShader(fragmentShader);
+                        _gl.DeleteProgram(program);
+
+                        Console.WriteLine($"[!] Shader '{name}' failed to link, fallback will be used if needed: {infoLog}");
+                        continue;
+                    }
+
+                    _gl.DetachShader(program, vertexShader);
+                    _gl.DetachShader(program, fragmentShader);
+                    _gl.DeleteShader(vertexShader);
+                    _gl.DeleteShader(fragmentShader);
+
+                    string key = Path.GetRelativePath(assetsPath, vertFile)
+                        .Replace('\\', '/');
+
+                    if (key.EndsWith(".vert", StringComparison.OrdinalIgnoreCase))
+                        key = key[..^5];
+
+                    _shaderPrograms[key] = program;
+                    loadedAny = true;
+
+                    Console.WriteLine($"[i] Loaded shader: {key}");
                 }
-
-                _gl.DetachShader(program, vertexShader);
-                _gl.DetachShader(program, fragmentShader);
-                _gl.DeleteShader(vertexShader);
-                _gl.DeleteShader(fragmentShader);
-
-                string relativePath = vertFile.Substring(shadersPath.Length + 1);
-                string key = relativePath.Replace(".vert", "").Replace('\\', '/');
-                _shaderPrograms[key] = program;
-                Console.WriteLine($"[i] has been successfully loaded {key} shader");
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[!] Shader '{vertFile}' is invalid, fallback will be used if needed: {ex.Message}");
+                }
             }
 
-            if (_shaderPrograms.Count == 0)
-                throw new Exception("[X] No valid shader found");
+            if (!loadedAny)
+            {
+                if (!_shaderPrograms.TryGetValue(fallbackKey, out uint fallbackProgram))
+                {
+                    fallbackProgram = CreateFallbackShaderProgram();
+                    _shaderPrograms[fallbackKey] = fallbackProgram;
+                }
 
-            // 设置默认程序
-            _currentProgram = _shaderPrograms.Values.First();
-            _gl.UseProgram(_currentProgram);
-            RegisterBuiltInMeshes();
+                _currentProgram = fallbackProgram;
+                _gl.UseProgram(_currentProgram);
+                Console.WriteLine("[!] No valid shader found. Using fallback purple shader.");
+            }
+            else
+            {
+                _currentProgram = _shaderPrograms.Values.First();
+                _gl.UseProgram(_currentProgram);
+            }
         }
 
         /// <summary>
@@ -3286,6 +3325,7 @@ namespace LimitlessSquareEngine
             if (_isInitialized) return;
             InitializeQuadRenderer();
             InitializeDynamicGeometryResources();
+            RegisterBuiltInMeshes();
             // 创建VAO和VBO
             _vertexArrayObject = _gl.GenVertexArray();
             _vertexBufferObject = _gl.GenBuffer();
@@ -3303,9 +3343,6 @@ namespace LimitlessSquareEngine
             _gl.VertexAttribPointer(2, 2, VertexAttribPointerType.Float, false, 9 * sizeof(float), 7 * sizeof(float));
             _gl.EnableVertexAttribArray(2);
 
-
-            // _shaderProgram = CreateShaderProgram();
-            LoadShaders();
             InitializeLightingSupportResources();
             const GLEnum TextureCubeMapSeamless = (GLEnum)0x884F;
             _gl.Enable(TextureCubeMapSeamless);
@@ -5115,7 +5152,7 @@ namespace LimitlessSquareEngine
             var root = new Dictionary<string, object?>
             {
                 ["assetType"] = "Material",
-                ["shader"] = "Lit",
+                ["shader"] = "Shaders/Lit",
                 ["parameters"] = parameters
             };
 

@@ -37,4 +37,42 @@
     </EmbeddedResource>
   </ItemGroup>
 
+	<ItemGroup>
+		<None Include="BuiltinShaders\Lit.vert">
+			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+			<TargetPath>Assets\Shaders\Builtin\Lit.vert</TargetPath>
+		</None>
+		<None Include="BuiltinShaders\Lit.frag">
+			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+			<TargetPath>Assets\Shaders\Builtin\Lit.frag</TargetPath>
+		</None>
+
+		<None Include="BuiltinShaders\Unlit.vert">
+			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+			<TargetPath>Assets\Shaders\Builtin\Unlit.vert</TargetPath>
+		</None>
+		<None Include="BuiltinShaders\Unlit.frag">
+			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+			<TargetPath>Assets\Shaders\Builtin\Unlit.frag</TargetPath>
+		</None>
+
+		<None Include="BuiltinShaders\SixFace.vert">
+			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+			<TargetPath>Assets\Shaders\Builtin\SixFace.vert</TargetPath>
+		</None>
+		<None Include="BuiltinShaders\SixFace.frag">
+			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+			<TargetPath>Assets\Shaders\Builtin\SixFace.frag</TargetPath>
+		</None>
+
+		<None Include="BuiltinShaders\PositionColor.vert">
+			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+			<TargetPath>Assets\Shaders\Builtin\PositionColor.vert</TargetPath>
+		</None>
+		<None Include="BuiltinShaders\PositionColor.frag">
+			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+			<TargetPath>Assets\Shaders\Builtin\PositionColor.frag</TargetPath>
+		</None>
+	</ItemGroup>
+
 </Project>
