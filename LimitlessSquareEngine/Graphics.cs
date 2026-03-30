@@ -1088,6 +1088,8 @@ namespace LimitlessSquareEngine
             public Matrix4x4 View;
             public Matrix4x4 Projection;
 
+            public bool UseReverseZ;
+
             public Vector3 CameraPosition;
             public float ClusterNear;
             public float ClusterFar;
@@ -1560,6 +1562,37 @@ namespace LimitlessSquareEngine
         public static Matrix4x4 CreatePerspective(float fovRadians, float aspect, float near, float far)
         {
             return Matrix4x4.CreatePerspectiveFieldOfView(fovRadians, aspect, near, far);
+        }
+
+        public static Matrix4x4 CreatePerspectiveReverseZ(float fovRadians, float aspect, float near, float far)
+        {
+            if (fovRadians <= 0f || fovRadians >= MathF.PI)
+                throw new ArgumentOutOfRangeException(nameof(fovRadians));
+
+            if (aspect <= 0f)
+                throw new ArgumentOutOfRangeException(nameof(aspect));
+
+            if (near <= 0f)
+                throw new ArgumentOutOfRangeException(nameof(near));
+
+            if (far <= near)
+                throw new ArgumentOutOfRangeException(nameof(far));
+
+            float yScale = 1f / MathF.Tan(fovRadians * 0.5f);
+            float xScale = yScale / aspect;
+            float invRange = 1f / (far - near);
+
+            Matrix4x4 m = new Matrix4x4();
+            m.M11 = xScale;
+            m.M22 = yScale;
+
+            // Reverse-Z
+            m.M33 = (far + near) * invRange;
+            m.M34 = -1f;
+            m.M43 = (2f * far * near) * invRange;
+            m.M44 = 0f;
+
+            return m;
         }
 
         public static Matrix4x4 CreateOrthographic(float width, float height, float near, float far)
@@ -3773,6 +3806,7 @@ namespace LimitlessSquareEngine
                 uniform float uFogStart;
                 uniform float uFogEnd;
                 uniform int uEdgeTransitionToSkybox;
+                uniform int uReverseZ;
 
                 uniform float uNear;
                 uniform float uFar;
@@ -3831,20 +3865,26 @@ namespace LimitlessSquareEngine
                         return;
                     }
 
-                    bool isBackgroundPixel = depth >= 1.0;
+                    bool isBackgroundPixel = (uReverseZ != 0)
+                        ? (depth <= 0.000001)
+                        : (depth >= 0.999999);
+
+                    vec4 sceneBaseColor;
+                    float distanceToCamera;
+                    vec3 viewPos = vec3(0.0);
 
                     if (isBackgroundPixel)
                     {
-                        vec4 compositedSceneOverSkybox;
-                        compositedSceneOverSkybox.rgb = sceneColor.rgb + skyboxColor.rgb * (1.0 - sceneColor.a);
-                        compositedSceneOverSkybox.a = sceneColor.a + skyboxColor.a * (1.0 - sceneColor.a);
+                        sceneBaseColor = skyboxColor;
 
-                        FragColor = compositedSceneOverSkybox;
-                        return;
+                        distanceToCamera = uFogEnd + max(uFogEnd - uFogStart, 1.0);
                     }
-
-                    vec3 viewPos = ReconstructViewPosition(vUv, depth);
-                    float distanceToCamera = length(viewPos);
+                    else
+                    {
+                        sceneBaseColor = sceneColor;
+                        viewPos = ReconstructViewPosition(vUv, depth);
+                        distanceToCamera = length(viewPos);
+                    }
 
                     float fogFactor = clamp(
                         (distanceToCamera - uFogStart) / max(uFogEnd - uFogStart, 0.0001),
@@ -3855,7 +3895,13 @@ namespace LimitlessSquareEngine
 
                     if (uFogMode == 1)
                     {
-                        vec3 viewDir = normalize(viewPos);
+                        vec3 viewDir;
+
+                        if (isBackgroundPixel)
+                            viewDir = ReconstructViewDirection(vUv);
+                        else
+                            viewDir = normalize(viewPos);
+
                         vec3 worldDir = normalize((uInvViewRotation * vec4(viewDir, 0.0)).xyz);
                         vec2 fogUv = DirectionToCylindricalUv(worldDir);
                         fogColor = texture(uCylindricalTexture, fogUv);
@@ -3880,7 +3926,7 @@ namespace LimitlessSquareEngine
                         fogColor = mix(fogColor, skyboxColor, skyboxBlendFactor);
                     }
 
-                    FragColor = mix(sceneColor, fogColor, fogFactor);
+                    FragColor = mix(sceneBaseColor, fogColor, fogFactor);
                 }";
 
             uint vs = CompileShader(ShaderType.VertexShader, vertexSource);
@@ -3906,6 +3952,8 @@ namespace LimitlessSquareEngine
             return program;
         }
 
+        private int _fogCompositeReverseZLoc = -1;
+
         private void CacheFogCompositeLocations()
         {
             _fogCompositeSceneColorLoc = _gl.GetUniformLocation(_fogCompositeProgram, "uSceneColor");
@@ -3925,6 +3973,7 @@ namespace LimitlessSquareEngine
             _fogCompositeInvProjectionLoc = _gl.GetUniformLocation(_fogCompositeProgram, "uInvProjection");
             _fogCompositeInvViewRotationLoc = _gl.GetUniformLocation(_fogCompositeProgram, "uInvViewRotation");
             _fogCompositeViewportSizeLoc = _gl.GetUniformLocation(_fogCompositeProgram, "uViewportSize");
+            _fogCompositeReverseZLoc = _gl.GetUniformLocation(_fogCompositeProgram, "uReverseZ");
         }
 
         private void InitializeFogPostProcessResources()
@@ -6522,6 +6571,8 @@ namespace LimitlessSquareEngine
 
             ViewportRect viewport = GetSceneViewportRect();
             Matrix4x4 view = CreateSceneViewMatrix(cameraWorld);
+
+            bool useReverseZ = cameraItem.Settings.ProjectionType != 1;
             Matrix4x4 projection = CreateSceneProjection(cameraItem.Settings, viewport.Aspect);
 
             long batchId = ++_sceneBatchCounter;
@@ -6562,6 +6613,7 @@ namespace LimitlessSquareEngine
                     BatchSubmissionOrder = cameraItem.SubmissionOrder,
                     ViewportX = viewport.X,
                     ViewportY = viewport.Y,
+                    UseReverseZ = useReverseZ,
                     ViewportWidth = viewport.Width,
                     ViewportHeight = viewport.Height,
                     Material = null,
@@ -6654,6 +6706,7 @@ namespace LimitlessSquareEngine
                         BatchSubmissionOrder = cameraItem.SubmissionOrder,
                         ViewportX = viewport.X,
                         ViewportY = viewport.Y,
+                        UseReverseZ = useReverseZ,
                         ViewportWidth = viewport.Width,
                         ViewportHeight = viewport.Height,
                         Material = material,
@@ -6699,8 +6752,8 @@ namespace LimitlessSquareEngine
 
         private Matrix4x4 CreateSceneProjection(CameraRenderSettings settings, float aspect)
         {
-            float near = (float)settings.NearClip;
-            float far = (float)settings.FarClip;
+            float near = MathF.Max(0.0001f, (float)settings.NearClip);
+            float far = MathF.Max(near + 0.0001f, (float)settings.FarClip);
 
             if (settings.ProjectionType == 1)
             {
@@ -6713,7 +6766,7 @@ namespace LimitlessSquareEngine
             {
                 // 透视
                 float fovRadians = (float)(settings.FovOrSize * Math.PI / 180.0);
-                return CreatePerspective(fovRadians, aspect, near, far);
+                return CreatePerspectiveReverseZ(fovRadians, aspect, near, far);
             }
         }
 
@@ -6857,12 +6910,13 @@ namespace LimitlessSquareEngine
 
             _gl.Disable(GLEnum.ScissorTest);
             _gl.Enable(GLEnum.DepthTest);
-            _gl.DepthFunc(GLEnum.Less);
+            _gl.DepthFunc(batchFirst.UseReverseZ ? GLEnum.Greater : GLEnum.Less);
             _gl.DepthMask(true);
             _gl.Enable(GLEnum.Blend);
             _gl.BlendFunc(GLEnum.SrcAlpha, GLEnum.OneMinusSrcAlpha);
 
             _gl.ClearColor(0f, 0f, 0f, 0f);
+            _gl.ClearDepth(batchFirst.UseReverseZ ? 0.0 : 1.0);
             _gl.Clear(ClearBufferMask.ColorBufferBit | ClearBufferMask.DepthBufferBit);
 
             _fogSceneCommandsScratch.Clear();
@@ -6880,7 +6934,7 @@ namespace LimitlessSquareEngine
             if (_fogSceneCommandsScratch.Count == 0)
                 return;
 
-            ExecuteSortedCommands(_fogSceneCommandsScratch);
+            ExecuteSortedCommands(_fogSceneCommandsScratch, batchFirst.UseReverseZ);
         }
 
         private void CompositeFogToMainFramebuffer(RenderCommand batchFirst, FogSettings fog)
@@ -6934,6 +6988,8 @@ namespace LimitlessSquareEngine
             if (_fogCompositeEdgeTransitionLoc != -1) _gl.Uniform1(_fogCompositeEdgeTransitionLoc, fog.EdgeTransitionToSkybox ? 1 : 0);
             if (_fogCompositeNearLoc != -1) _gl.Uniform1(_fogCompositeNearLoc, batchFirst.ClusterNear);
             if (_fogCompositeFarLoc != -1) _gl.Uniform1(_fogCompositeFarLoc, batchFirst.ClusterFar);
+            if (_fogCompositeReverseZLoc != -1)
+                _gl.Uniform1(_fogCompositeReverseZLoc, batchFirst.UseReverseZ ? 1 : 0);
 
             bool isOrthographic =
                 MathF.Abs(batchFirst.Projection.M34) < 0.0001f &&
@@ -7029,10 +7085,11 @@ namespace LimitlessSquareEngine
                     _gl.Enable(GLEnum.ScissorTest);
                     _gl.Scissor(vpX, vpY, vpW, vpH);
                     _gl.ClearColor(_backgroundColor.X, _backgroundColor.Y, _backgroundColor.Z, _backgroundColor.W);
+                    _gl.ClearDepth(first.UseReverseZ ? 0.0 : 1.0);
                     _gl.Clear(ClearBufferMask.ColorBufferBit | ClearBufferMask.DepthBufferBit);
                     _gl.Disable(GLEnum.ScissorTest);
 
-                    ExecuteSortedCommands(batchCommands);
+                    ExecuteSortedCommands(batchCommands, first.UseReverseZ);
                     continue;
                 }
 
@@ -7056,6 +7113,7 @@ namespace LimitlessSquareEngine
                     (uint)Math.Max(1, first.ViewportWidth),
                     (uint)Math.Max(1, first.ViewportHeight));
                 _gl.ClearColor(_backgroundColor.X, _backgroundColor.Y, _backgroundColor.Z, _backgroundColor.W);
+                _gl.ClearDepth(first.UseReverseZ ? 0.0 : 1.0);
                 _gl.Clear(ClearBufferMask.ColorBufferBit | ClearBufferMask.DepthBufferBit);
                 _gl.Disable(GLEnum.ScissorTest);
 
@@ -7064,6 +7122,7 @@ namespace LimitlessSquareEngine
 
             _gl.BindFramebuffer(FramebufferTarget.Framebuffer, 0);
             _gl.Viewport(0, 0, (uint)_window.Size.X, (uint)_window.Size.Y);
+            _gl.ClearDepth(1.0);
             _gl.Clear(ClearBufferMask.DepthBufferBit);
         }
 
@@ -7146,7 +7205,7 @@ namespace LimitlessSquareEngine
             _gl.BindVertexArray(vao);
         }
 
-        private void ExecuteSortedCommands(List<RenderCommand> commands)
+        private void ExecuteSortedCommands(List<RenderCommand> commands, bool useReverseZ)
         {
             var skyboxes = commands
                 .Where(c => c.IsSkybox)
@@ -7164,8 +7223,11 @@ namespace LimitlessSquareEngine
                 .ThenBy(c => c.SubmissionIndex)
                 .ToList();
 
+            GLEnum opaqueDepthFunc = useReverseZ ? GLEnum.Greater : GLEnum.Less;
+            GLEnum transparentDepthFunc = useReverseZ ? GLEnum.Gequal : GLEnum.Lequal;
+
             _gl.Enable(GLEnum.DepthTest);
-            _gl.DepthFunc(GLEnum.Less);
+            _gl.DepthFunc(opaqueDepthFunc);
             _gl.DepthMask(true);
             _gl.Enable(GLEnum.Blend);
             _gl.BlendFunc(GLEnum.SrcAlpha, GLEnum.OneMinusSrcAlpha);
@@ -7177,7 +7239,7 @@ namespace LimitlessSquareEngine
                 ExecuteCommand(cmd);
 
             _gl.Enable(GLEnum.DepthTest);
-            _gl.DepthFunc(GLEnum.Lequal);
+            _gl.DepthFunc(transparentDepthFunc);
             _gl.DepthMask(false);
             _gl.Enable(GLEnum.Blend);
             _gl.BlendFunc(GLEnum.SrcAlpha, GLEnum.OneMinusSrcAlpha);
@@ -7186,6 +7248,7 @@ namespace LimitlessSquareEngine
                 ExecuteCommand(cmd);
 
             _gl.DepthMask(true);
+
             _gl.DepthFunc(GLEnum.Less);
         }
 
@@ -7235,16 +7298,19 @@ namespace LimitlessSquareEngine
             bool isTransparentQueue = cmd.QueueType == RenderQueueType.Transparent;
             bool useStencilMaskedTransparentOutline = hasOutline && isTransparentQueue;
 
+            GLEnum opaqueDepthFunc = cmd.UseReverseZ ? GLEnum.Greater : GLEnum.Less;
+            GLEnum transparentDepthFunc = cmd.UseReverseZ ? GLEnum.Gequal : GLEnum.Lequal;
+
             void ApplyBaseDepthState()
             {
                 if (isTransparentQueue)
                 {
-                    _gl.DepthFunc(GLEnum.Lequal);
+                    _gl.DepthFunc(transparentDepthFunc);
                     _gl.DepthMask(false);
                 }
                 else
                 {
-                    _gl.DepthFunc(GLEnum.Less);
+                    _gl.DepthFunc(opaqueDepthFunc);
                     _gl.DepthMask(true);
                 }
             }
@@ -7293,7 +7359,7 @@ namespace LimitlessSquareEngine
                 _gl.Enable(GLEnum.CullFace);
                 _gl.CullFace(TriangleFace.Front);
 
-                _gl.DepthFunc(GLEnum.Lequal);
+                _gl.DepthFunc(transparentDepthFunc);
                 _gl.DepthMask(!isTransparentQueue);
 
                 if (cmd.Material != null)
