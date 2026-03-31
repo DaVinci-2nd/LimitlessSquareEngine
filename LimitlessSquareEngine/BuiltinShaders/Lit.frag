@@ -44,6 +44,17 @@ uniform int uEnableOutline;       // 材质开关，默认 0
 uniform int uOutlinePass;         // 系统开关：0=正常通道，1=描边通道
 uniform vec4 uOutlineColor;       // 默认 (0,0,0,1)
 
+uniform int uFogEnabled;
+uniform int uFogMode; // 0=SolidColor, 1=CylindricalTexture, 2=Skybox
+uniform vec4 uFogColor;
+uniform float uFogStart;
+uniform float uFogEnd;
+uniform int uFogEdgeTransitionToSkybox;
+
+uniform sampler2D uFogCylindricalTexture;
+uniform samplerCube uFogSkyboxCube;
+uniform mat4 uFogInvViewRotation;
+
 uniform vec3 uCameraPosition;
 uniform vec3 uAmbientColor;
 uniform float uAmbientIntensity;
@@ -163,6 +174,81 @@ vec3 SafeNormalize(vec3 v)
     if (lenSq <= 0.0000001)
         return vec3(0.0, 0.0, 1.0);
     return v * inversesqrt(lenSq);
+}
+
+vec2 DirectionToCylindricalUv(vec3 worldDir)
+{
+    vec3 d = SafeNormalize(worldDir);
+    float u = atan(d.z, d.x) / (2.0 * PI) + 0.5;
+    float v = clamp(d.y * 0.5 + 0.5, 0.0, 1.0);
+    return vec2(u, v);
+}
+
+vec4 SampleFogSkyboxColor(vec3 viewDir)
+{
+    vec3 worldDir = SafeNormalize((uFogInvViewRotation * vec4(viewDir, 0.0)).xyz);
+    vec3 skyRgb = texture(uFogSkyboxCube, worldDir).rgb;
+    return vec4(skyRgb, 1.0);
+}
+
+vec4 EvaluateFogColorByMode(vec3 viewPos)
+{
+    vec3 viewDir = SafeNormalize(viewPos);
+
+    if (uFogMode == 1)
+    {
+        vec3 worldDir = SafeNormalize((uFogInvViewRotation * vec4(viewDir, 0.0)).xyz);
+        vec2 fogUv = DirectionToCylindricalUv(worldDir);
+        return texture(uFogCylindricalTexture, fogUv);
+    }
+    else if (uFogMode == 2)
+    {
+        return SampleFogSkyboxColor(viewDir);
+    }
+
+    return uFogColor;
+}
+
+vec4 EvaluateFogBackgroundColor(vec3 viewPos)
+{
+    vec3 viewDir = SafeNormalize(viewPos);
+    return SampleFogSkyboxColor(viewDir);
+}
+
+vec4 ApplyMaterialFogExact(vec4 srcColor, vec3 viewPos)
+{
+    if (uFogEnabled != 1)
+        return srcColor;
+
+    float distanceToCamera = length(viewPos);
+
+    float fogFactor = clamp(
+        (distanceToCamera - uFogStart) / max(uFogEnd - uFogStart, 0.0001),
+        0.0,
+        1.0);
+
+    vec4 fogColor = EvaluateFogColorByMode(viewPos);
+    vec4 backgroundColor = EvaluateFogBackgroundColor(viewPos);
+
+    if (uFogMode != 2 && uFogEdgeTransitionToSkybox != 0)
+    {
+        float fogRange = max(uFogEnd - uFogStart, 0.0001);
+        float skyboxBlendStart = uFogEnd - fogRange * 0.25;
+
+        float skyboxBlendFactor = clamp(
+            (distanceToCamera - skyboxBlendStart) / max(uFogEnd - skyboxBlendStart, 0.0001),
+            0.0,
+            1.0);
+
+        skyboxBlendFactor = smoothstep(0.0, 1.0, skyboxBlendFactor);
+        fogColor = mix(fogColor, backgroundColor, skyboxBlendFactor);
+    }
+
+    vec3 fogColorPM = fogColor.rgb * srcColor.a;
+    vec3 foggedForeground = mix(srcColor.rgb, fogColorPM, fogFactor);
+    float foregroundAlpha = srcColor.a;
+
+    return vec4(foggedForeground, srcColor.a);
 }
 
 LightRecord ReadLight(uint lightIndex)
@@ -665,7 +751,8 @@ void main()
             uAmbientColor *
             max(uAmbientIntensity, 0.0);
 
-        FragColor = vec4(outlineAmbient, uOutlineColor.a);
+        vec4 outlineColor = vec4(outlineAmbient, uOutlineColor.a);
+        FragColor = ApplyMaterialFogExact(outlineColor, vViewPos);
         return;
     }
 
@@ -789,10 +876,11 @@ void main()
         vec3 alphaScaledRgb = baseLit * (1.0 - metallic) * outAlpha;
         vec3 nonAlphaScaledRgb = reflectionAccum + highlightLit;
 
-        FragColor = vec4(alphaScaledRgb + nonAlphaScaledRgb, outAlpha);
+        vec4 transparentColor = vec4(alphaScaledRgb + nonAlphaScaledRgb, outAlpha);
+        FragColor = ApplyMaterialFogExact(transparentColor, vViewPos);
     }
     else
     {
-        FragColor = vec4(opaqueRgb, baseColor.a);
+        FragColor = ApplyMaterialFogExact(vec4(opaqueRgb, baseColor.a), vViewPos);
     }
 }

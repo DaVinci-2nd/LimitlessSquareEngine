@@ -186,7 +186,7 @@ namespace LimitlessSquareEngine
         {
             string key = BuildMeshSurfaceGpuKey(meshId, surfaceId);
 
-            if (_meshSurfaceGpuCache.TryGetValue(key, out MeshSurfaceGpuResource cached))
+            if (_meshSurfaceGpuCache.TryGetValue(key, out var cached))
                 return cached;
 
             uint vbo = _gl.GenBuffer();
