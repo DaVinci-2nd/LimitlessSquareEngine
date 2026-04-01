@@ -64,7 +64,11 @@
 
 
   <ItemGroup>
-    <Compile Include="Editor\Debug.cs" />
+    <Compile Include="Editor\EditorApp.cs" />
+    <Compile Include="Editor\EditorEntry.cs" />
+    <Compile Include="Editor\EditorMainWindow.cs" />
+    <Compile Include="Editor\EditorRuntimeState.cs" />
+    <Compile Include="Editor\EmbeddedGameHost.cs" />
   </ItemGroup>
 
   <Target Name="BuildEditorDll" AfterTargets="Build" Condition="'@(EditorCompile)' != ''">

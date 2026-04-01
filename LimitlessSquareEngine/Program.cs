@@ -1,17 +1,20 @@
-﻿using MoonSharp.Interpreter;
+﻿using LimitlessSquareEngine.Engine;
+using MoonSharp.Interpreter;
 using MoonSharp.Interpreter.Platforms;
 using Silk.NET.Core;
+using Silk.NET.Core.Contexts;
+using Silk.NET.Input;
 using Silk.NET.OpenGL;
 using Silk.NET.Windowing;
 using SkiaSharp;
 using System;
 using System.Collections.Concurrent;
+using System.Drawing;
 using System.Numerics;
+using System.Reflection;
+using System.Runtime.Loader;
 using System.Text.Json;
 using System.Text.Json.Serialization;
-using Silk.NET.Input;
-using System.Drawing;
-using LimitlessSquareEngine.Engine;
 
 namespace LimitlessSquareEngine
 {
@@ -104,6 +107,27 @@ namespace LimitlessSquareEngine
         }
     }
 
+    public sealed class EditorLaunchOptions
+    {
+        public string DefaultAssetRootPath { get; set; } = "";
+        public string AssetRootPath { get; set; } = "";
+    }
+
+    public sealed class EditorHostBootstrapInfo
+    {
+        public string AssetRootPath { get; set; } = "";
+        public EditorEmbeddingMode EmbeddingMode { get; set; } = EditorEmbeddingMode.Unsupported;
+        public nint Win32Hwnd { get; set; }
+        public nint CocoaWindow { get; set; }
+        public nint CocoaContentView { get; set; }
+        public nint X11Display { get; set; }
+        public nuint X11Window { get; set; }
+        public nint WaylandDisplay { get; set; }
+        public nint WaylandSurface { get; set; }
+        public nint GlfwWindow { get; set; }
+        public nint SdlWindow { get; set; }
+    }
+
     /// <summary>
     /// 入口类
     /// </summary>
@@ -113,6 +137,19 @@ namespace LimitlessSquareEngine
         private const string EditorAssemblyFileName = "Limitless Square Editor.dll";
         // 是否启用编辑器模式
         private static bool _isEditorMode = false;
+
+        private static string _assetRootPath = Path.Combine(AppContext.BaseDirectory, "Assets");
+        private static string? _editorAssemblyPath;
+        private static AssemblyLoadContext? _editorLoadContext;
+        private static Assembly? _editorAssembly;
+        private static Type? _editorEntryType;
+        private static MethodInfo? _editorConfigureMethod;
+        private static MethodInfo? _editorStartMethod;
+        private static MethodInfo? _editorRunMethod;
+        private static MethodInfo? _editorStopMethod;
+        private static bool _editorStarted = false;
+        static ConcurrentQueue<Action> _editorHostActionQueue = new ConcurrentQueue<Action>();
+
         // Lua脚本实例列表
         static List<LuaScriptInstance> _luaScriptInstances = new List<LuaScriptInstance>();
         // 主窗口实例
@@ -432,6 +469,297 @@ namespace LimitlessSquareEngine
             }
         }
 
+        static string ResolveDefaultAssetRootPath()
+        {
+            if (_isEditorMode)
+                return Path.Combine(AppContext.BaseDirectory, "EditorAssets");
+
+            return Path.Combine(AppContext.BaseDirectory, "Assets");
+        }
+
+        static string NormalizeAssetRootPath(string path)
+        {
+            if (Path.IsPathRooted(path))
+                return Path.GetFullPath(path);
+
+            return Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, path));
+        }
+
+        static void BindEditorEntryMethods(Assembly assembly)
+        {
+            _editorEntryType = null;
+            _editorConfigureMethod = null;
+            _editorStartMethod = null;
+            _editorRunMethod = null;
+            _editorStopMethod = null;
+
+            foreach (Type type in assembly.GetTypes())
+            {
+                MethodInfo? configureMethod = type.GetMethod(
+                    "Configure",
+                    BindingFlags.Public | BindingFlags.Static,
+                    null,
+                    new[] { typeof(EditorLaunchOptions) },
+                    null);
+
+                MethodInfo? startMethod = type.GetMethod(
+                    "Start",
+                    BindingFlags.Public | BindingFlags.Static,
+                    null,
+                    new[] { typeof(EditorHostBootstrapInfo) },
+                    null);
+
+                MethodInfo? runMethod = type.GetMethod(
+                    "Run",
+                    BindingFlags.Public | BindingFlags.Static,
+                    null,
+                    Type.EmptyTypes,
+                    null);
+
+                MethodInfo? stopMethod = type.GetMethod(
+                    "Stop",
+                    BindingFlags.Public | BindingFlags.Static,
+                    null,
+                    Type.EmptyTypes,
+                    null);
+
+                if (configureMethod == null && startMethod == null && runMethod == null && stopMethod == null)
+                    continue;
+
+                _editorEntryType = type;
+                _editorConfigureMethod = configureMethod;
+                _editorStartMethod = startMethod;
+                _editorRunMethod = runMethod;
+                _editorStopMethod = stopMethod;
+                return;
+            }
+
+            throw new InvalidOperationException("Editor DLL is missing a public static entry point.");
+        }
+
+        static void EnsureEditorAssemblyLoaded()
+        {
+            if (!_isEditorMode)
+                return;
+
+            if (_editorAssembly != null)
+                return;
+
+            if (string.IsNullOrWhiteSpace(_editorAssemblyPath) || !File.Exists(_editorAssemblyPath))
+                throw new FileNotFoundException("Editor assembly not found.", _editorAssemblyPath);
+
+            _editorLoadContext = new AssemblyLoadContext("LimitlessSquareEditor", false);
+            _editorAssembly = _editorLoadContext.LoadFromAssemblyPath(_editorAssemblyPath);
+            BindEditorEntryMethods(_editorAssembly);
+        }
+
+        static void ConfigureEditorMode()
+        {
+            string defaultAssetRootPath = ResolveDefaultAssetRootPath();
+
+            if (!_isEditorMode)
+            {
+                _assetRootPath = NormalizeAssetRootPath(defaultAssetRootPath);
+                Console.WriteLine($"[i] Asset root: {_assetRootPath}");
+                return;
+            }
+
+            EnsureEditorAssemblyLoaded();
+
+            EditorLaunchOptions launchOptions = new EditorLaunchOptions
+            {
+                DefaultAssetRootPath = defaultAssetRootPath,
+                AssetRootPath = defaultAssetRootPath
+            };
+
+            _editorConfigureMethod?.Invoke(null, new object?[] { launchOptions });
+
+            string selectedAssetRootPath = string.IsNullOrWhiteSpace(launchOptions.AssetRootPath)
+                ? launchOptions.DefaultAssetRootPath
+                : launchOptions.AssetRootPath;
+
+            _assetRootPath = NormalizeAssetRootPath(selectedAssetRootPath);
+            Console.WriteLine($"[i] Asset root: {_assetRootPath}");
+        }
+
+        static EditorEmbeddingMode ResolveEditorEmbeddingMode(INativeWindow nativeWindow)
+        {
+            if (nativeWindow.Win32.HasValue || nativeWindow.X11.HasValue)
+                return EditorEmbeddingMode.ForeignChildWindow;
+
+            if (nativeWindow.Cocoa.HasValue)
+                return EditorEmbeddingMode.CocoaViewHost;
+
+            if (nativeWindow.Wayland.HasValue)
+                return EditorEmbeddingMode.NestedWaylandCompositor;
+
+            return EditorEmbeddingMode.Unsupported;
+        }
+
+        static EditorHostBootstrapInfo BuildEditorHostBootstrapInfo()
+        {
+            if (_window == null)
+                throw new InvalidOperationException("Engine window is not initialized.");
+
+            INativeWindow nativeWindow = _window.Native;
+
+            EditorHostBootstrapInfo bootstrapInfo = new EditorHostBootstrapInfo
+            {
+                AssetRootPath = _assetRootPath,
+                EmbeddingMode = ResolveEditorEmbeddingMode(nativeWindow)
+            };
+
+            if (nativeWindow.Win32.HasValue)
+                bootstrapInfo.Win32Hwnd = nativeWindow.Win32.Value.Hwnd;
+
+            if (nativeWindow.Cocoa.HasValue)
+            {
+                bootstrapInfo.CocoaWindow = nativeWindow.Cocoa.Value;
+                bootstrapInfo.CocoaContentView = CocoaNativeInterop.GetContentView(nativeWindow.Cocoa.Value);
+            }
+
+            if (nativeWindow.X11.HasValue)
+            {
+                bootstrapInfo.X11Display = nativeWindow.X11.Value.Display;
+                bootstrapInfo.X11Window = nativeWindow.X11.Value.Window;
+            }
+
+            if (nativeWindow.Wayland.HasValue)
+            {
+                bootstrapInfo.WaylandDisplay = nativeWindow.Wayland.Value.Display;
+                bootstrapInfo.WaylandSurface = nativeWindow.Wayland.Value.Surface;
+            }
+
+            if (nativeWindow.Glfw.HasValue)
+                bootstrapInfo.GlfwWindow = nativeWindow.Glfw.Value;
+
+            if (nativeWindow.Sdl.HasValue)
+                bootstrapInfo.SdlWindow = nativeWindow.Sdl.Value;
+
+            return bootstrapInfo;
+        }
+
+        static void QueueEditorHostAction(Action action)
+        {
+            if (action == null)
+                return;
+
+            _editorHostActionQueue.Enqueue(action);
+        }
+
+        static void ExecuteEditorHostActions()
+        {
+            while (_editorHostActionQueue.TryDequeue(out Action? action))
+            {
+                try
+                {
+                    action();
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[X] Editor host action failed: {ex.Message}");
+                }
+            }
+        }
+
+        static void SetRenderWindowVisibleCore(bool visible)
+        {
+            if (_window == null)
+                return;
+
+            _window.IsVisible = visible;
+        }
+
+        static void SetRenderWindowSizeCore(int width, int height)
+        {
+            if (_window == null)
+                return;
+
+            int clampedWidth = Math.Max(1, width);
+            int clampedHeight = Math.Max(1, height);
+
+            _window.Size = new Silk.NET.Maths.Vector2D<int>(clampedWidth, clampedHeight);
+            _windowTitleDirty = true;
+        }
+
+        static void RequestRenderWindowCloseCore()
+        {
+            if (_window == null)
+                return;
+
+            _window.IsClosing = true;
+        }
+
+        static bool IsRenderWindowAlive()
+        {
+            return _window != null && !_window.IsClosing;
+        }
+
+        static void BindEditorHostBridge()
+        {
+            EditorHostBridge.Bind(
+                BuildEditorHostBootstrapInfo,
+                visible => QueueEditorHostAction(() => SetRenderWindowVisibleCore(visible)),
+                (width, height) => QueueEditorHostAction(() => SetRenderWindowSizeCore(width, height)),
+                () => QueueEditorHostAction(RequestRenderWindowCloseCore),
+                IsRenderWindowAlive,
+                Loop);
+        }
+
+        static void UnbindEditorHostBridge()
+        {
+            EditorHostBridge.Unbind();
+        }
+
+        static void StartEditorIfNeeded()
+        {
+            if (!_isEditorMode || _editorStarted)
+                return;
+
+            if (_window == null || _gl == null || _graphics == null)
+                throw new InvalidOperationException("Engine host is not ready.");
+
+            EnsureEditorAssemblyLoaded();
+
+            if (_editorStartMethod == null)
+                throw new InvalidOperationException("Editor DLL is missing Start(EditorHostBootstrapInfo).");
+
+            EditorHostBootstrapInfo bootstrapInfo = BuildEditorHostBootstrapInfo();
+
+            if (bootstrapInfo.EmbeddingMode == EditorEmbeddingMode.Unsupported)
+                throw new InvalidOperationException("Current platform does not provide a supported editor embedding mode.");
+
+            if (bootstrapInfo.EmbeddingMode == EditorEmbeddingMode.CocoaViewHost && bootstrapInfo.CocoaContentView == 0)
+                throw new InvalidOperationException("Cocoa content view is not available.");
+
+            Console.WriteLine($"[i] Editor embedding mode: {bootstrapInfo.EmbeddingMode}");
+
+            _editorStartMethod.Invoke(null, new object?[] { bootstrapInfo });
+            _editorStarted = true;
+        }
+
+        static void RunEditorIfNeeded()
+        {
+            if (!_isEditorMode)
+                return;
+
+            EnsureEditorAssemblyLoaded();
+
+            if (_editorRunMethod == null)
+                throw new InvalidOperationException("Editor DLL is missing Run().");
+
+            _editorRunMethod.Invoke(null, null);
+        }
+
+        static void StopEditorIfNeeded()
+        {
+            if (!_editorStarted)
+                return;
+
+            _editorStopMethod?.Invoke(null, null);
+            _editorStarted = false;
+        }
+
         /// <summary>
         /// 初始化程序
         /// </summary>
@@ -440,7 +768,7 @@ namespace LimitlessSquareEngine
             // 基础目录结构创建
             try
             {
-                Directory.CreateDirectory(Path.Combine(AppContext.BaseDirectory, "Assets"));
+                Directory.CreateDirectory(_assetRootPath);
             }
             catch 
             {
@@ -460,7 +788,7 @@ namespace LimitlessSquareEngine
             var options = WindowOptions.Default;
             _windowBaseTitle = Path.GetFileNameWithoutExtension(Environment.ProcessPath) ?? "Limitless Square Engine";
             options.Title = _windowBaseTitle;
-            options.IsVisible = true;
+            options.IsVisible = !_isEditorMode;
             options.ShouldSwapAutomatically = false;
             _window = Window.Create(options);
 
@@ -497,6 +825,7 @@ namespace LimitlessSquareEngine
                 graphics.Initialize();
                 _graphics = graphics;
                 Scene.BindGraphics(graphics);
+                BindEditorHostBridge();
 
                 // 初始化帧时间   
                 _lastFrameTime = _window.Time;
@@ -562,7 +891,7 @@ namespace LimitlessSquareEngine
                 _input = new Input(_window);
 
                 // 扫描脚本目录
-                string scriptPath = Path.Combine(AppContext.BaseDirectory, "Assets");
+                string scriptPath = _assetRootPath;
                 if (Directory.Exists(scriptPath))
                 {
                     // 获取所有Lua脚本
@@ -1038,7 +1367,7 @@ namespace LimitlessSquareEngine
                 }
 
                 // 扫描资源目录
-                string assetsPath = Path.Combine(AppContext.BaseDirectory, "Assets");
+                string assetsPath = _assetRootPath;
                 if (Directory.Exists(assetsPath))
                 {
                     var options = new JsonSerializerOptions
@@ -1206,6 +1535,8 @@ namespace LimitlessSquareEngine
             // 关闭事件
             _window.Closing += () =>
             {
+                StopEditorIfNeeded();
+                UnbindEditorHostBridge();
                 _input?.Dispose();
             };
 
@@ -1224,6 +1555,8 @@ namespace LimitlessSquareEngine
             // 如果OpenGL未初始化、窗口准备关闭，跳过渲染
             if (_gl == null || _window.IsClosing)
                 return;
+
+            ExecuteEditorHostActions();
 
             // 帧间隔
             double currentTime = _window.Time;
@@ -1275,12 +1608,13 @@ namespace LimitlessSquareEngine
         /// <returns></returns>
         static bool ResolveEditorMode()
         {
-            string editorAssemblyPath = Path.Combine(AppContext.BaseDirectory, EditorAssemblyFileName);
-            _isEditorMode = File.Exists(editorAssemblyPath);
+            _editorAssemblyPath = Path.Combine(AppContext.BaseDirectory, EditorAssemblyFileName);
+            _isEditorMode = File.Exists(_editorAssemblyPath);
 
             if (_isEditorMode)
             {
                 Console.WriteLine("[i] Editor mode enabled.");
+                Console.WriteLine($"[i] Editor assembly: {_editorAssemblyPath}");
             }
             else
             {
@@ -1311,6 +1645,7 @@ namespace LimitlessSquareEngine
 
             // 启动模式
             ResolveEditorMode();
+            ConfigureEditorMode();
 
             // 执行初始化
             Initialize();
@@ -1326,6 +1661,14 @@ namespace LimitlessSquareEngine
                 thread.IsBackground = true;
                 // 启动线程
                 thread.Start();
+            }
+
+            // 必要时启动编辑器
+            if (_isEditorMode)
+            {
+                StartEditorIfNeeded();
+                RunEditorIfNeeded();
+                return;
             }
 
             // 执行主循环
