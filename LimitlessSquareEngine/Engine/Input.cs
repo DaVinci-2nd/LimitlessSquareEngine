@@ -7,7 +7,7 @@ using System.Text;
 using System.Threading.Tasks;
 using Silk.NET.Input;
 
-namespace LimitlessSquareEngine
+namespace LimitlessSquareEngine.Engine
 {
     internal class Input
     {

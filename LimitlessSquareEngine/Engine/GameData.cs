@@ -6,7 +6,7 @@ using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 
-namespace LimitlessSquareEngine
+namespace LimitlessSquareEngine.Engine
 {
     [MoonSharpUserData]
     internal class GameData

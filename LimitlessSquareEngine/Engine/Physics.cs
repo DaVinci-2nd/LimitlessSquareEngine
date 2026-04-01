@@ -11,7 +11,7 @@ using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 
-namespace LimitlessSquareEngine
+namespace LimitlessSquareEngine.Engine
 {
     internal class Physics
     {

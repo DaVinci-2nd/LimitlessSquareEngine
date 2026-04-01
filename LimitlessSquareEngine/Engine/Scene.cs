@@ -8,7 +8,7 @@ using System.Text.Json.Serialization;
 using System.Threading.Tasks;
 using System.Numerics;
 
-namespace LimitlessSquareEngine
+namespace LimitlessSquareEngine.Engine
 {
     public struct Double3
     {
@@ -1301,7 +1301,7 @@ namespace LimitlessSquareEngine
                 switch (prop.Name)
                 {
                     case "renderMode":
-                        if (prop.Value.ValueKind != JsonValueKind.Number || !prop.Value.TryGetInt32(out int renderMode) || (renderMode != 0 && renderMode != 1))
+                        if (prop.Value.ValueKind != JsonValueKind.Number || !prop.Value.TryGetInt32(out int renderMode) || renderMode != 0 && renderMode != 1)
                             throw new InvalidDataException($"[X] Camera '{objectId}' data.renderMode must be 0 or 1.");
                         settings.RenderMode = renderMode;
                         break;
@@ -1325,7 +1325,7 @@ namespace LimitlessSquareEngine
                         break;
 
                     case "projectionType":
-                        if (prop.Value.ValueKind != JsonValueKind.Number || !prop.Value.TryGetInt32(out int projectionType) || (projectionType != 0 && projectionType != 1))
+                        if (prop.Value.ValueKind != JsonValueKind.Number || !prop.Value.TryGetInt32(out int projectionType) || projectionType != 0 && projectionType != 1)
                             throw new InvalidDataException($"[X] Camera '{objectId}' data.projectionType must be 0 or 1.");
                         settings.ProjectionType = projectionType;
                         break;
@@ -1366,7 +1366,7 @@ namespace LimitlessSquareEngine
                     case "lightMode":
                         if (prop.Value.ValueKind != JsonValueKind.Number ||
                             !prop.Value.TryGetInt32(out int lightMode) ||
-                            (lightMode != 0 && lightMode != 3))
+                            lightMode != 0 && lightMode != 3)
                         {
                             throw new InvalidDataException(
                                 $"[X] Light '{objectId}' data.lightMode must be 0 (Point) or 3 (Directional).");

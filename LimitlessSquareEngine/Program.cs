@@ -11,6 +11,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using Silk.NET.Input;
 using System.Drawing;
+using LimitlessSquareEngine.Engine;
 
 namespace LimitlessSquareEngine
 {
@@ -108,6 +109,10 @@ namespace LimitlessSquareEngine
     /// </summary>
     internal class Program
     {
+        // 编辑器程序集文件名
+        private const string EditorAssemblyFileName = "Limitless Square Editor.dll";
+        // 是否启用编辑器模式
+        private static bool _isEditorMode = false;
         // Lua脚本实例列表
         static List<LuaScriptInstance> _luaScriptInstances = new List<LuaScriptInstance>();
         // 主窗口实例
@@ -1265,6 +1270,27 @@ namespace LimitlessSquareEngine
         }
 
         /// <summary>
+        /// 解析当前运行模式。
+        /// </summary>
+        /// <returns></returns>
+        static bool ResolveEditorMode()
+        {
+            string editorAssemblyPath = Path.Combine(AppContext.BaseDirectory, EditorAssemblyFileName);
+            _isEditorMode = File.Exists(editorAssemblyPath);
+
+            if (_isEditorMode)
+            {
+                Console.WriteLine("[i] Editor mode enabled.");
+            }
+            else
+            {
+                Console.WriteLine("[i] Game mode enabled.");
+            }
+
+            return _isEditorMode;
+        }
+
+        /// <summary>
         /// 主线程
         /// </summary>
         static void Main()
@@ -1282,6 +1308,10 @@ namespace LimitlessSquareEngine
             Console.WriteLine("Welcome to follow the author's Bilibili account!");
             Console.WriteLine("https://space.bilibili.com/432070384");
             Console.WriteLine("////////////////////////////////////////////////////");
+
+            // 启动模式
+            ResolveEditorMode();
+
             // 执行初始化
             Initialize();
 

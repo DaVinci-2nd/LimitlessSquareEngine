@@ -7,7 +7,7 @@ using System.Text;
 using System.Text.Json.Serialization;
 using System.Threading.Tasks;
 
-namespace LimitlessSquareEngine
+namespace LimitlessSquareEngine.Engine
 {
     // UI元素类型
     [JsonConverter(typeof(JsonStringEnumConverter))]

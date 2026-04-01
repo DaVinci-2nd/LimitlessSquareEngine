@@ -12,12 +12,26 @@
 		<AssemblyName>Limitless Square Engine</AssemblyName>
 		<ApplicationIcon>Resources\LimitlessSquareEngineIcon.ico</ApplicationIcon>
 	</PropertyGroup>
+	
+	<ItemGroup>
+      <None Include="Engine\BuiltinShaders\**\*.vert">
+        <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+        <TargetPath>Assets\Shaders\Builtin\%(RecursiveDir)%(Filename)%(Extension)</TargetPath>
+      </None>
+
+      <None Include="Engine\BuiltinShaders\**\*.frag">
+        <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+        <TargetPath>Assets\Shaders\Builtin\%(RecursiveDir)%(Filename)%(Extension)</TargetPath>
+      </None>
+    </ItemGroup>
 
   <ItemGroup>
     <PackageReference Include="AssimpNet" Version="4.1.0" />
-    <PackageReference Include="Jitter2.Double" Version="2.8.1" />
+    <PackageReference Include="Avalonia" Version="11.3.13" />
+    <PackageReference Include="Avalonia.Desktop" Version="11.3.13" />
+    <PackageReference Include="Jitter2.Double" Version="2.8.2" />
     <PackageReference Include="MoonSharp" Version="2.0.0" />
-    <PackageReference Include="Prowl.Paper" Version="0.7.0" />
+    <PackageReference Include="Prowl.Paper" Version="0.8.5" />
     <PackageReference Include="Silk.NET.Input" Version="2.23.0" />
     <PackageReference Include="Silk.NET.OpenGL" Version="2.23.0" />
     <PackageReference Include="Silk.NET.Windowing" Version="2.23.0" />
@@ -42,42 +56,28 @@
     </EmbeddedResource>
   </ItemGroup>
 
-	<ItemGroup>
-		<None Include="BuiltinShaders\Lit.vert">
-			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-			<TargetPath>Assets\Shaders\Builtin\Lit.vert</TargetPath>
-		</None>
-		<None Include="BuiltinShaders\Lit.frag">
-			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-			<TargetPath>Assets\Shaders\Builtin\Lit.frag</TargetPath>
-		</None>
 
-		<None Include="BuiltinShaders\Unlit.vert">
-			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-			<TargetPath>Assets\Shaders\Builtin\Unlit.vert</TargetPath>
-		</None>
-		<None Include="BuiltinShaders\Unlit.frag">
-			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-			<TargetPath>Assets\Shaders\Builtin\Unlit.frag</TargetPath>
-		</None>
+  <ItemGroup>
+    <Compile Remove="Editor\**\*.cs" />
+    <EditorCompile Include="Editor\**\*.cs" />
+  </ItemGroup>
 
-		<None Include="BuiltinShaders\SixFace.vert">
-			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-			<TargetPath>Assets\Shaders\Builtin\SixFace.vert</TargetPath>
-		</None>
-		<None Include="BuiltinShaders\SixFace.frag">
-			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-			<TargetPath>Assets\Shaders\Builtin\SixFace.frag</TargetPath>
-		</None>
 
-		<None Include="BuiltinShaders\PositionColor.vert">
-			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-			<TargetPath>Assets\Shaders\Builtin\PositionColor.vert</TargetPath>
-		</None>
-		<None Include="BuiltinShaders\PositionColor.frag">
-			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-			<TargetPath>Assets\Shaders\Builtin\PositionColor.frag</TargetPath>
-		</None>
-	</ItemGroup>
+  <ItemGroup>
+    <Compile Include="Editor\Debug.cs" />
+  </ItemGroup>
+
+  <Target Name="BuildEditorDll" AfterTargets="Build" Condition="'@(EditorCompile)' != ''">
+    <PropertyGroup>
+      <EditorOutputPath>$(OutDir)Limitless Square Editor.dll</EditorOutputPath>
+    </PropertyGroup>
+
+    <ItemGroup>
+      <EditorReference Include="@(ReferencePath)" />
+      <EditorReference Include="$(TargetPath)" />
+    </ItemGroup>
+
+    <Csc Sources="@(EditorCompile)" TargetType="Library" OutputAssembly="$(EditorOutputPath)" References="@(EditorReference)" DefineConstants="$(DefineConstants)" DisabledWarnings="$(NoWarn)" Nullable="$(Nullable)" LangVersion="$(LangVersion)" DebugType="$(DebugType)" Optimize="$(Optimize)" Deterministic="$(Deterministic)" EmitDebugInformation="true" GenerateFullPaths="true" NoConfig="true" UseSharedCompilation="true" />
+  </Target>
 
 </Project>
