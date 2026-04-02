@@ -5,11 +5,18 @@ using Avalonia.Input;
 using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Platform.Storage;
+using LimitlessSquareEngine.Engine;
 using System;
 using System.Collections.Generic;
-using System.IO;
-using System.Threading.Tasks;
 using System.Diagnostics;
+using System.IO;
+using System.Linq;
+using System.Runtime.InteropServices;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
+using System.Text.Json.Serialization;
+using System.Threading.Tasks;
 
 namespace LimitlessSquareEngine.Editor
 {
@@ -28,6 +35,36 @@ namespace LimitlessSquareEngine.Editor
         private ResourceItemState? _selectedResourceItemState;
         private string? _projectRootPath;
         private string? _currentResourceDirectoryPath;
+        private string? _projectAssetRootPath;
+
+        private const string EditorPreviewSceneId = "__editor_preview_scene__";
+        private const string EditorPreviewDirectoryName = "EditorPreview";
+        private const string EditorTreeCopyDirectoryName = "EditorTreeCopies";
+        private const string EditorPreviewSceneFileName = EditorPreviewSceneId + ".json";
+        private const string PreviewCameraIdBase = "__editor_preview_camera__";
+
+        private static readonly JsonSerializerOptions SceneJsonReadOptions = new JsonSerializerOptions
+        {
+            PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+            PropertyNameCaseInsensitive = true,
+            DefaultIgnoreCondition = JsonIgnoreCondition.Never
+        };
+
+        private static readonly JsonSerializerOptions SceneJsonWriteOptions = new JsonSerializerOptions
+        {
+            PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+            PropertyNameCaseInsensitive = true,
+            DefaultIgnoreCondition = JsonIgnoreCondition.Never,
+            WriteIndented = true
+        };
+
+        private sealed class EditorSceneOpenResult
+        {
+            public string TreeCopyPath { get; init; } = "";
+            public string PreviewScenePath { get; init; } = "";
+            public SceneData TreeScene { get; init; } = new SceneData();
+            public SceneData PreviewScene { get; init; } = new SceneData();
+        }
 
         public EditorMainWindow()
         {
@@ -43,9 +80,7 @@ namespace LimitlessSquareEngine.Editor
             ToolbarSlot.HorizontalContentAlignment = HorizontalAlignment.Left;
 
             _sceneHost = new EmbeddedGameHost();
-            _sceneHost.NativeControlCreated += OnSceneHostCreated;
-            _sceneHost.HostPixelSizeChanged += OnSceneHostSizeChanged;
-            _sceneHost.NativeControlDestroyed += OnSceneHostDestroyed;
+            _sceneHost.RenderSurfaceResized += OnSceneHostResized;
 
             // 先这么搞
             LeftDockSlot.Content = CreatePlaceholder("这里边是一个树结构");
@@ -71,6 +106,21 @@ namespace LimitlessSquareEngine.Editor
                 Path = path;
                 IsDirectory = isDirectory;
             }
+        }
+
+        private void OnSceneHostResized(PixelSize hostSize)
+        {
+            if (hostSize.Width > 0 && hostSize.Height > 0)
+                EditorHostBridge.SetRenderWindowSize(hostSize.Width, hostSize.Height);
+        }
+
+        public void PresentLatestFrame()
+        {
+            EditorRenderedFrame? frame = EditorHostBridge.ConsumeLatestFrame();
+            if (frame == null)
+                return;
+
+            _sceneHost.PresentFrame(frame);
         }
 
         private Control BuildLayout()
@@ -415,6 +465,7 @@ namespace LimitlessSquareEngine.Editor
         {
             string fullRootPath = Path.GetFullPath(rootPath);
             _projectRootPath = fullRootPath;
+            _projectAssetRootPath = ResolveProjectAssetRoot(fullRootPath);
             _currentResourceDirectoryPath = fullRootPath;
 
             TreeView treeView = new TreeView
@@ -422,7 +473,7 @@ namespace LimitlessSquareEngine.Editor
                 Margin = new Thickness(0),
                 ItemsSource = new object[]
                 {
-                    CreateDirectoryNode(fullRootPath, true)
+            CreateDirectoryNode(fullRootPath, true)
                 }
             };
 
@@ -430,6 +481,44 @@ namespace LimitlessSquareEngine.Editor
 
             ProjectFilesSlot.Content = treeView;
             ShowResourceDirectory(fullRootPath);
+        }
+
+        private string ResolveProjectAssetRoot(string projectRootPath)
+        {
+            string fullProjectRoot = Path.GetFullPath(projectRootPath);
+            string assetsPath = Path.Combine(fullProjectRoot, "Assets");
+
+            if (Directory.Exists(assetsPath))
+                return assetsPath;
+
+            return fullProjectRoot;
+        }
+
+        private string ResolveSceneAssetRoot(string sceneFilePath)
+        {
+            if (!string.IsNullOrWhiteSpace(_projectAssetRootPath) && Directory.Exists(_projectAssetRootPath))
+                return _projectAssetRootPath;
+
+            string fullScenePath = Path.GetFullPath(sceneFilePath);
+            DirectoryInfo? current = new DirectoryInfo(Path.GetDirectoryName(fullScenePath)!);
+
+            while (current != null)
+            {
+                if (string.Equals(current.Name, "Assets", StringComparison.OrdinalIgnoreCase))
+                    return current.FullName;
+
+                current = current.Parent;
+            }
+
+            if (!string.IsNullOrWhiteSpace(_projectRootPath))
+                return ResolveProjectAssetRoot(_projectRootPath);
+
+            return Path.GetDirectoryName(fullScenePath) ?? fullScenePath;
+        }
+
+        private string GetEditorWorkingRoot(string assetRootPath)
+        {
+            return Path.Combine(assetRootPath, ".lse-editor-runtime");
         }
 
         private TreeViewItem CreateDirectoryNode(string directoryPath, bool isRoot = false)
@@ -890,7 +979,456 @@ namespace LimitlessSquareEngine.Editor
 
         private bool TryHandleSpecialFileOpen(string filePath, string analyzedFileType)
         {
-            return false;
+            if (!string.Equals(analyzedFileType, ".json", StringComparison.OrdinalIgnoreCase))
+                return false;
+
+            return TryOpenSceneJson(filePath);
+        }
+
+        private bool TryOpenSceneJson(string filePath)
+        {
+            if (!TryReadSceneJson(filePath, out _, out _))
+                return false;
+
+            try
+            {
+                string assetRootPath = ResolveSceneAssetRoot(filePath);
+                EditorSceneOpenResult openResult = PrepareEditorSceneCopies(filePath, assetRootPath);
+
+                LeftDockSlot.Content = BuildSceneTreeControl(openResult.TreeScene);
+
+                EditorHostBridge.SetAssetRootAndReloadAssets(assetRootPath);
+                EditorHostBridge.ReloadSceneById(EditorPreviewSceneId);
+
+                PixelSize hostSize = GetSceneHostPixelSize();
+                if (hostSize.Width > 0 && hostSize.Height > 0)
+                    EditorHostBridge.SetRenderWindowSize(hostSize.Width, hostSize.Height);
+
+                if (EditorHostBridge.IsRenderWindowAlive)
+                    EditorHostBridge.RunRenderFrame();
+
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private EditorSceneOpenResult PrepareEditorSceneCopies(string originalPath, string assetRootPath)
+        {
+            string editorWorkingRoot = GetEditorWorkingRoot(assetRootPath);
+
+            string treeCopyDirectory = Path.Combine(editorWorkingRoot, EditorTreeCopyDirectoryName);
+            string previewDirectory = Path.Combine(editorWorkingRoot, EditorPreviewDirectoryName);
+
+            Directory.CreateDirectory(editorWorkingRoot);
+            Directory.CreateDirectory(treeCopyDirectory);
+            Directory.CreateDirectory(previewDirectory);
+
+            string treeCopyPath = BuildTreeCopyPath(treeCopyDirectory, originalPath);
+            string previewScenePath = Path.Combine(previewDirectory, EditorPreviewSceneFileName);
+
+            File.Copy(originalPath, treeCopyPath, true);
+
+            SceneData treeScene = LoadSceneDataFromFile(treeCopyPath);
+            SceneData previewScene = BuildPreviewScene(treeScene);
+
+            SaveSceneData(previewScenePath, previewScene);
+
+            return new EditorSceneOpenResult
+            {
+                TreeCopyPath = treeCopyPath,
+                PreviewScenePath = previewScenePath,
+                TreeScene = treeScene,
+                PreviewScene = previewScene
+            };
+        }
+
+        private bool TryReadSceneJson(string filePath, out SceneData scene, out string reason)
+        {
+            scene = new SceneData();
+            reason = string.Empty;
+
+            try
+            {
+                string json = File.ReadAllText(filePath);
+                using JsonDocument doc = JsonDocument.Parse(json);
+
+                JsonElement root = doc.RootElement;
+                if (root.ValueKind != JsonValueKind.Object)
+                {
+                    reason = "Root must be a JSON object.";
+                    return false;
+                }
+
+                if (!root.TryGetProperty("sceneId", out JsonElement sceneIdElement) ||
+                    sceneIdElement.ValueKind != JsonValueKind.String)
+                {
+                    reason = "Missing or invalid 'sceneId'.";
+                    return false;
+                }
+
+                string sceneId = sceneIdElement.GetString()?.Trim() ?? string.Empty;
+                if (string.IsNullOrWhiteSpace(sceneId))
+                {
+                    reason = "'sceneId' cannot be empty.";
+                    return false;
+                }
+
+                if (!root.TryGetProperty("objects", out JsonElement objectsElement) ||
+                    objectsElement.ValueKind != JsonValueKind.Array)
+                {
+                    reason = "Missing or invalid 'objects' array.";
+                    return false;
+                }
+
+                SceneData? parsed = JsonSerializer.Deserialize<SceneData>(json, SceneJsonReadOptions);
+                if (parsed == null)
+                {
+                    reason = "Failed to deserialize scene.";
+                    return false;
+                }
+
+                scene = parsed;
+                return true;
+            }
+            catch (Exception ex)
+            {
+                reason = ex.Message;
+                return false;
+            }
+        }
+
+        private SceneData LoadSceneDataFromFile(string filePath)
+        {
+            if (!TryReadSceneJson(filePath, out SceneData scene, out string reason))
+                throw new InvalidDataException(reason);
+
+            return scene;
+        }
+
+        private void SaveSceneData(string filePath, SceneData scene)
+        {
+            string json = JsonSerializer.Serialize(scene, SceneJsonWriteOptions);
+            File.WriteAllText(filePath, json);
+        }
+
+        private SceneData BuildPreviewScene(SceneData sourceScene)
+        {
+            SceneData previewScene = CloneSceneData(sourceScene);
+            previewScene.SceneId = EditorPreviewSceneId;
+
+            foreach (SceneObject obj in previewScene.Objects)
+            {
+                obj.Physics = null;
+
+                if (string.Equals(obj.Type, "Camera", StringComparison.Ordinal))
+                {
+                    obj.Active = false;
+                    obj.Visible = false;
+                }
+            }
+
+            SceneObject previewCamera = CreatePreviewCamera(sourceScene, previewScene.Objects);
+            previewScene.Objects.Add(previewCamera);
+
+            return previewScene;
+        }
+
+        private SceneObject CreatePreviewCamera(SceneData sourceScene, List<SceneObject> targetObjects)
+        {
+            SceneObject? sourceCamera = sourceScene.Objects.FirstOrDefault(
+                o => string.Equals(o.Type, "Camera", StringComparison.Ordinal));
+
+            string previewCameraId = MakeUniqueObjectId(targetObjects, PreviewCameraIdBase);
+            string previewCameraName = !string.IsNullOrWhiteSpace(sourceCamera?.Name)
+                ? sourceCamera!.Name
+                : "MainCamera";
+
+            SceneTransform previewTransform = sourceCamera?.Transform != null
+                ? CloneTransform(sourceCamera.Transform)
+                : new SceneTransform
+                {
+                    ParentId = null,
+                    LocalPosition = new Double3(0.0, 0.0, 5.0),
+                    LocalRotation = new Double3(0.0, 180.0, 0.0),
+                    LocalScale = Double3.One
+                };
+
+            string previewCameraData = BuildPreviewCameraData(sourceCamera?.Data);
+
+            return new SceneObject
+            {
+                Id = previewCameraId,
+                Name = previewCameraName,
+                Tags = new List<string>(),
+                Active = true,
+                Transform = previewTransform,
+                Type = "Camera",
+                Controller = null,
+                Data = previewCameraData,
+                Mesh = null,
+                Visible = true,
+                RenderTag = "",
+                Physics = null,
+                Materials = null
+            };
+        }
+
+        private string BuildPreviewCameraData(string? sourceData)
+        {
+            int renderMode = 0;
+            double fovOrSize = 75.0;
+            double nearClip = 0.01;
+            double farClip = 1000.0;
+            int projectionType = 0;
+
+            if (!string.IsNullOrWhiteSpace(sourceData))
+            {
+                try
+                {
+                    using JsonDocument doc = JsonDocument.Parse(sourceData);
+                    JsonElement root = doc.RootElement;
+
+                    if (root.TryGetProperty("renderMode", out JsonElement renderModeElement) &&
+                        renderModeElement.ValueKind == JsonValueKind.Number)
+                        renderMode = renderModeElement.GetInt32();
+
+                    if (root.TryGetProperty("fovOrSize", out JsonElement fovElement) &&
+                        fovElement.ValueKind == JsonValueKind.Number)
+                        fovOrSize = fovElement.GetDouble();
+
+                    if (root.TryGetProperty("nearClip", out JsonElement nearElement) &&
+                        nearElement.ValueKind == JsonValueKind.Number)
+                        nearClip = nearElement.GetDouble();
+
+                    if (root.TryGetProperty("farClip", out JsonElement farElement) &&
+                        farElement.ValueKind == JsonValueKind.Number)
+                        farClip = farElement.GetDouble();
+
+                    if (root.TryGetProperty("projectionType", out JsonElement projectionElement) &&
+                        projectionElement.ValueKind == JsonValueKind.Number)
+                        projectionType = projectionElement.GetInt32();
+                }
+                catch
+                {
+                }
+            }
+
+            return JsonSerializer.Serialize(new
+            {
+                renderMode,
+                fovOrSize,
+                nearClip,
+                farClip,
+                projectionType,
+                isMainCamera = true
+            });
+        }
+
+        private string MakeUniqueObjectId(IEnumerable<SceneObject> objects, string baseId)
+        {
+            HashSet<string> ids = new HashSet<string>(
+                objects.Select(o => o.Id),
+                StringComparer.Ordinal);
+
+            if (!ids.Contains(baseId))
+                return baseId;
+
+            int index = 1;
+            while (true)
+            {
+                string candidate = baseId + index.ToString();
+                if (!ids.Contains(candidate))
+                    return candidate;
+
+                index++;
+            }
+        }
+
+        private SceneData CloneSceneData(SceneData source)
+        {
+            return new SceneData
+            {
+                SceneId = source.SceneId,
+                Objects = source.Objects.Select(CloneSceneObject).ToList()
+            };
+        }
+
+        private SceneObject CloneSceneObject(SceneObject source)
+        {
+            return new SceneObject
+            {
+                Id = source.Id,
+                Name = source.Name,
+                Tags = source.Tags != null ? new List<string>(source.Tags) : new List<string>(),
+                Active = source.Active,
+                Transform = CloneTransform(source.Transform),
+                Type = source.Type,
+                Controller = source.Controller,
+                Data = source.Data,
+                Mesh = source.Mesh,
+                Visible = source.Visible,
+                RenderTag = source.RenderTag,
+                Physics = ClonePhysicsBody(source.Physics),
+                Materials = source.Materials != null ? new List<string>(source.Materials) : null
+            };
+        }
+
+        private SceneTransform CloneTransform(SceneTransform? source)
+        {
+            if (source == null)
+            {
+                return new SceneTransform
+                {
+                    ParentId = null,
+                    LocalPosition = Double3.Zero,
+                    LocalRotation = Double3.Zero,
+                    LocalScale = Double3.One
+                };
+            }
+
+            return new SceneTransform
+            {
+                ParentId = source.ParentId,
+                LocalPosition = source.LocalPosition,
+                LocalRotation = source.LocalRotation,
+                LocalScale = source.LocalScale
+            };
+        }
+
+        private PhysicsBody? ClonePhysicsBody(PhysicsBody? source)
+        {
+            if (source == null)
+                return null;
+
+            return new PhysicsBody
+            {
+                Enabled = source.Enabled,
+                MotionType = source.MotionType,
+                ShapeType = source.ShapeType,
+                Size = source.Size,
+                Radius = source.Radius,
+                Length = source.Length,
+                Mass = source.Mass,
+                Friction = source.Friction,
+                Restitution = source.Restitution,
+                UseGravity = source.UseGravity,
+                EnableSpeculativeContacts = source.EnableSpeculativeContacts,
+                LinearDamping = source.LinearDamping,
+                AngularDamping = source.AngularDamping
+            };
+        }
+
+        private Control BuildSceneTreeControl(SceneData scene)
+        {
+            Dictionary<string, SceneObject> objectMap = new Dictionary<string, SceneObject>(StringComparer.Ordinal);
+            Dictionary<string, List<SceneObject>> childrenMap = new Dictionary<string, List<SceneObject>>(StringComparer.Ordinal);
+            List<SceneObject> roots = new List<SceneObject>();
+
+            foreach (SceneObject obj in scene.Objects)
+            {
+                if (!string.IsNullOrWhiteSpace(obj.Id))
+                    objectMap[obj.Id] = obj;
+            }
+
+            foreach (SceneObject obj in scene.Objects)
+            {
+                string? parentId = obj.Transform?.ParentId;
+
+                if (!string.IsNullOrWhiteSpace(parentId) && objectMap.ContainsKey(parentId))
+                {
+                    if (!childrenMap.TryGetValue(parentId, out List<SceneObject>? children))
+                    {
+                        children = new List<SceneObject>();
+                        childrenMap[parentId] = children;
+                    }
+
+                    children.Add(obj);
+                }
+                else
+                {
+                    roots.Add(obj);
+                }
+            }
+
+            roots.Sort(CompareSceneObjects);
+
+            foreach (List<SceneObject> children in childrenMap.Values)
+                children.Sort(CompareSceneObjects);
+
+            TreeView treeView = new TreeView
+            {
+                Margin = new Thickness(8),
+                ItemsSource = roots.Select(root => CreateSceneTreeItem(root, childrenMap)).Cast<object>().ToList()
+            };
+
+            return treeView;
+        }
+
+        private TreeViewItem CreateSceneTreeItem(
+            SceneObject obj,
+            Dictionary<string, List<SceneObject>> childrenMap)
+        {
+            string title = string.IsNullOrWhiteSpace(obj.Name) ? obj.Id : obj.Name;
+            string type = string.IsNullOrWhiteSpace(obj.Type) ? "Object" : obj.Type;
+
+            TreeViewItem item = new TreeViewItem
+            {
+                Header = $"{title} [{type}]",
+                Tag = obj.Id
+            };
+
+            if (childrenMap.TryGetValue(obj.Id, out List<SceneObject>? children) && children.Count > 0)
+                item.ItemsSource = children.Select(child => CreateSceneTreeItem(child, childrenMap)).Cast<object>().ToList();
+
+            return item;
+        }
+
+        private int CompareSceneObjects(SceneObject left, SceneObject right)
+        {
+            string leftKey = string.IsNullOrWhiteSpace(left.Name) ? left.Id : left.Name;
+            string rightKey = string.IsNullOrWhiteSpace(right.Name) ? right.Id : right.Name;
+            return string.Compare(leftKey, rightKey, StringComparison.OrdinalIgnoreCase);
+        }
+
+        private string BuildTreeCopyPath(string treeCopyDirectory, string originalPath)
+        {
+            string baseName = Path.GetFileNameWithoutExtension(originalPath);
+            string safeBaseName = SanitizeFileName(baseName);
+            string hash = ComputeStableShortHash(Path.GetFullPath(originalPath));
+
+            return Path.Combine(
+                treeCopyDirectory,
+                $"{safeBaseName}_{hash}.treecopy");
+        }
+
+        private string SanitizeFileName(string fileName)
+        {
+            char[] invalidChars = Path.GetInvalidFileNameChars();
+            StringBuilder builder = new StringBuilder(fileName.Length);
+
+            foreach (char ch in fileName)
+            {
+                builder.Append(invalidChars.Contains(ch) ? '_' : ch);
+            }
+
+            return builder.ToString();
+        }
+
+        private string ComputeStableShortHash(string text)
+        {
+            byte[] bytes = SHA256.HashData(Encoding.UTF8.GetBytes(text));
+            return Convert.ToHexString(bytes, 0, 6);
+        }
+
+        private PixelSize GetSceneHostPixelSize()
+        {
+            double scaling = TopLevel.GetTopLevel(_sceneHost)?.RenderScaling ?? 1.0;
+            int width = Math.Max(1, (int)Math.Round(_sceneHost.Bounds.Width * scaling));
+            int height = Math.Max(1, (int)Math.Round(_sceneHost.Bounds.Height * scaling));
+            return new PixelSize(width, height);
         }
 
         private void TryOpenFileWithSystem(string filePath)
@@ -919,24 +1457,6 @@ namespace LimitlessSquareEngine.Editor
                 : StringComparison.Ordinal;
 
             return string.Equals(leftFullPath, rightFullPath, comparison);
-        }
-
-        private void OnSceneHostCreated(IntPtr handle, string descriptor, PixelSize pixelSize)
-        {
-            // 把原生宿主句柄交给引擎
-            // EditorHostBridge.AttachEmbeddedRenderSurface(handle, descriptor, pixelSize.Width, pixelSize.Height);
-        }
-
-        private void OnSceneHostSizeChanged(PixelSize pixelSize)
-        {
-            // 通知引擎重设渲染目标大小
-            // EditorHostBridge.ResizeEmbeddedRenderSurface(pixelSize.Width, pixelSize.Height);
-        }
-
-        private void OnSceneHostDestroyed()
-        {
-            // 解除绑定
-            // EditorHostBridge.DetachEmbeddedRenderSurface();
         }
     }
 }

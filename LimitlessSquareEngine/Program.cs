@@ -128,6 +128,13 @@ namespace LimitlessSquareEngine
         public nint SdlWindow { get; set; }
     }
 
+    public sealed class EditorRenderedFrame
+    {
+        public int Width { get; init; }
+        public int Height { get; init; }
+        public byte[] PixelsRgba { get; init; } = Array.Empty<byte>();
+    }
+
     /// <summary>
     /// 入口类
     /// </summary>
@@ -149,6 +156,11 @@ namespace LimitlessSquareEngine
         private static MethodInfo? _editorStopMethod;
         private static bool _editorStarted = false;
         static ConcurrentQueue<Action> _editorHostActionQueue = new ConcurrentQueue<Action>();
+        private static readonly object _editorFrameSync = new object();
+        private static byte[]? _editorLatestFramePixels;
+        private static int _editorLatestFrameWidth;
+        private static int _editorLatestFrameHeight;
+        private static bool _editorLatestFrameDirty;
 
         // Lua脚本实例列表
         static List<LuaScriptInstance> _luaScriptInstances = new List<LuaScriptInstance>();
@@ -667,6 +679,12 @@ namespace LimitlessSquareEngine
             if (_window == null)
                 return;
 
+            if (_isEditorMode)
+            {
+                _window.IsVisible = false;
+                return;
+            }
+
             _window.IsVisible = visible;
         }
 
@@ -703,12 +721,234 @@ namespace LimitlessSquareEngine
                 (width, height) => QueueEditorHostAction(() => SetRenderWindowSizeCore(width, height)),
                 () => QueueEditorHostAction(RequestRenderWindowCloseCore),
                 IsRenderWindowAlive,
-                Loop);
+                Loop,
+                sceneId => QueueEditorHostAction(() =>
+                {
+                    Scene.RemoveScene(sceneId);
+                    Scene.LoadScene(sceneId);
+                    Scene.RebuildCameraQueue(sceneId);
+                }),
+                sceneId => QueueEditorHostAction(() =>
+                {
+                    Scene.RemoveScene(sceneId);
+                }),
+                assetRootPath => QueueEditorHostAction(() =>
+                {
+                    SetAssetRootAndReloadAssetsCore(assetRootPath);
+                }),
+                ConsumeLatestFrameCore);
         }
 
         static void UnbindEditorHostBridge()
         {
             EditorHostBridge.Unbind();
+        }
+
+        static void SetAssetRootAndReloadAssetsCore(string assetRootPath)
+        {
+            _assetRootPath = NormalizeAssetRootPath(assetRootPath);
+
+            try
+            {
+                Directory.CreateDirectory(_assetRootPath);
+            }
+            catch
+            {
+            }
+
+            if (_graphics == null)
+                return;
+
+            string assetsPath = _assetRootPath;
+            if (Directory.Exists(assetsPath))
+            {
+                var options = new JsonSerializerOptions
+                {
+                    Converters = { new Vector4JsonConverter() },
+                    PropertyNameCaseInsensitive = true
+                };
+
+                _sceneFileRegistry.Clear();
+                _sceneFileDisplayName.Clear();
+                _materialFileRegistry.Clear();
+                _generatedMaterialJsonRegistry.Clear();
+                _textureFileRegistry.Clear();
+                _texturePaths.Clear();
+                _uiLayouts.Clear();
+                _shaderVertexFiles.Clear();
+
+                string[] allFiles = Directory.GetFiles(assetsPath, "*.*", SearchOption.AllDirectories);
+                Array.Sort(allFiles, StringComparer.OrdinalIgnoreCase);
+
+                foreach (string file in allFiles)
+                {
+                    string ext = Path.GetExtension(file);
+
+                    if (ext.Equals(".json", StringComparison.OrdinalIgnoreCase))
+                    {
+                        try
+                        {
+                            if (TryValidateSceneFile(file, out string sceneId, out string sceneReason))
+                            {
+                                if (_sceneFileRegistry.TryGetValue(sceneId, out string? oldPath))
+                                {
+                                    Console.WriteLine($"[!] Duplicate scene id '{sceneId}' found. Replacing:");
+                                    Console.WriteLine($"    Old: {oldPath}");
+                                    Console.WriteLine($"    New: {file}");
+                                }
+
+                                _sceneFileRegistry[sceneId] = file;
+                                _sceneFileDisplayName[sceneId] = Path.GetFileName(file);
+
+                                Console.WriteLine($"[i] Registered scene: {sceneId} -> {file}");
+                                continue;
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            Console.WriteLine($"[!] Scene scan failed for {file}: {ex.Message}");
+                        }
+
+                        try
+                        {
+                            if (TryValidateMaterialFile(file, out string materialReason))
+                            {
+                                string key = BuildAssetKey(assetsPath, file, removeExtension: true);
+                                _materialFileRegistry[key] = file;
+
+                                Console.WriteLine($"[i] Registered material: {key} -> {file}");
+                                continue;
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            Console.WriteLine($"[!] Material scan failed for {file}: {ex.Message}");
+                        }
+
+                        try
+                        {
+                            if (TryLoadCanvasLayoutFile(file, options, out List<CanvasElement>? elements, out string canvasReason)
+                                && elements != null)
+                            {
+                                string key = BuildAssetKey(assetsPath, file, removeExtension: true);
+
+                                if (_uiLayouts.ContainsKey(key))
+                                {
+                                    Console.WriteLine($"[!] Duplicate UI layout key '{key}' found. Replacing with: {file}");
+                                }
+
+                                _uiLayouts[key] = elements;
+                                Console.WriteLine($"[i] Loaded UI layout: {key} -> {file}");
+                                continue;
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            Console.WriteLine($"[!] UI layout scan failed for {file}: {ex.Message}");
+                        }
+
+                        Console.WriteLine($"[i] Unknown json asset skipped: {file}");
+                        continue;
+                    }
+
+                    if (ext.Equals(".png", StringComparison.OrdinalIgnoreCase) ||
+                        ext.Equals(".jpg", StringComparison.OrdinalIgnoreCase) ||
+                        ext.Equals(".jpeg", StringComparison.OrdinalIgnoreCase))
+                    {
+                        string key = BuildAssetKey(assetsPath, file, removeExtension: false);
+
+                        _textureFileRegistry[key] = file;
+                        _texturePaths.Add(key);
+
+                        Console.WriteLine($"[i] Registered texture: {key}");
+                        continue;
+                    }
+
+                    if (ext.Equals(".obj", StringComparison.OrdinalIgnoreCase))
+                    {
+                        try
+                        {
+                            _graphics.RegisterObjMeshFromFile(assetsPath, file);
+                        }
+                        catch (Exception ex)
+                        {
+                            Console.WriteLine($"[!] Failed to scan OBJ mesh {file}: {ex.Message}");
+                        }
+
+                        continue;
+                    }
+
+                    if (IsShaderFile(file))
+                    {
+                        string shaderKey = BuildAssetKey(assetsPath, file, removeExtension: false);
+
+                        Console.WriteLine($"[i] Found shader file: {shaderKey}");
+
+                        if (ext.Equals(".vert", StringComparison.OrdinalIgnoreCase))
+                        {
+                            _shaderVertexFiles.Add(file);
+                        }
+
+                        continue;
+                    }
+                }
+
+                Console.WriteLine($"[i] Asset scan completed. Scenes={_sceneFileRegistry.Count}, Materials={_materialFileRegistry.Count}, UI={_uiLayouts.Count}, Textures={_textureFileRegistry.Count}");
+                _graphics.LoadShaders(_shaderVertexFiles, assetsPath);
+                _graphics.ConfigureDefaultMainCameraFog();
+            }
+        }
+
+        static EditorRenderedFrame? ConsumeLatestFrameCore()
+        {
+            lock (_editorFrameSync)
+            {
+                if (!_editorLatestFrameDirty || _editorLatestFramePixels == null)
+                    return null;
+
+                EditorRenderedFrame frame = new EditorRenderedFrame
+                {
+                    Width = _editorLatestFrameWidth,
+                    Height = _editorLatestFrameHeight,
+                    PixelsRgba = _editorLatestFramePixels
+                };
+
+                _editorLatestFramePixels = null;
+                _editorLatestFrameWidth = 0;
+                _editorLatestFrameHeight = 0;
+                _editorLatestFrameDirty = false;
+
+                return frame;
+            }
+        }
+
+        static void CaptureEditorFrameCore()
+        {
+            if (!_isEditorMode || _gl == null || _window == null)
+                return;
+
+            int width = Math.Max(1, _window.Size.X);
+            int height = Math.Max(1, _window.Size.Y);
+
+            byte[] pixels = new byte[width * height * 4];
+
+            _gl.PixelStore(PixelStoreParameter.PackAlignment, 1);
+            _gl.ReadPixels<byte>(
+                0,
+                0,
+                (uint)width,
+                (uint)height,
+                GLEnum.Rgba,
+                GLEnum.UnsignedByte,
+                pixels);
+
+            lock (_editorFrameSync)
+            {
+                _editorLatestFramePixels = pixels;
+                _editorLatestFrameWidth = width;
+                _editorLatestFrameHeight = height;
+                _editorLatestFrameDirty = true;
+            }
         }
 
         static void StartEditorIfNeeded()
@@ -1598,8 +1838,14 @@ namespace LimitlessSquareEngine
 
             _graphics?.ExecuteRenderQueue();
 
-            // 交换缓冲区
-            _window.SwapBuffers();
+            if (_isEditorMode)
+            {
+                CaptureEditorFrameCore();
+            }
+            else
+            {
+                _window.SwapBuffers();
+            }
         }
 
         /// <summary>

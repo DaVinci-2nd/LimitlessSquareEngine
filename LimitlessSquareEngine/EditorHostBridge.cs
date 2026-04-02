@@ -14,6 +14,10 @@ namespace LimitlessSquareEngine
         private static Action? _requestRenderWindowClose;
         private static Func<bool>? _isRenderWindowAlive;
         private static Action? _runRenderFrame;
+        private static Action<string>? _reloadSceneById;
+        private static Action<string>? _removeSceneById;
+        private static Action<string>? _setAssetRootAndReloadAssets;
+        private static Func<EditorRenderedFrame?>? _consumeLatestFrame;
 
         internal static void Bind(
             Func<EditorHostBootstrapInfo> bootstrapInfoProvider,
@@ -21,7 +25,11 @@ namespace LimitlessSquareEngine
             Action<int, int> setRenderWindowSize,
             Action requestRenderWindowClose,
             Func<bool> isRenderWindowAlive,
-            Action runRenderFrame)
+            Action runRenderFrame,
+            Action<string> reloadSceneById,
+            Action<string> removeSceneById,
+            Action<string> setAssetRootAndReloadAssets,
+            Func<EditorRenderedFrame?> consumeLatestFrame)
         {
             _bootstrapInfoProvider = bootstrapInfoProvider;
             _setRenderWindowVisible = setRenderWindowVisible;
@@ -29,6 +37,10 @@ namespace LimitlessSquareEngine
             _requestRenderWindowClose = requestRenderWindowClose;
             _isRenderWindowAlive = isRenderWindowAlive;
             _runRenderFrame = runRenderFrame;
+            _reloadSceneById = reloadSceneById;
+            _removeSceneById = removeSceneById;
+            _setAssetRootAndReloadAssets = setAssetRootAndReloadAssets;
+            _consumeLatestFrame = consumeLatestFrame;
         }
 
         internal static void Unbind()
@@ -39,6 +51,29 @@ namespace LimitlessSquareEngine
             _requestRenderWindowClose = null;
             _isRenderWindowAlive = null;
             _runRenderFrame = null;
+            _reloadSceneById = null;
+            _removeSceneById = null;
+            _setAssetRootAndReloadAssets = null;
+            _consumeLatestFrame = null;
+        }
+
+        public static EditorRenderedFrame? ConsumeLatestFrame()
+        {
+            if (_consumeLatestFrame == null)
+                throw new InvalidOperationException("Editor host bridge is not bound.");
+
+            return _consumeLatestFrame();
+        }
+
+        public static void SetAssetRootAndReloadAssets(string assetRootPath)
+        {
+            if (string.IsNullOrWhiteSpace(assetRootPath))
+                throw new ArgumentException("Asset root path cannot be null or empty.", nameof(assetRootPath));
+
+            if (_setAssetRootAndReloadAssets == null)
+                throw new InvalidOperationException("Editor host bridge is not bound.");
+
+            _setAssetRootAndReloadAssets(assetRootPath);
         }
 
         public static EditorHostBootstrapInfo GetBootstrapInfo()
@@ -96,6 +131,28 @@ namespace LimitlessSquareEngine
                 throw new InvalidOperationException("Editor host bridge is not bound.");
 
             _runRenderFrame();
+        }
+
+        public static void ReloadSceneById(string sceneId)
+        {
+            if (string.IsNullOrWhiteSpace(sceneId))
+                throw new ArgumentException("Scene ID cannot be null or empty.", nameof(sceneId));
+
+            if (_reloadSceneById == null)
+                throw new InvalidOperationException("Editor host bridge is not bound.");
+
+            _reloadSceneById(sceneId);
+        }
+
+        public static void RemoveSceneById(string sceneId)
+        {
+            if (string.IsNullOrWhiteSpace(sceneId))
+                throw new ArgumentException("Scene ID cannot be null or empty.", nameof(sceneId));
+
+            if (_removeSceneById == null)
+                throw new InvalidOperationException("Editor host bridge is not bound.");
+
+            _removeSceneById(sceneId);
         }
     }
 }

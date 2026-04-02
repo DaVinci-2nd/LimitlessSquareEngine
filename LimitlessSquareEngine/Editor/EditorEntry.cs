@@ -17,8 +17,34 @@ namespace LimitlessSquareEngine.Editor
         {
             string basePath = Path.GetDirectoryName(options.DefaultAssetRootPath) ?? AppContext.BaseDirectory;
             string editorRuntimePath = Path.Combine(basePath, ".lse-editor-runtime");
+
             Directory.CreateDirectory(editorRuntimePath);
+            Directory.CreateDirectory(Path.Combine(editorRuntimePath, "EditorPreview"));
+            Directory.CreateDirectory(Path.Combine(editorRuntimePath, "EditorTreeCopies"));
+
+            EnsurePreviewPlaceholderScene(editorRuntimePath);
+
             options.AssetRootPath = editorRuntimePath;
+        }
+
+        private static void EnsurePreviewPlaceholderScene(string editorRuntimePath)
+        {
+            string previewScenePath = Path.Combine(
+                editorRuntimePath,
+                "EditorPreview",
+                "__editor_preview_scene__.json");
+
+            if (File.Exists(previewScenePath))
+                return;
+
+            string json = """
+                {
+                  "sceneId": "__editor_preview_scene__",
+                  "objects": []
+                }
+                """;
+
+            File.WriteAllText(previewScenePath, json);
         }
 
         public static void Start(EditorHostBootstrapInfo info)
@@ -56,7 +82,10 @@ namespace LimitlessSquareEngine.Editor
             timer.Tick += (_, _) =>
             {
                 if (EditorHostBridge.IsRenderWindowAlive)
+                {
                     EditorHostBridge.RunRenderFrame();
+                    window.PresentLatestFrame();
+                }
             };
 
             window.Closed += (_, _) =>
