@@ -5,6 +5,7 @@ using Avalonia.Input;
 using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Platform.Storage;
+using Avalonia.Threading;
 using LimitlessSquareEngine.Engine;
 using System;
 using System.Collections.Generic;
@@ -36,6 +37,8 @@ namespace LimitlessSquareEngine.Editor
         private string? _projectRootPath;
         private string? _currentResourceDirectoryPath;
         private string? _projectAssetRootPath;
+        private DispatcherTimer? _sceneOpenForceRefreshTimer;
+        private int _sceneOpenForceRefreshRemainingTicks;
 
         private const string EditorPreviewSceneId = "__editor_preview_scene__";
         private const string EditorPreviewDirectoryName = "EditorPreview";
@@ -82,9 +85,17 @@ namespace LimitlessSquareEngine.Editor
             _sceneHost = new EmbeddedGameHost();
             _sceneHost.RenderSurfaceResized += OnSceneHostResized;
 
+            Opened += (_, _) =>
+            {
+                Dispatcher.UIThread.Post(() =>
+                {
+                    ForceSyncScenePreviewSurface();
+                }, DispatcherPriority.Render);
+            };
+
             // 先这么搞
-            LeftDockSlot.Content = CreatePlaceholder("这里边是一个树结构");
-            RightDockSlot.Content = CreatePlaceholder("这里展示选中节点的属性");
+            LeftDockSlot.Content = CreatePlaceholder("未加载场景或画布");
+            RightDockSlot.Content = CreatePlaceholder("未选中文件或节点");
             ProjectFilesSlot.Content = CreatePlaceholder("未选择项目文件夹");
             BottomDockSlot.Content = CreatePlaceholder("未选择文件夹");
             ToolbarSlot.Content = CreateTopMenuBar();
@@ -114,6 +125,84 @@ namespace LimitlessSquareEngine.Editor
                 EditorHostBridge.SetRenderWindowSize(hostSize.Width, hostSize.Height);
         }
 
+        private void ForceSyncScenePreviewSurface()
+        {
+            PixelSize hostSize = GetSceneHostPixelSize();
+            if (hostSize.Width <= 0 || hostSize.Height <= 0)
+                return;
+
+            EditorHostBridge.SetRenderWindowSize(hostSize.Width, hostSize.Height);
+        }
+
+        private void StartSceneOpenForceRefresh()
+        {
+            _sceneOpenForceRefreshRemainingTicks = 4;
+
+            if (_sceneOpenForceRefreshTimer == null)
+            {
+                _sceneOpenForceRefreshTimer = new DispatcherTimer
+                {
+                    Interval = TimeSpan.FromMilliseconds(1)
+                };
+
+                _sceneOpenForceRefreshTimer.Tick += OnSceneOpenForceRefreshTick;
+            }
+
+            _sceneOpenForceRefreshTimer.Stop();
+
+            RunSceneOpenForceRefreshPass();
+            _sceneOpenForceRefreshTimer.Start();
+        }
+
+        private void OnSceneOpenForceRefreshTick(object? sender, EventArgs e)
+        {
+            RunSceneOpenForceRefreshPass();
+
+            _sceneOpenForceRefreshRemainingTicks--;
+            if (_sceneOpenForceRefreshRemainingTicks <= 0)
+                _sceneOpenForceRefreshTimer?.Stop();
+        }
+
+        private void RunSceneOpenForceRefreshPass()
+        {
+            _sceneHost.InvalidateMeasure();
+            _sceneHost.InvalidateArrange();
+            _sceneHost.InvalidateVisual();
+
+            PixelSize hostSize = GetSceneHostPixelSize();
+            if (hostSize.Width <= 0 || hostSize.Height <= 0)
+                return;
+
+            int pulseWidth = hostSize.Width;
+            int pulseHeight = hostSize.Height;
+
+            if (pulseWidth > 1)
+            {
+                pulseWidth -= 1;
+            }
+            else
+            {
+                pulseWidth += 1;
+            }
+
+            if (pulseWidth == hostSize.Width)
+            {
+                if (pulseHeight > 1)
+                    pulseHeight -= 1;
+                else
+                    pulseHeight += 1;
+            }
+
+            EditorHostBridge.SetRenderWindowSize(pulseWidth, pulseHeight);
+            EditorHostBridge.SetRenderWindowSize(hostSize.Width, hostSize.Height);
+
+            if (EditorHostBridge.IsRenderWindowAlive)
+            {
+                EditorHostBridge.RunRenderFrame();
+                PresentLatestFrame();
+            }
+        }
+
         public void PresentLatestFrame()
         {
             EditorRenderedFrame? frame = EditorHostBridge.ConsumeLatestFrame();
@@ -141,7 +230,7 @@ namespace LimitlessSquareEngine.Editor
 
             Grid workspace = new Grid();
 
-            workspace.ColumnDefinitions.Add(new ColumnDefinition(260, GridUnitType.Pixel));
+            workspace.ColumnDefinitions.Add(new ColumnDefinition(360, GridUnitType.Pixel));
             workspace.ColumnDefinitions.Add(new ColumnDefinition(5, GridUnitType.Pixel));
             workspace.ColumnDefinitions.Add(new ColumnDefinition(1, GridUnitType.Star));
             workspace.ColumnDefinitions.Add(new ColumnDefinition(5, GridUnitType.Pixel));
@@ -149,11 +238,11 @@ namespace LimitlessSquareEngine.Editor
 
             workspace.RowDefinitions.Add(new RowDefinition(1, GridUnitType.Star));
             workspace.RowDefinitions.Add(new RowDefinition(5, GridUnitType.Pixel));
-            workspace.RowDefinitions.Add(new RowDefinition(220, GridUnitType.Pixel));
+            workspace.RowDefinitions.Add(new RowDefinition(320, GridUnitType.Pixel));
 
             Control leftPanel = CreateDockContainer("场景树/画布树", LeftDockSlot);
             Control scenePanel = CreateSceneContainer();
-            Control rightPanel = CreateDockContainer("节点查看器", RightDockSlot);
+            Control rightPanel = CreateDockContainer("查看器", RightDockSlot);
             Control bottomPanel = CreateBottomWorkspace();
 
             Grid.SetColumn(leftPanel, 0);
@@ -218,7 +307,7 @@ namespace LimitlessSquareEngine.Editor
         {
             Grid grid = new Grid
             {
-                ColumnDefinitions = new ColumnDefinitions("Auto,Auto,*"),
+                ColumnDefinitions = new ColumnDefinitions("*,Auto,*"),
                 VerticalAlignment = VerticalAlignment.Center
             };
 
@@ -228,16 +317,76 @@ namespace LimitlessSquareEngine.Editor
                 VerticalAlignment = VerticalAlignment.Center,
                 Foreground = Brushes.White,
                 FontSize = 13,
+                FontWeight = FontWeight.Bold,
                 Margin = new Thickness(0, 0, 12, 0)
             };
 
-            Grid.SetColumn(titleText, 0);
-            Grid.SetColumn(ToolbarSlot, 1);
+            StackPanel leftPanel = new StackPanel
+            {
+                Orientation = Orientation.Horizontal,
+                Spacing = 0,
+                VerticalAlignment = VerticalAlignment.Center,
+                HorizontalAlignment = HorizontalAlignment.Left,
+                Children =
+                {
+                    titleText,
+                    ToolbarSlot
+                }
+            };
 
-            grid.Children.Add(titleText);
-            grid.Children.Add(ToolbarSlot);
+            Control playbackControls = CreatePlaybackControls();
+
+            Border rightSpacer = new Border();
+
+            Grid.SetColumn(leftPanel, 0);
+            Grid.SetColumn(playbackControls, 1);
+            Grid.SetColumn(rightSpacer, 2);
+
+            grid.Children.Add(leftPanel);
+            grid.Children.Add(playbackControls);
+            grid.Children.Add(rightSpacer);
 
             return grid;
+        }
+
+        private Control CreatePlaybackControls()
+        {
+            StackPanel panel = new StackPanel
+            {
+                Orientation = Orientation.Horizontal,
+                Spacing = 6,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+
+            panel.Children.Add(CreatePlaybackButton("▶"));
+            panel.Children.Add(CreatePlaybackButton("◯"));
+            panel.Children.Add(CreatePlaybackButton("▷"));
+
+            return panel;
+        }
+
+        private Button CreatePlaybackButton(string glyph)
+        {
+            return new Button
+            {
+                Content = new TextBlock
+                {
+                    Text = glyph,
+                    FontSize = 13,
+                    Foreground = Brushes.White,
+                    HorizontalAlignment = HorizontalAlignment.Center,
+                    VerticalAlignment = VerticalAlignment.Center,
+                    TextAlignment = TextAlignment.Center
+                },
+                Width = 30,
+                Height = 24,
+                Padding = new Thickness(0),
+                Background = new SolidColorBrush(Color.Parse("#2A2A2A")),
+                BorderBrush = new SolidColorBrush(Color.Parse("#555555")),
+                BorderThickness = new Thickness(1),
+                CornerRadius = new CornerRadius(3)
+            };
         }
 
         private Control CreateSceneContainer()
@@ -360,6 +509,139 @@ namespace LimitlessSquareEngine.Editor
             };
         }
 
+        private Control CreateViewerContent(string title, IEnumerable<(string Label, string Value)> items)
+        {
+            StackPanel stack = new StackPanel
+            {
+                Margin = new Thickness(12),
+                Spacing = 8
+            };
+
+            stack.Children.Add(new TextBlock
+            {
+                Text = title,
+                Foreground = Brushes.White,
+                FontSize = 14,
+                FontWeight = FontWeight.Bold
+            });
+
+            foreach ((string label, string value) in items)
+            {
+                stack.Children.Add(new TextBlock
+                {
+                    Text = $"{label}: {value}",
+                    Foreground = new SolidColorBrush(Color.Parse("#DDDDDD")),
+                    TextWrapping = TextWrapping.Wrap
+                });
+            }
+
+            return new ScrollViewer
+            {
+                VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+                HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+                Content = stack
+            };
+        }
+
+        private void ShowResourceDetailsInViewer(string path, bool isDirectory)
+        {
+            try
+            {
+                if (isDirectory)
+                {
+                    DirectoryInfo directoryInfo = new DirectoryInfo(path);
+
+                    RightDockSlot.Content = CreateViewerContent(
+                        "文件夹信息",
+                        new (string Label, string Value)[]
+                        {
+                    ("名称", directoryInfo.Name),
+                    ("路径", directoryInfo.FullName),
+                    ("类型", "文件夹"),
+                    ("最后修改", directoryInfo.Exists ? directoryInfo.LastWriteTime.ToString("yyyy-MM-dd HH:mm:ss") : "-")
+                        });
+
+                    return;
+                }
+
+                FileInfo fileInfo = new FileInfo(path);
+
+                RightDockSlot.Content = CreateViewerContent(
+                    "文件信息",
+                    new (string Label, string Value)[]
+                    {
+                ("名称", fileInfo.Name),
+                ("路径", fileInfo.FullName),
+                ("类型", string.IsNullOrWhiteSpace(fileInfo.Extension) ? "未知" : fileInfo.Extension),
+                ("大小", fileInfo.Exists ? $"{fileInfo.Length} 字节" : "-"),
+                ("最后修改", fileInfo.Exists ? fileInfo.LastWriteTime.ToString("yyyy-MM-dd HH:mm:ss") : "-")
+                    });
+            }
+            catch (Exception ex)
+            {
+                RightDockSlot.Content = CreateViewerContent(
+                    "文件信息",
+                    new (string Label, string Value)[]
+                    {
+                ("路径", path),
+                ("错误", ex.Message)
+                    });
+            }
+        }
+
+        private void ShowSceneObjectDetailsInViewer(SceneObject obj)
+        {
+            string tags = obj.Tags != null && obj.Tags.Count > 0
+                ? string.Join(", ", obj.Tags)
+                : "-";
+
+            string materials = obj.Materials != null && obj.Materials.Count > 0
+                ? string.Join(", ", obj.Materials)
+                : "-";
+
+            string parentId = string.IsNullOrWhiteSpace(obj.Transform?.ParentId)
+                ? "-"
+                : obj.Transform!.ParentId!;
+
+            string position = obj.Transform == null
+                ? "-"
+                : $"{obj.Transform.LocalPosition.X}, {obj.Transform.LocalPosition.Y}, {obj.Transform.LocalPosition.Z}";
+
+            string rotation = obj.Transform == null
+                ? "-"
+                : $"{obj.Transform.LocalRotation.X}, {obj.Transform.LocalRotation.Y}, {obj.Transform.LocalRotation.Z}";
+
+            string scale = obj.Transform == null
+                ? "-"
+                : $"{obj.Transform.LocalScale.X}, {obj.Transform.LocalScale.Y}, {obj.Transform.LocalScale.Z}";
+
+            string physicsSummary = obj.Physics == null
+                ? "-"
+                : $"Enabled={obj.Physics.Enabled}, MotionType={obj.Physics.MotionType}, ShapeType={obj.Physics.ShapeType}";
+
+            RightDockSlot.Content = CreateViewerContent(
+                "节点信息",
+                new (string Label, string Value)[]
+                {
+                    ("Id", string.IsNullOrWhiteSpace(obj.Id) ? "-" : obj.Id),
+                    ("名称", string.IsNullOrWhiteSpace(obj.Name) ? "-" : obj.Name),
+                    ("类型", string.IsNullOrWhiteSpace(obj.Type) ? "-" : obj.Type),
+                    ("激活", obj.Active.ToString()),
+                    ("可见", obj.Visible.ToString()),
+                    ("父节点", parentId),
+                    ("位置", position),
+                    ("旋转", rotation),
+                    ("缩放", scale),
+                    ("Controller", string.IsNullOrWhiteSpace(obj.Controller) ? "-" : obj.Controller),
+                    ("Mesh", string.IsNullOrWhiteSpace(obj.Mesh) ? "-" : obj.Mesh),
+                    ("RenderTag", string.IsNullOrWhiteSpace(obj.RenderTag) ? "-" : obj.RenderTag),
+                    ("Tags", tags),
+                    ("Materials", materials),
+                    ("Physics", physicsSummary),
+                    ("Data", string.IsNullOrWhiteSpace(obj.Data) ? "-" : obj.Data)
+                });
+        }
+
         private Control CreateTopMenuBar()
         {
             Menu menu = new Menu
@@ -386,9 +668,21 @@ namespace LimitlessSquareEngine.Editor
                 },
                 new MenuItem
                 {
-                    Header = "窗口",
+                    Header = "工具",
                     Foreground = Brushes.White,
-                    ItemsSource = CreateWindowMenuItems()
+                    ItemsSource = CreateToolMenuItems()
+                },
+                new MenuItem
+                {
+                    Header = "配置",
+                    Foreground = Brushes.White,
+                    ItemsSource = CreateConfigMenuItems()
+                },
+                new MenuItem
+                {
+                    Header = "关于",
+                    Foreground = Brushes.White,
+                    ItemsSource = CreateAboutMenuItems()
                 }
             };
 
@@ -426,13 +720,31 @@ namespace LimitlessSquareEngine.Editor
             };
         }
 
-        private IEnumerable<MenuItem> CreateWindowMenuItems()
+        private IEnumerable<MenuItem> CreateToolMenuItems()
         {
             return new[]
             {
-                new MenuItem { Header = "场景树" },
-                new MenuItem { Header = "节点查看器" },
-                new MenuItem { Header = "资源管理器" }
+                new MenuItem { Header = "性能监控" },
+                new MenuItem { Header = "帧分析" }
+            };
+        }
+
+        private IEnumerable<MenuItem> CreateConfigMenuItems()
+        {
+            return new[]
+            {
+                new MenuItem { Header = "预览" },
+                new MenuItem { Header = "性能" },
+                new MenuItem { Header = "设置" }
+            };
+        }
+
+        private IEnumerable<MenuItem> CreateAboutMenuItems()
+        {
+            return new[]
+            {
+                new MenuItem { Header = "关于Limitless Square" },
+                new MenuItem { Header = "GitHub" }
             };
         }
 
@@ -470,12 +782,13 @@ namespace LimitlessSquareEngine.Editor
 
             TreeView treeView = new TreeView
             {
-                Margin = new Thickness(0),
                 ItemsSource = new object[]
                 {
-            CreateDirectoryNode(fullRootPath, true)
+                    CreateDirectoryNode(fullRootPath, true)
                 }
             };
+
+            treeView.Classes.Add("project-file-tree");
 
             treeView.SelectionChanged += OnProjectTreeSelectionChanged;
 
@@ -662,8 +975,8 @@ namespace LimitlessSquareEngine.Editor
                 Width = 110,
                 Margin = new Thickness(0, 0, 12, 12),
                 Padding = new Thickness(10),
-                Background = new SolidColorBrush(Color.Parse("#1A1A1A")),
-                BorderBrush = new SolidColorBrush(Color.Parse("#444444")),
+                Background = Brushes.Transparent,
+                BorderBrush = Brushes.Transparent,
                 BorderThickness = new Thickness(1),
                 CornerRadius = new CornerRadius(4),
                 Child = new StackPanel
@@ -744,13 +1057,35 @@ namespace LimitlessSquareEngine.Editor
                 grid.RowDefinitions.Add(new RowDefinition(40, GridUnitType.Pixel));
                 grid.RowDefinitions.Add(new RowDefinition(1, GridUnitType.Star));
 
+                Button backButton = (Button)CreateResourceBackButton();
+
+                TextBlock pathText = new TextBlock
+                {
+                    Text = BuildRelativeResourceDirectoryDisplayPath(),
+                    Foreground = new SolidColorBrush(Color.Parse("#BBBBBB")),
+                    VerticalAlignment = VerticalAlignment.Center,
+                    TextTrimming = TextTrimming.CharacterEllipsis
+                };
+
+                Grid topBarContent = new Grid
+                {
+                    ColumnDefinitions = new ColumnDefinitions("Auto,12,*"),
+                    VerticalAlignment = VerticalAlignment.Center
+                };
+
+                Grid.SetColumn(backButton, 0);
+                Grid.SetColumn(pathText, 2);
+
+                topBarContent.Children.Add(backButton);
+                topBarContent.Children.Add(pathText);
+
                 Border topBar = new Border
                 {
                     Background = new SolidColorBrush(Color.Parse("#181818")),
                     BorderBrush = new SolidColorBrush(Color.Parse("#333333")),
                     BorderThickness = new Thickness(0, 0, 0, 1),
                     Padding = new Thickness(8, 4),
-                    Child = CreateResourceBackButton()
+                    Child = topBarContent
                 };
 
                 Grid.SetRow(topBar, 0);
@@ -767,13 +1102,37 @@ namespace LimitlessSquareEngine.Editor
             return grid;
         }
 
-        private Control CreateResourceBackButton()
+        private string BuildRelativeResourceDirectoryDisplayPath()
+        {
+            if (string.IsNullOrWhiteSpace(_projectRootPath) ||
+                string.IsNullOrWhiteSpace(_currentResourceDirectoryPath))
+                return string.Empty;
+
+            string rootFullPath = Path.GetFullPath(_projectRootPath);
+            string currentFullPath = Path.GetFullPath(_currentResourceDirectoryPath);
+
+            if (PathsEqual(rootFullPath, currentFullPath))
+                return string.Empty;
+
+            string relativePath = Path.GetRelativePath(rootFullPath, currentFullPath);
+            if (string.IsNullOrWhiteSpace(relativePath) || relativePath == ".")
+                return string.Empty;
+
+            string[] segments = relativePath
+                .Split(new[] { Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar }, StringSplitOptions.RemoveEmptyEntries);
+
+            return string.Join(" > ", segments);
+        }
+
+        private Button CreateResourceBackButton()
         {
             Button button = new Button
             {
                 Content = "返回上一级",
                 HorizontalAlignment = HorizontalAlignment.Left,
                 VerticalAlignment = VerticalAlignment.Center,
+                HorizontalContentAlignment = HorizontalAlignment.Center,
+                VerticalContentAlignment = VerticalAlignment.Center,
                 MinWidth = 120,
                 Height = 28,
                 Padding = new Thickness(14, 0)
@@ -852,6 +1211,7 @@ namespace LimitlessSquareEngine.Editor
                 UpdateResourceItemVisual(previous);
 
             UpdateResourceItemVisual(state);
+            ShowResourceDetailsInViewer(state.Path, state.IsDirectory);
         }
 
         private void UpdateResourceItemVisual(ResourceItemState state)
@@ -879,8 +1239,8 @@ namespace LimitlessSquareEngine.Editor
                 return;
             }
 
-            state.Item.Background = new SolidColorBrush(Color.Parse("#202020"));
-            state.Item.BorderBrush = new SolidColorBrush(Color.Parse("#444444"));
+            state.Item.Background = Brushes.Transparent;
+            state.Item.BorderBrush = Brushes.Transparent;
         }
 
         private string GetDirectoryDisplayName(string directoryPath, bool isRoot)
@@ -1000,12 +1360,7 @@ namespace LimitlessSquareEngine.Editor
                 EditorHostBridge.SetAssetRootAndReloadAssets(assetRootPath);
                 EditorHostBridge.ReloadSceneById(EditorPreviewSceneId);
 
-                PixelSize hostSize = GetSceneHostPixelSize();
-                if (hostSize.Width > 0 && hostSize.Height > 0)
-                    EditorHostBridge.SetRenderWindowSize(hostSize.Width, hostSize.Height);
-
-                if (EditorHostBridge.IsRenderWindowAlive)
-                    EditorHostBridge.RunRenderFrame();
+                StartSceneOpenForceRefresh();
 
                 return true;
             }
@@ -1360,9 +1715,11 @@ namespace LimitlessSquareEngine.Editor
 
             TreeView treeView = new TreeView
             {
-                Margin = new Thickness(8),
                 ItemsSource = roots.Select(root => CreateSceneTreeItem(root, childrenMap)).Cast<object>().ToList()
             };
+
+            treeView.Classes.Add("scene-tree");
+            treeView.SelectionChanged += OnSceneTreeSelectionChanged;
 
             return treeView;
         }
@@ -1377,13 +1734,27 @@ namespace LimitlessSquareEngine.Editor
             TreeViewItem item = new TreeViewItem
             {
                 Header = $"{title} [{type}]",
-                Tag = obj.Id
+                Tag = obj
             };
 
             if (childrenMap.TryGetValue(obj.Id, out List<SceneObject>? children) && children.Count > 0)
                 item.ItemsSource = children.Select(child => CreateSceneTreeItem(child, childrenMap)).Cast<object>().ToList();
 
             return item;
+        }
+
+        private void OnSceneTreeSelectionChanged(object? sender, SelectionChangedEventArgs e)
+        {
+            if (sender is not TreeView treeView)
+                return;
+
+            if (treeView.SelectedItem is not TreeViewItem item)
+                return;
+
+            if (item.Tag is not SceneObject obj)
+                return;
+
+            ShowSceneObjectDetailsInViewer(obj);
         }
 
         private int CompareSceneObjects(SceneObject left, SceneObject right)
