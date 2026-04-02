@@ -1,4 +1,5 @@
 ﻿using Avalonia;
+using Avalonia.Themes.Fluent;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -9,5 +10,9 @@ namespace LimitlessSquareEngine.Editor
 {
     public sealed class EditorApp : Application
     {
+        public override void Initialize()
+        {
+            Styles.Add(new FluentTheme());
+        }
     }
 }
