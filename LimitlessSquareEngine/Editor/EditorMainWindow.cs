@@ -2,6 +2,7 @@
 using Avalonia.Controls;
 using Avalonia.Controls.Primitives;
 using Avalonia.Input;
+using Avalonia.Interactivity;
 using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Platform.Storage;
@@ -10,6 +11,7 @@ using LimitlessSquareEngine.Engine;
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
@@ -39,12 +41,24 @@ namespace LimitlessSquareEngine.Editor
         private string? _projectAssetRootPath;
         private DispatcherTimer? _sceneOpenForceRefreshTimer;
         private int _sceneOpenForceRefreshRemainingTicks;
+        private string? _currentTreeCopyPath;
+        private string? _currentPreviewScenePath;
+        private SceneData? _currentTreeScene;
+        private SceneData? _currentPreviewScene;
+        private SceneObject? _selectedSceneObject;
+        private bool _isUpdatingSceneInspector;
+        private bool _isProgrammaticSceneTreeSelection;
+        private TextBox? _activeInspectorTextBox;
 
         private const string EditorPreviewSceneId = "__editor_preview_scene__";
         private const string EditorPreviewDirectoryName = "EditorPreview";
         private const string EditorTreeCopyDirectoryName = "EditorTreeCopies";
         private const string EditorPreviewSceneFileName = EditorPreviewSceneId + ".json";
         private const string PreviewCameraIdBase = "__editor_preview_camera__";
+
+        private const double InspectorTextBoxHeight = 22;
+        private static readonly Thickness InspectorTextBoxPadding = new Thickness(6, 1, 6, 1);
+        private const double InspectorPropertySpacing = 1;
 
         private static readonly JsonSerializerOptions SceneJsonReadOptions = new JsonSerializerOptions
         {
@@ -101,6 +115,8 @@ namespace LimitlessSquareEngine.Editor
             ToolbarSlot.Content = CreateTopMenuBar();
 
             Content = BuildLayout();
+
+            AddHandler(InputElement.KeyDownEvent, OnWindowClipboardKeyDown, RoutingStrategies.Tunnel, true);
         }
 
         private sealed class ResourceItemState
@@ -117,6 +133,14 @@ namespace LimitlessSquareEngine.Editor
                 Path = path;
                 IsDirectory = isDirectory;
             }
+        }
+
+        private enum ClipboardCommand
+        {
+            Cut,
+            Copy,
+            Paste,
+            SelectAll
         }
 
         private void OnSceneHostResized(PixelSize hostSize)
@@ -230,7 +254,7 @@ namespace LimitlessSquareEngine.Editor
 
             Grid workspace = new Grid();
 
-            workspace.ColumnDefinitions.Add(new ColumnDefinition(360, GridUnitType.Pixel));
+            workspace.ColumnDefinitions.Add(new ColumnDefinition(420, GridUnitType.Pixel));
             workspace.ColumnDefinitions.Add(new ColumnDefinition(5, GridUnitType.Pixel));
             workspace.ColumnDefinitions.Add(new ColumnDefinition(1, GridUnitType.Star));
             workspace.ColumnDefinitions.Add(new ColumnDefinition(5, GridUnitType.Pixel));
@@ -469,7 +493,7 @@ namespace LimitlessSquareEngine.Editor
         {
             Grid grid = new Grid();
 
-            grid.ColumnDefinitions.Add(new ColumnDefinition(280, GridUnitType.Pixel));
+            grid.ColumnDefinitions.Add(new ColumnDefinition(360, GridUnitType.Pixel));
             grid.ColumnDefinitions.Add(new ColumnDefinition(5, GridUnitType.Pixel));
             grid.ColumnDefinitions.Add(new ColumnDefinition(1, GridUnitType.Star));
 
@@ -505,6 +529,24 @@ namespace LimitlessSquareEngine.Editor
                 {
                     Text = text,
                     Foreground = new SolidColorBrush(Color.Parse("#CCCCCC"))
+                }
+            };
+        }
+
+        private Control CreateCompactTreeHeader(string text)
+        {
+            return new Border
+            {
+                Height = InspectorTextBoxHeight,
+                MinHeight = InspectorTextBoxHeight,
+                Padding = new Thickness(4, 0, 4, 0),
+                Background = Brushes.Transparent,
+                Child = new TextBlock
+                {
+                    Text = text,
+                    Foreground = new SolidColorBrush(Color.Parse("#DDDDDD")),
+                    VerticalAlignment = VerticalAlignment.Center,
+                    TextTrimming = TextTrimming.CharacterEllipsis
                 }
             };
         }
@@ -555,10 +597,10 @@ namespace LimitlessSquareEngine.Editor
                         "文件夹信息",
                         new (string Label, string Value)[]
                         {
-                    ("名称", directoryInfo.Name),
-                    ("路径", directoryInfo.FullName),
-                    ("类型", "文件夹"),
-                    ("最后修改", directoryInfo.Exists ? directoryInfo.LastWriteTime.ToString("yyyy-MM-dd HH:mm:ss") : "-")
+                            ("名称", directoryInfo.Name),
+                            ("路径", directoryInfo.FullName),
+                            ("类型", "文件夹"),
+                            ("最后修改", directoryInfo.Exists ? directoryInfo.LastWriteTime.ToString("yyyy-MM-dd HH:mm:ss") : "-")
                         });
 
                     return;
@@ -570,11 +612,11 @@ namespace LimitlessSquareEngine.Editor
                     "文件信息",
                     new (string Label, string Value)[]
                     {
-                ("名称", fileInfo.Name),
-                ("路径", fileInfo.FullName),
-                ("类型", string.IsNullOrWhiteSpace(fileInfo.Extension) ? "未知" : fileInfo.Extension),
-                ("大小", fileInfo.Exists ? $"{fileInfo.Length} 字节" : "-"),
-                ("最后修改", fileInfo.Exists ? fileInfo.LastWriteTime.ToString("yyyy-MM-dd HH:mm:ss") : "-")
+                        ("名称", fileInfo.Name),
+                        ("路径", fileInfo.FullName),
+                        ("类型", string.IsNullOrWhiteSpace(fileInfo.Extension) ? "未知" : fileInfo.Extension),
+                        ("大小", fileInfo.Exists ? $"{fileInfo.Length} 字节" : "-"),
+                        ("最后修改", fileInfo.Exists ? fileInfo.LastWriteTime.ToString("yyyy-MM-dd HH:mm:ss") : "-")
                     });
             }
             catch (Exception ex)
@@ -583,63 +625,698 @@ namespace LimitlessSquareEngine.Editor
                     "文件信息",
                     new (string Label, string Value)[]
                     {
-                ("路径", path),
-                ("错误", ex.Message)
+                        ("路径", path),
+                        ("错误", ex.Message)
                     });
             }
         }
 
-        private void ShowSceneObjectDetailsInViewer(SceneObject obj)
+        private void ShowSceneObjectInspector(SceneObject obj)
         {
-            string tags = obj.Tags != null && obj.Tags.Count > 0
-                ? string.Join(", ", obj.Tags)
-                : "-";
+            RightDockSlot.Content = CreateSceneObjectInspector(obj);
+        }
 
-            string materials = obj.Materials != null && obj.Materials.Count > 0
-                ? string.Join(", ", obj.Materials)
-                : "-";
+        private Control CreateSceneObjectInspector(SceneObject obj)
+        {
+            obj.Transform ??= CloneTransform(null);
 
-            string parentId = string.IsNullOrWhiteSpace(obj.Transform?.ParentId)
-                ? "-"
-                : obj.Transform!.ParentId!;
+            StackPanel root = new StackPanel
+            {
+                Spacing = 4
+            };
 
-            string position = obj.Transform == null
-                ? "-"
-                : $"{obj.Transform.LocalPosition.X}, {obj.Transform.LocalPosition.Y}, {obj.Transform.LocalPosition.Z}";
+            root.Children.Add(CreateTopInlineIdentityRow(obj));
 
-            string rotation = obj.Transform == null
-                ? "-"
-                : $"{obj.Transform.LocalRotation.X}, {obj.Transform.LocalRotation.Y}, {obj.Transform.LocalRotation.Z}";
+            root.Children.Add(CreateTextPropertyEditor("名称", () => obj.Name ?? "", value =>
+            {
+                obj.Name = value;
+                return PersistSceneObjectChanges(obj, true);
+            }));
+            root.Children.Add(CreateTextPropertyEditor("类型", () => obj.Type ?? "", value =>
+            {
+                obj.Type = value;
+                return PersistSceneObjectChanges(obj, true);
+            }));
 
-            string scale = obj.Transform == null
-                ? "-"
-                : $"{obj.Transform.LocalScale.X}, {obj.Transform.LocalScale.Y}, {obj.Transform.LocalScale.Z}";
+            root.Children.Add(CreateTextPropertyEditor("父节点", () => obj.Transform?.ParentId ?? "", value =>
+            {
+                return TryApplyParentId(obj, value);
+            }));
 
-            string physicsSummary = obj.Physics == null
-                ? "-"
-                : $"Enabled={obj.Physics.Enabled}, MotionType={obj.Physics.MotionType}, ShapeType={obj.Physics.ShapeType}";
-
-            RightDockSlot.Content = CreateViewerContent(
-                "节点信息",
-                new (string Label, string Value)[]
+            root.Children.Add(CreateInspectorSectionHeader("Transform"));
+            root.Children.Add(CreateVector3PropertyEditor(
+                "位置",
+                () => obj.Transform!.LocalPosition,
+                value =>
                 {
-                    ("Id", string.IsNullOrWhiteSpace(obj.Id) ? "-" : obj.Id),
-                    ("名称", string.IsNullOrWhiteSpace(obj.Name) ? "-" : obj.Name),
-                    ("类型", string.IsNullOrWhiteSpace(obj.Type) ? "-" : obj.Type),
-                    ("激活", obj.Active.ToString()),
-                    ("可见", obj.Visible.ToString()),
-                    ("父节点", parentId),
-                    ("位置", position),
-                    ("旋转", rotation),
-                    ("缩放", scale),
-                    ("Controller", string.IsNullOrWhiteSpace(obj.Controller) ? "-" : obj.Controller),
-                    ("Mesh", string.IsNullOrWhiteSpace(obj.Mesh) ? "-" : obj.Mesh),
-                    ("RenderTag", string.IsNullOrWhiteSpace(obj.RenderTag) ? "-" : obj.RenderTag),
-                    ("Tags", tags),
-                    ("Materials", materials),
-                    ("Physics", physicsSummary),
-                    ("Data", string.IsNullOrWhiteSpace(obj.Data) ? "-" : obj.Data)
-                });
+                    obj.Transform!.LocalPosition = value;
+                    return PersistSceneObjectChanges(obj, false);
+                }));
+            root.Children.Add(CreateVector3PropertyEditor(
+                "旋转",
+                () => obj.Transform!.LocalRotation,
+                value =>
+                {
+                    obj.Transform!.LocalRotation = value;
+                    return PersistSceneObjectChanges(obj, false);
+                }));
+            root.Children.Add(CreateVector3PropertyEditor(
+                "缩放",
+                () => obj.Transform!.LocalScale,
+                value =>
+                {
+                    obj.Transform!.LocalScale = value;
+                    return PersistSceneObjectChanges(obj, false);
+                }));
+
+            root.Children.Add(CreateInspectorSectionHeader("其它"));
+            root.Children.Add(CreateTextPropertyEditor("Controller", () => obj.Controller ?? "", value =>
+            {
+                obj.Controller = string.IsNullOrWhiteSpace(value) ? null : value;
+                return PersistSceneObjectChanges(obj, false);
+            }));
+            root.Children.Add(CreateTextPropertyEditor("Mesh", () => obj.Mesh ?? "", value =>
+            {
+                obj.Mesh = string.IsNullOrWhiteSpace(value) ? null : value;
+                return PersistSceneObjectChanges(obj, false);
+            }));
+            root.Children.Add(CreateTextPropertyEditor("RenderTag", () => obj.RenderTag ?? "", value =>
+            {
+                obj.RenderTag = value ?? "";
+                return PersistSceneObjectChanges(obj, false);
+            }));
+            root.Children.Add(CreateTextPropertyEditor("Tags", () => obj.Tags == null ? "" : string.Join(", ", obj.Tags), value =>
+            {
+                obj.Tags = SplitCommaSeparatedList(value);
+                return PersistSceneObjectChanges(obj, false);
+            }));
+            root.Children.Add(CreateTextPropertyEditor("Materials", () => obj.Materials == null ? "" : string.Join(", ", obj.Materials), value =>
+            {
+                List<string> list = SplitCommaSeparatedList(value);
+                obj.Materials = list.Count == 0 ? null : list;
+                return PersistSceneObjectChanges(obj, false);
+            }));
+            root.Children.Add(CreateTextPropertyEditor("Data", () => obj.Data ?? "", value =>
+            {
+                obj.Data = string.IsNullOrWhiteSpace(value) ? null : value;
+                return PersistSceneObjectChanges(obj, false);
+            }));
+
+            return new ScrollViewer
+            {
+                VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+                HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+                Content = root
+            };
+        }
+
+        private Control CreateInspectorSectionHeader(string title)
+        {
+            return new Border
+            {
+                Background = new SolidColorBrush(Color.Parse("#222222")),
+                BorderBrush = Brushes.Transparent,
+                BorderThickness = new Thickness(0),
+                CornerRadius = new CornerRadius(0),
+                Height = InspectorTextBoxHeight,
+                Padding = new Thickness(12, 0, 12, 0),
+                HorizontalAlignment = HorizontalAlignment.Stretch,
+                Child = new TextBlock
+                {
+                    Text = title,
+                    Foreground = Brushes.White,
+                    FontWeight = FontWeight.Bold,
+                    VerticalAlignment = VerticalAlignment.Center
+                }
+            };
+        }
+
+        private Control CreatePropertyRow(string label, Control editor)
+        {
+            StackPanel panel = new StackPanel
+            {
+                Orientation = Orientation.Vertical,
+                Spacing = InspectorPropertySpacing,
+                Margin = new Thickness(12, 0, 12, 0)
+            };
+
+            panel.Children.Add(new TextBlock
+            {
+                Text = label,
+                Foreground = new SolidColorBrush(Color.Parse("#CFCFCF")),
+                VerticalAlignment = VerticalAlignment.Center
+            });
+
+            panel.Children.Add(editor);
+            return panel;
+        }
+
+        private async void OnWindowClipboardKeyDown(object? sender, KeyEventArgs e)
+        {
+            if (!HasPrimaryCommandModifier(e.KeyModifiers))
+                return;
+
+            TextBox? textBox = GetFocusedTextBox();
+            if (textBox == null)
+                return;
+
+            ClipboardCommand? command = e.Key switch
+            {
+                Key.X => ClipboardCommand.Cut,
+                Key.C => ClipboardCommand.Copy,
+                Key.V => ClipboardCommand.Paste,
+                Key.A => ClipboardCommand.SelectAll,
+                _ => null
+            };
+
+            if (command == null)
+                return;
+
+            e.Handled = true;
+
+            try
+            {
+                await ExecuteClipboardCommandAsync(textBox, command.Value);
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine(ex.ToString());
+                Debug.WriteLine(ex.GetBaseException().ToString());
+            }
+        }
+
+        private bool HasPrimaryCommandModifier(KeyModifiers modifiers)
+        {
+            return OperatingSystem.IsMacOS()
+                ? modifiers.HasFlag(KeyModifiers.Meta)
+                : modifiers.HasFlag(KeyModifiers.Control);
+        }
+
+        private TextBox? GetFocusedTextBox()
+        {
+            if (_activeInspectorTextBox != null)
+                return _activeInspectorTextBox;
+
+            TopLevel? topLevel = TopLevel.GetTopLevel(this);
+            return topLevel?.FocusManager?.GetFocusedElement() as TextBox;
+        }
+
+        private async Task<bool> TryExecuteClipboardCommandAsync(ClipboardCommand command)
+        {
+            TextBox? textBox = GetFocusedTextBox();
+            if (textBox == null)
+                return false;
+
+            return await ExecuteClipboardCommandAsync(textBox, command);
+        }
+
+        private Task<bool> ExecuteClipboardCommandAsync(TextBox textBox, ClipboardCommand command)
+        {
+            try
+            {
+                if (!textBox.IsFocused)
+                    textBox.Focus();
+
+                switch (command)
+                {
+                    case ClipboardCommand.Copy:
+                        textBox.Copy();
+                        return Task.FromResult(true);
+
+                    case ClipboardCommand.Cut:
+                        if (textBox.IsReadOnly)
+                            return Task.FromResult(false);
+
+                        textBox.Cut();
+                        return Task.FromResult(true);
+
+                    case ClipboardCommand.Paste:
+                        if (textBox.IsReadOnly)
+                            return Task.FromResult(false);
+
+                        textBox.Paste();
+                        return Task.FromResult(true);
+
+                    case ClipboardCommand.SelectAll:
+                        textBox.SelectAll();
+                        return Task.FromResult(true);
+
+                    default:
+                        return Task.FromResult(false);
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine(ex.ToString());
+                Debug.WriteLine(ex.GetBaseException().ToString());
+                return Task.FromResult(false);
+            }
+        }
+
+        private static (int Start, int End) GetTextBoxSelectionRange(TextBox textBox)
+        {
+            string text = textBox.Text ?? string.Empty;
+            int length = text.Length;
+
+            int start = Math.Clamp(Math.Min(textBox.SelectionStart, textBox.SelectionEnd), 0, length);
+            int end = Math.Clamp(Math.Max(textBox.SelectionStart, textBox.SelectionEnd), 0, length);
+
+            return (start, end);
+        }
+
+        private static void ReplaceTextBoxSelection(TextBox textBox, string replacement)
+        {
+            string text = textBox.Text ?? string.Empty;
+            (int start, int end) = GetTextBoxSelectionRange(textBox);
+
+            string newText = text.Substring(0, start) + replacement + text.Substring(end);
+            int caretIndex = start + replacement.Length;
+
+            textBox.Text = newText;
+            textBox.SelectionStart = caretIndex;
+            textBox.SelectionEnd = caretIndex;
+            textBox.CaretIndex = caretIndex;
+        }
+
+        private Control CreateInlineBoolToggle(
+            string text,
+            Func<bool> getter,
+            Func<bool, bool> apply)
+        {
+            ToggleButton button = new ToggleButton
+            {
+                Content = text,
+                IsChecked = getter(),
+                Height = InspectorTextBoxHeight,
+                MinHeight = InspectorTextBoxHeight,
+                Padding = new Thickness(5, 0),
+                CornerRadius = new CornerRadius(3),
+                HorizontalAlignment = HorizontalAlignment.Left,
+                VerticalContentAlignment = VerticalAlignment.Center
+            };
+
+            void UpdateVisual()
+            {
+                bool isChecked = button.IsChecked == true;
+                button.Background = isChecked
+                    ? new SolidColorBrush(Color.Parse("#3E6A4A"))
+                    : new SolidColorBrush(Color.Parse("#2A2A2A"));
+                button.BorderBrush = isChecked
+                    ? new SolidColorBrush(Color.Parse("#6FB083"))
+                    : new SolidColorBrush(Color.Parse("#555555"));
+                button.Foreground = Brushes.White;
+            }
+
+            button.Checked += (_, _) =>
+            {
+                if (!apply(true))
+                    button.IsChecked = getter();
+
+                UpdateVisual();
+            };
+
+            button.Unchecked += (_, _) =>
+            {
+                if (!apply(false))
+                    button.IsChecked = getter();
+
+                UpdateVisual();
+            };
+
+            UpdateVisual();
+            return button;
+        }
+
+        private Control CreateTopInlineIdentityRow(SceneObject obj)
+        {
+            Control activeToggle = CreateInlineBoolToggle("A", () => obj.Active, value =>
+            {
+                obj.Active = value;
+                return PersistSceneObjectChanges(obj, false);
+            });
+
+            Control visibleToggle = CreateInlineBoolToggle("V", () => obj.Visible, value =>
+            {
+                obj.Visible = value;
+                return PersistSceneObjectChanges(obj, false);
+            });
+
+            TextBox idBox = CreateInspectorTextBox(obj.Id);
+
+            void ResetId()
+            {
+                _isUpdatingSceneInspector = true;
+                idBox.Text = obj.Id;
+                _isUpdatingSceneInspector = false;
+            }
+
+            void CommitId()
+            {
+                if (_isUpdatingSceneInspector)
+                    return;
+
+                string value = idBox.Text ?? string.Empty;
+                if (!TryApplySceneObjectId(obj, value))
+                {
+                    ResetId();
+                    return;
+                }
+
+                ResetId();
+            }
+
+            idBox.LostFocus += (_, _) => CommitId();
+            idBox.KeyDown += (_, e) =>
+            {
+                if (e.Key == Key.Enter)
+                    CommitId();
+            };
+
+            Grid row = new Grid
+            {
+                ColumnDefinitions = new ColumnDefinitions("Auto,4,Auto,4,*"),
+                Margin = new Thickness(12, 8, 12, 0),
+                VerticalAlignment = VerticalAlignment.Center
+            };
+
+            Grid.SetColumn((Control)activeToggle, 0);
+            Grid.SetColumn((Control)visibleToggle, 2);
+            Grid.SetColumn(idBox, 4);
+
+            row.Children.Add((Control)activeToggle);
+            row.Children.Add((Control)visibleToggle);
+            row.Children.Add(idBox);
+
+            return row;
+        }
+
+        private TextBox CreateInspectorTextBox(string text, IBrush? background = null)
+        {
+            TextBox textBox = new TextBox
+            {
+                Text = text,
+                Height = InspectorTextBoxHeight,
+                MinHeight = InspectorTextBoxHeight,
+                Padding = InspectorTextBoxPadding,
+                Background = background ?? new SolidColorBrush(Color.Parse("#1A1A1A")),
+                BorderBrush = new SolidColorBrush(Color.Parse("#555555")),
+                Foreground = Brushes.White,
+                HorizontalAlignment = HorizontalAlignment.Stretch,
+                VerticalContentAlignment = VerticalAlignment.Center,
+                TextAlignment = TextAlignment.Left
+            };
+
+            textBox.GotFocus += (_, _) => _activeInspectorTextBox = textBox;
+            textBox.PointerPressed += (_, _) => _activeInspectorTextBox = textBox;
+            textBox.ContextMenu = CreateInspectorTextBoxContextMenu(textBox);
+            return textBox;
+        }
+
+        private ContextMenu CreateInspectorTextBoxContextMenu(TextBox textBox)
+        {
+            MenuItem cutItem = new MenuItem { Header = "剪切" };
+            MenuItem copyItem = new MenuItem { Header = "复制" };
+            MenuItem pasteItem = new MenuItem { Header = "粘贴" };
+            MenuItem selectAllItem = new MenuItem { Header = "全选" };
+
+            cutItem.Click += async (_, _) => await ExecuteClipboardCommandAsync(textBox, ClipboardCommand.Cut);
+            copyItem.Click += async (_, _) => await ExecuteClipboardCommandAsync(textBox, ClipboardCommand.Copy);
+            pasteItem.Click += async (_, _) => await ExecuteClipboardCommandAsync(textBox, ClipboardCommand.Paste);
+            selectAllItem.Click += async (_, _) => await ExecuteClipboardCommandAsync(textBox, ClipboardCommand.SelectAll);
+
+            return new ContextMenu
+            {
+                ItemsSource = new object[]
+                {
+            cutItem,
+            copyItem,
+            pasteItem,
+            new MenuItem { Header = "-" },
+            selectAllItem
+                }
+            };
+        }
+
+        private Control CreateTextPropertyEditor(
+    string label,
+    Func<string> getter,
+    Func<string, bool> apply,
+    bool isReadOnly = false)
+        {
+            TextBox textBox = CreateInspectorTextBox(getter());
+            textBox.IsReadOnly = isReadOnly;
+
+            void ResetText()
+            {
+                _isUpdatingSceneInspector = true;
+                textBox.Text = getter();
+                _isUpdatingSceneInspector = false;
+            }
+
+            void Commit()
+            {
+                if (_isUpdatingSceneInspector || isReadOnly)
+                    return;
+
+                string value = textBox.Text ?? string.Empty;
+
+                if (!apply(value))
+                {
+                    ResetText();
+                    return;
+                }
+
+                ResetText();
+            }
+
+            textBox.LostFocus += (_, _) => Commit();
+            textBox.KeyDown += (_, e) =>
+            {
+                if (e.Key == Key.Enter)
+                    Commit();
+            };
+
+            return CreatePropertyRow(label, textBox);
+        }
+
+        private Control CreateVector3PropertyEditor(
+            string label,
+            Func<Double3> getter,
+            Func<Double3, bool> apply)
+        {
+            Double3 current = getter();
+
+            TextBox xBox = CreateInspectorTextBox(FormatDouble(current.X), new SolidColorBrush(Color.Parse("#331111")));
+            TextBox yBox = CreateInspectorTextBox(FormatDouble(current.Y), new SolidColorBrush(Color.Parse("#113311")));
+            TextBox zBox = CreateInspectorTextBox(FormatDouble(current.Z), new SolidColorBrush(Color.Parse("#111133")));
+
+            Border CreateAxisTag(string axis, string color)
+            {
+                return new Border
+                {
+                    Width = 20,
+                    Height = InspectorTextBoxHeight,
+                    CornerRadius = new CornerRadius(3),
+                    Background = new SolidColorBrush(Color.Parse(color)),
+                    BorderBrush = new SolidColorBrush(Color.Parse("#4A4A4A")),
+                    BorderThickness = new Thickness(1),
+                    Child = new TextBlock
+                    {
+                        Text = axis,
+                        Foreground = Brushes.White,
+                        HorizontalAlignment = HorizontalAlignment.Center,
+                        VerticalAlignment = VerticalAlignment.Center,
+                        TextAlignment = TextAlignment.Center
+                    }
+                };
+            }
+
+            void ResetFromCurrent()
+            {
+                Double3 value = getter();
+
+                _isUpdatingSceneInspector = true;
+                xBox.Text = FormatDouble(value.X);
+                yBox.Text = FormatDouble(value.Y);
+                zBox.Text = FormatDouble(value.Z);
+                _isUpdatingSceneInspector = false;
+            }
+
+            void Commit()
+            {
+                if (_isUpdatingSceneInspector)
+                    return;
+
+                if (!TryParseEditorDouble(xBox.Text, out double x) ||
+                    !TryParseEditorDouble(yBox.Text, out double y) ||
+                    !TryParseEditorDouble(zBox.Text, out double z))
+                {
+                    ResetFromCurrent();
+                    return;
+                }
+
+                if (!apply(new Double3(x, y, z)))
+                {
+                    ResetFromCurrent();
+                    return;
+                }
+
+                ResetFromCurrent();
+            }
+
+            void BindCommit(TextBox box)
+            {
+                box.LostFocus += (_, _) => Commit();
+                box.KeyDown += (_, e) =>
+                {
+                    if (e.Key == Key.Enter)
+                        Commit();
+                };
+            }
+
+            BindCommit(xBox);
+            BindCommit(yBox);
+            BindCommit(zBox);
+
+            Grid editorGrid = new Grid
+            {
+                ColumnDefinitions = new ColumnDefinitions("Auto,*,4,Auto,*,4,Auto,*"),
+                VerticalAlignment = VerticalAlignment.Center
+            };
+
+            Border xTag = CreateAxisTag("X", "#331111");
+            Border yTag = CreateAxisTag("Y", "#113311");
+            Border zTag = CreateAxisTag("Z", "#111133");
+
+            Grid.SetColumn(xTag, 0);
+            Grid.SetColumn(xBox, 1);
+            Grid.SetColumn(yTag, 3);
+            Grid.SetColumn(yBox, 4);
+            Grid.SetColumn(zTag, 6);
+            Grid.SetColumn(zBox, 7);
+
+            editorGrid.Children.Add(xTag);
+            editorGrid.Children.Add(xBox);
+            editorGrid.Children.Add(yTag);
+            editorGrid.Children.Add(yBox);
+            editorGrid.Children.Add(zTag);
+            editorGrid.Children.Add(zBox);
+
+            Grid.SetColumn(editorGrid.Children[0], 0);
+            Grid.SetColumn(editorGrid.Children[1], 1);
+            Grid.SetColumn(editorGrid.Children[2], 3);
+            Grid.SetColumn(editorGrid.Children[3], 4);
+            Grid.SetColumn(editorGrid.Children[4], 6);
+            Grid.SetColumn(editorGrid.Children[5], 7);
+
+            return CreatePropertyRow(label, editorGrid);
+        }
+
+        private string FormatDouble(double value)
+        {
+            return value.ToString("G17", CultureInfo.InvariantCulture);
+        }
+
+        private bool TryParseEditorDouble(string? text, out double value)
+        {
+            string raw = (text ?? string.Empty).Trim();
+
+            if (double.TryParse(raw, NumberStyles.Float | NumberStyles.AllowThousands, CultureInfo.InvariantCulture, out value))
+                return true;
+
+            if (double.TryParse(raw, NumberStyles.Float | NumberStyles.AllowThousands, CultureInfo.CurrentCulture, out value))
+                return true;
+
+            return false;
+        }
+
+        private List<string> SplitCommaSeparatedList(string text)
+        {
+            return (text ?? string.Empty)
+                .Split(',', StringSplitOptions.RemoveEmptyEntries)
+                .Select(x => x.Trim())
+                .Where(x => !string.IsNullOrWhiteSpace(x))
+                .ToList();
+        }
+
+        private bool TryApplySceneObjectId(SceneObject target, string value)
+        {
+            if (_currentTreeScene == null)
+                return false;
+
+            string newId = (value ?? string.Empty).Trim();
+            if (string.IsNullOrWhiteSpace(newId))
+                return false;
+
+            if (_currentTreeScene.Objects.Any(o => !ReferenceEquals(o, target) && string.Equals(o.Id, newId, StringComparison.Ordinal)))
+                return false;
+
+            string oldId = target.Id;
+
+            if (string.Equals(oldId, newId, StringComparison.Ordinal))
+                return true;
+
+            target.Id = newId;
+
+            foreach (SceneObject obj in _currentTreeScene.Objects)
+            {
+                if (ReferenceEquals(obj, target))
+                    continue;
+
+                if (string.Equals(obj.Transform?.ParentId, oldId, StringComparison.Ordinal))
+                    obj.Transform!.ParentId = newId;
+            }
+
+            return PersistSceneObjectChanges(target, true);
+        }
+
+        private bool TryApplyParentId(SceneObject target, string value)
+        {
+            if (_currentTreeScene == null)
+                return false;
+
+            string? parentId = string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+
+            if (string.Equals(parentId, target.Id, StringComparison.Ordinal))
+                return false;
+
+            if (!string.IsNullOrWhiteSpace(parentId))
+            {
+                SceneObject? parent = _currentTreeScene.Objects.FirstOrDefault(
+                    o => string.Equals(o.Id, parentId, StringComparison.Ordinal));
+
+                if (parent == null)
+                    return false;
+
+                if (WouldCreateParentCycle(target, parentId))
+                    return false;
+            }
+
+            target.Transform ??= CloneTransform(null);
+            target.Transform.ParentId = parentId;
+
+            return PersistSceneObjectChanges(target, true);
+        }
+
+        private bool WouldCreateParentCycle(SceneObject target, string newParentId)
+        {
+            if (_currentTreeScene == null)
+                return true;
+
+            string? currentId = newParentId;
+
+            while (!string.IsNullOrWhiteSpace(currentId))
+            {
+                if (string.Equals(currentId, target.Id, StringComparison.Ordinal))
+                    return true;
+
+                SceneObject? current = _currentTreeScene.Objects.FirstOrDefault(
+                    o => string.Equals(o.Id, currentId, StringComparison.Ordinal));
+
+                currentId = current?.Transform?.ParentId;
+            }
+
+            return false;
         }
 
         private Control CreateTopMenuBar()
@@ -710,13 +1387,28 @@ namespace LimitlessSquareEngine.Editor
 
         private IEnumerable<MenuItem> CreateEditMenuItems()
         {
+            MenuItem undoItem = new MenuItem { Header = "撤销" };
+            MenuItem redoItem = new MenuItem { Header = "重做" };
+            MenuItem cutItem = new MenuItem { Header = "剪切" };
+            MenuItem copyItem = new MenuItem { Header = "复制" };
+            MenuItem pasteItem = new MenuItem { Header = "粘贴" };
+            MenuItem selectAllItem = new MenuItem { Header = "全选" };
+
+            cutItem.Click += async (_, _) => await TryExecuteClipboardCommandAsync(ClipboardCommand.Cut);
+            copyItem.Click += async (_, _) => await TryExecuteClipboardCommandAsync(ClipboardCommand.Copy);
+            pasteItem.Click += async (_, _) => await TryExecuteClipboardCommandAsync(ClipboardCommand.Paste);
+            selectAllItem.Click += async (_, _) => await TryExecuteClipboardCommandAsync(ClipboardCommand.SelectAll);
+
             return new[]
             {
-                new MenuItem { Header = "撤销" },
-                new MenuItem { Header = "重做" },
+                undoItem,
+                redoItem,
                 new MenuItem { Header = "-" },
-                new MenuItem { Header = "复制" },
-                new MenuItem { Header = "粘贴" }
+                cutItem,
+                copyItem,
+                pasteItem,
+                new MenuItem { Header = "-" },
+                selectAllItem
             };
         }
 
@@ -838,9 +1530,11 @@ namespace LimitlessSquareEngine.Editor
         {
             TreeViewItem item = new TreeViewItem
             {
-                Header = GetDirectoryDisplayName(directoryPath, isRoot),
+                Header = CreateCompactTreeHeader(GetDirectoryDisplayName(directoryPath, isRoot)),
                 Tag = directoryPath,
-                IsExpanded = isRoot
+                IsExpanded = isRoot,
+                MinHeight = InspectorTextBoxHeight,
+                Padding = new Thickness(0)
             };
 
             string[] directories;
@@ -882,8 +1576,10 @@ namespace LimitlessSquareEngine.Editor
         {
             return new TreeViewItem
             {
-                Header = Path.GetFileName(filePath),
-                Tag = filePath
+                Header = CreateCompactTreeHeader(Path.GetFileName(filePath)),
+                Tag = filePath,
+                MinHeight = InspectorTextBoxHeight,
+                Padding = new Thickness(0)
             };
         }
 
@@ -978,10 +1674,10 @@ namespace LimitlessSquareEngine.Editor
                 Background = Brushes.Transparent,
                 BorderBrush = Brushes.Transparent,
                 BorderThickness = new Thickness(1),
-                CornerRadius = new CornerRadius(4),
+                CornerRadius = new CornerRadius(3),
                 Child = new StackPanel
                 {
-                    Spacing = 8,
+                    Spacing = 4,
                     HorizontalAlignment = HorizontalAlignment.Center,
                     Children =
                     {
@@ -1355,6 +2051,12 @@ namespace LimitlessSquareEngine.Editor
                 string assetRootPath = ResolveSceneAssetRoot(filePath);
                 EditorSceneOpenResult openResult = PrepareEditorSceneCopies(filePath, assetRootPath);
 
+                _currentTreeCopyPath = openResult.TreeCopyPath;
+                _currentPreviewScenePath = openResult.PreviewScenePath;
+                _currentTreeScene = openResult.TreeScene;
+                _currentPreviewScene = openResult.PreviewScene;
+                _selectedSceneObject = null;
+
                 LeftDockSlot.Content = BuildSceneTreeControl(openResult.TreeScene);
 
                 EditorHostBridge.SetAssetRootAndReloadAssets(assetRootPath);
@@ -1364,8 +2066,10 @@ namespace LimitlessSquareEngine.Editor
 
                 return true;
             }
-            catch
+            catch (Exception ex)
             {
+                Debug.WriteLine(ex.ToString());
+                Debug.WriteLine(ex.GetBaseException().ToString());
                 return false;
             }
         }
@@ -1467,6 +2171,97 @@ namespace LimitlessSquareEngine.Editor
         {
             string json = JsonSerializer.Serialize(scene, SceneJsonWriteOptions);
             File.WriteAllText(filePath, json);
+        }
+
+        private bool PersistSceneObjectChanges(SceneObject target, bool refreshSceneTree)
+        {
+            if (_currentTreeScene == null ||
+                string.IsNullOrWhiteSpace(_currentTreeCopyPath) ||
+                string.IsNullOrWhiteSpace(_currentPreviewScenePath))
+                return false;
+
+            SaveSceneData(_currentTreeCopyPath, _currentTreeScene);
+
+            _currentPreviewScene = BuildPreviewScene(_currentTreeScene);
+            SaveSceneData(_currentPreviewScenePath, _currentPreviewScene);
+
+            EditorHostBridge.ReloadSceneById(EditorPreviewSceneId);
+            StartSceneOpenForceRefresh();
+
+            if (refreshSceneTree)
+            {
+                Dispatcher.UIThread.Post(() =>
+                {
+                    if (_currentTreeScene == null)
+                        return;
+
+                    _isProgrammaticSceneTreeSelection = true;
+                    try
+                    {
+                        LeftDockSlot.Content = BuildSceneTreeControl(_currentTreeScene);
+                        TrySelectSceneObjectInTree(target);
+                        _selectedSceneObject = target;
+                    }
+                    finally
+                    {
+                        _isProgrammaticSceneTreeSelection = false;
+                    }
+                }, DispatcherPriority.Background);
+            }
+
+            return true;
+        }
+
+        private bool TrySelectSceneObjectInTree(SceneObject target)
+        {
+            if (LeftDockSlot.Content is not TreeView treeView)
+                return false;
+
+            if (treeView.ItemsSource is not System.Collections.IEnumerable items)
+                return false;
+
+            ClearSceneTreeSelection(items);
+            return TrySelectSceneObjectInTree(items, target);
+        }
+
+        private void ClearSceneTreeSelection(System.Collections.IEnumerable items)
+        {
+            foreach (object? itemObject in items)
+            {
+                if (itemObject is not TreeViewItem item)
+                    continue;
+
+                item.IsSelected = false;
+
+                if (item.ItemsSource is System.Collections.IEnumerable childItems)
+                    ClearSceneTreeSelection(childItems);
+            }
+        }
+
+        private bool TrySelectSceneObjectInTree(System.Collections.IEnumerable items, SceneObject target)
+        {
+            foreach (object? itemObject in items)
+            {
+                if (itemObject is not TreeViewItem item)
+                    continue;
+
+                if (ReferenceEquals(item.Tag, target))
+                {
+                    item.IsExpanded = true;
+                    item.IsSelected = true;
+                    item.BringIntoView();
+                    return true;
+                }
+
+                if (item.ItemsSource is System.Collections.IEnumerable childItems &&
+                    TrySelectSceneObjectInTree(childItems, target))
+                {
+                    item.IsExpanded = true;
+                    return true;
+                }
+            }
+
+            return false;
         }
 
         private SceneData BuildPreviewScene(SceneData sourceScene)
@@ -1708,11 +2503,6 @@ namespace LimitlessSquareEngine.Editor
                 }
             }
 
-            roots.Sort(CompareSceneObjects);
-
-            foreach (List<SceneObject> children in childrenMap.Values)
-                children.Sort(CompareSceneObjects);
-
             TreeView treeView = new TreeView
             {
                 ItemsSource = roots.Select(root => CreateSceneTreeItem(root, childrenMap)).Cast<object>().ToList()
@@ -1728,13 +2518,18 @@ namespace LimitlessSquareEngine.Editor
             SceneObject obj,
             Dictionary<string, List<SceneObject>> childrenMap)
         {
-            string title = string.IsNullOrWhiteSpace(obj.Name) ? obj.Id : obj.Name;
-            string type = string.IsNullOrWhiteSpace(obj.Type) ? "Object" : obj.Type;
+            string nameText = string.IsNullOrWhiteSpace(obj.Name) ? string.Empty : obj.Name;
+            string idText = string.IsNullOrWhiteSpace(obj.Id) ? "Unnamed" : obj.Id;
+            string headerText = string.IsNullOrWhiteSpace(nameText)
+                ? idText
+                : $"{nameText} [{idText}]";
 
             TreeViewItem item = new TreeViewItem
             {
-                Header = $"{title} [{type}]",
-                Tag = obj
+                Header = CreateCompactTreeHeader(headerText),
+                Tag = obj,
+                MinHeight = InspectorTextBoxHeight,
+                Padding = new Thickness(0)
             };
 
             if (childrenMap.TryGetValue(obj.Id, out List<SceneObject>? children) && children.Count > 0)
@@ -1745,23 +2540,29 @@ namespace LimitlessSquareEngine.Editor
 
         private void OnSceneTreeSelectionChanged(object? sender, SelectionChangedEventArgs e)
         {
-            if (sender is not TreeView treeView)
+            if (_isProgrammaticSceneTreeSelection)
                 return;
 
-            if (treeView.SelectedItem is not TreeViewItem item)
-                return;
+            try
+            {
+                if (sender is not TreeView treeView)
+                    return;
 
-            if (item.Tag is not SceneObject obj)
-                return;
+                if (treeView.SelectedItem is not TreeViewItem item)
+                    return;
 
-            ShowSceneObjectDetailsInViewer(obj);
-        }
+                if (item.Tag is not SceneObject obj)
+                    return;
 
-        private int CompareSceneObjects(SceneObject left, SceneObject right)
-        {
-            string leftKey = string.IsNullOrWhiteSpace(left.Name) ? left.Id : left.Name;
-            string rightKey = string.IsNullOrWhiteSpace(right.Name) ? right.Id : right.Name;
-            return string.Compare(leftKey, rightKey, StringComparison.OrdinalIgnoreCase);
+                _selectedSceneObject = obj;
+                ShowSceneObjectInspector(obj);
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine(ex.ToString());
+                Debug.WriteLine(ex.GetBaseException().ToString());
+                throw;
+            }
         }
 
         private string BuildTreeCopyPath(string treeCopyDirectory, string originalPath)

@@ -1873,6 +1873,7 @@ namespace LimitlessSquareEngine
         /// <summary>
         /// 主线程
         /// </summary>
+        [STAThread]
         static void Main()
         {
             Console.WriteLine("////////////////////////////////////////////////////");
