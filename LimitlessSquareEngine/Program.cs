@@ -736,6 +736,8 @@ namespace LimitlessSquareEngine
                 {
                     SetAssetRootAndReloadAssetsCore(assetRootPath);
                 }),
+                (sceneId, objectId, value) => Scene.SetLocalPosition(sceneId, objectId, value),
+                (sceneId, objectId, value) => Scene.SetLocalRotation(sceneId, objectId, value),
                 ConsumeLatestFrameCore);
         }
 

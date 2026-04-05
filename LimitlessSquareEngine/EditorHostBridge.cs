@@ -1,4 +1,5 @@
-﻿using System;
+﻿using LimitlessSquareEngine.Engine;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
@@ -17,6 +18,8 @@ namespace LimitlessSquareEngine
         private static Action<string>? _reloadSceneById;
         private static Action<string>? _removeSceneById;
         private static Action<string>? _setAssetRootAndReloadAssets;
+        private static Action<string, string, Double3>? _setSceneObjectLocalPosition;
+        private static Action<string, string, Double3>? _setSceneObjectLocalRotation;
         private static Func<EditorRenderedFrame?>? _consumeLatestFrame;
 
         internal static void Bind(
@@ -29,6 +32,8 @@ namespace LimitlessSquareEngine
             Action<string> reloadSceneById,
             Action<string> removeSceneById,
             Action<string> setAssetRootAndReloadAssets,
+            Action<string, string, Double3> setSceneObjectLocalPosition,
+            Action<string, string, Double3> setSceneObjectLocalRotation,
             Func<EditorRenderedFrame?> consumeLatestFrame)
         {
             _bootstrapInfoProvider = bootstrapInfoProvider;
@@ -40,6 +45,8 @@ namespace LimitlessSquareEngine
             _reloadSceneById = reloadSceneById;
             _removeSceneById = removeSceneById;
             _setAssetRootAndReloadAssets = setAssetRootAndReloadAssets;
+            _setSceneObjectLocalPosition = setSceneObjectLocalPosition;
+            _setSceneObjectLocalRotation = setSceneObjectLocalRotation;
             _consumeLatestFrame = consumeLatestFrame;
         }
 
@@ -54,7 +61,37 @@ namespace LimitlessSquareEngine
             _reloadSceneById = null;
             _removeSceneById = null;
             _setAssetRootAndReloadAssets = null;
+            _setSceneObjectLocalPosition = null;
+            _setSceneObjectLocalRotation = null;
             _consumeLatestFrame = null;
+        }
+
+        public static void SetSceneObjectLocalPosition(string sceneId, string objectId, Double3 value)
+        {
+            if (string.IsNullOrWhiteSpace(sceneId))
+                throw new ArgumentException("Scene ID cannot be null or empty.", nameof(sceneId));
+
+            if (string.IsNullOrWhiteSpace(objectId))
+                throw new ArgumentException("Object ID cannot be null or empty.", nameof(objectId));
+
+            if (_setSceneObjectLocalPosition == null)
+                throw new InvalidOperationException("Editor host bridge is not bound.");
+
+            _setSceneObjectLocalPosition(sceneId, objectId, value);
+        }
+
+        public static void SetSceneObjectLocalRotation(string sceneId, string objectId, Double3 value)
+        {
+            if (string.IsNullOrWhiteSpace(sceneId))
+                throw new ArgumentException("Scene ID cannot be null or empty.", nameof(sceneId));
+
+            if (string.IsNullOrWhiteSpace(objectId))
+                throw new ArgumentException("Object ID cannot be null or empty.", nameof(objectId));
+
+            if (_setSceneObjectLocalRotation == null)
+                throw new InvalidOperationException("Editor host bridge is not bound.");
+
+            _setSceneObjectLocalRotation(sceneId, objectId, value);
         }
 
         public static EditorRenderedFrame? ConsumeLatestFrame()

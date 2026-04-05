@@ -83,6 +83,7 @@ namespace LimitlessSquareEngine.Editor
             {
                 if (EditorHostBridge.IsRenderWindowAlive)
                 {
+                    window.TickSceneHostNavigation();
                     EditorHostBridge.RunRenderFrame();
                     window.PresentLatestFrame();
                 }

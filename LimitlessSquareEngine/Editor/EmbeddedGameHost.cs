@@ -1,5 +1,6 @@
 ﻿using Avalonia;
 using Avalonia.Controls;
+using Avalonia.Input;
 using Avalonia.Media;
 using Avalonia.Media.Imaging;
 using Avalonia.Platform;
@@ -19,12 +20,14 @@ namespace LimitlessSquareEngine.Editor
         {
             ClipToBounds = true;
             Background = Brushes.Black;
+            Focusable = true;
 
             _image = new Image
             {
                 Stretch = Stretch.Fill,
                 HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Stretch,
-                VerticalAlignment = Avalonia.Layout.VerticalAlignment.Stretch
+                VerticalAlignment = Avalonia.Layout.VerticalAlignment.Stretch,
+                IsHitTestVisible = false
             };
 
             Child = _image;
@@ -75,6 +78,8 @@ namespace LimitlessSquareEngine.Editor
             }
 
             _image.Source = _bitmap;
+            _image.InvalidateVisual();
+            InvalidateVisual();
         }
 
         private void EnsureBitmap(int width, int height)

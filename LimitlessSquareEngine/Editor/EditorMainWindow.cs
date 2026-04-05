@@ -49,12 +49,28 @@ namespace LimitlessSquareEngine.Editor
         private bool _isUpdatingSceneInspector;
         private bool _isProgrammaticSceneTreeSelection;
         private TextBox? _activeInspectorTextBox;
+        private string? _currentPreviewCameraId;
+        private string? _previewCameraEditorId;
+        private string? _previewCameraEditorRuntimeName;
+        private Double3 _previewCameraEditorPosition = Double3.Zero;
+        private Double3 _previewCameraEditorRotation = Double3.Zero;
+        private double _previewCameraEditorViewYawDegrees;
+        private double _previewCameraEditorViewPitchDegrees;
+        private string _previewCameraEditorData = "";
+        private readonly HashSet<Key> _sceneHostNavigationKeys = new HashSet<Key>();
+        private DateTime _sceneHostNavigationLastTickUtc;
+        private bool _isSceneHostRightDragging;
+        private Point _sceneHostLastPointerPosition;
+        private IPointer? _sceneHostCapturedPointer;
 
         private const string EditorPreviewSceneId = "__editor_preview_scene__";
         private const string EditorPreviewDirectoryName = "EditorPreview";
         private const string EditorTreeCopyDirectoryName = "EditorTreeCopies";
         private const string EditorPreviewSceneFileName = EditorPreviewSceneId + ".json";
-        private const string PreviewCameraIdBase = "__editor_preview_camera__";
+        private const string PreviewCameraIdPrefix = "__lse_editor_preview_camera__";
+        private const string PreviewCameraNamePrefix = "__lse_editor_preview_camera_name__";
+        private const double SceneHostMoveSpeed = 6.0;
+        private const double SceneHostLookSensitivity = 0.15;
 
         private const double InspectorTextBoxHeight = 22;
         private static readonly Thickness InspectorTextBoxPadding = new Thickness(6, 1, 6, 1);
@@ -98,6 +114,13 @@ namespace LimitlessSquareEngine.Editor
 
             _sceneHost = new EmbeddedGameHost();
             _sceneHost.RenderSurfaceResized += OnSceneHostResized;
+            _sceneHost.PointerPressed += OnSceneHostPointerPressed;
+            _sceneHost.PointerReleased += OnSceneHostPointerReleased;
+            _sceneHost.PointerMoved += OnSceneHostPointerMoved;
+            _sceneHost.PointerCaptureLost += OnSceneHostPointerCaptureLost;
+            _sceneHost.LostFocus += OnSceneHostLostFocus;
+            _sceneHost.KeyDown += OnSceneHostKeyDown;
+            _sceneHost.KeyUp += OnSceneHostKeyUp;
 
             Opened += (_, _) =>
             {
@@ -107,7 +130,11 @@ namespace LimitlessSquareEngine.Editor
                 }, DispatcherPriority.Render);
             };
 
-            // 先这么搞
+            Closed += (_, _) =>
+            {
+                ResetSceneHostNavigationState();
+            };
+
             LeftDockSlot.Content = CreatePlaceholder("未加载场景或画布");
             RightDockSlot.Content = CreatePlaceholder("未选中文件或节点");
             ProjectFilesSlot.Content = CreatePlaceholder("未选择项目文件夹");
@@ -234,6 +261,359 @@ namespace LimitlessSquareEngine.Editor
                 return;
 
             _sceneHost.PresentFrame(frame);
+        }
+
+        private void RenderSceneHostFrameIfPossible()
+        {
+            if (!EditorHostBridge.IsRenderWindowAlive)
+                return;
+
+            EditorHostBridge.RunRenderFrame();
+            PresentLatestFrame();
+            _sceneHost.InvalidateVisual();
+        }
+
+        public void TickSceneHostNavigation()
+        {
+            DateTime now = DateTime.UtcNow;
+            double deltaSeconds = (now - _sceneHostNavigationLastTickUtc).TotalSeconds;
+            _sceneHostNavigationLastTickUtc = now;
+
+            if (!_isSceneHostRightDragging)
+                return;
+
+            if (deltaSeconds <= 0.0)
+                return;
+
+            if (string.IsNullOrWhiteSpace(_currentPreviewCameraId))
+                return;
+
+            Double3 forward = GetPreviewCameraForwardFromEditorState();
+            Double3 right = GetPreviewCameraRightFromEditorState();
+            Double3 move = Double3.Zero;
+
+            if (_sceneHostNavigationKeys.Contains(Key.W))
+                move += forward;
+
+            if (_sceneHostNavigationKeys.Contains(Key.S))
+                move -= forward;
+
+            if (_sceneHostNavigationKeys.Contains(Key.D))
+                move += right;
+
+            if (_sceneHostNavigationKeys.Contains(Key.A))
+                move -= right;
+
+            if (!TryNormalizeDouble3(move, out Double3 normalized))
+                return;
+
+            Double3 positionDelta = normalized * (SceneHostMoveSpeed * deltaSeconds);
+            _previewCameraEditorPosition += positionDelta;
+
+            ApplyPreviewCameraEditorStateToRuntime();
+        }
+
+        private void OnSceneHostPointerPressed(object? sender, PointerPressedEventArgs e)
+        {
+            PointerPoint point = e.GetCurrentPoint(_sceneHost);
+
+            if (point.Properties.PointerUpdateKind != PointerUpdateKind.RightButtonPressed)
+                return;
+
+            if (string.IsNullOrWhiteSpace(_currentPreviewCameraId))
+                return;
+
+            _sceneHost.Focus();
+            _isSceneHostRightDragging = true;
+            _sceneHostLastPointerPosition = point.Position;
+            _sceneHostNavigationLastTickUtc = DateTime.UtcNow;
+            _sceneHostCapturedPointer = e.Pointer;
+            e.Pointer.Capture(_sceneHost);
+            e.Handled = true;
+        }
+
+        private void OnSceneHostPointerReleased(object? sender, PointerReleasedEventArgs e)
+        {
+            PointerPoint point = e.GetCurrentPoint(_sceneHost);
+
+            if (point.Properties.PointerUpdateKind != PointerUpdateKind.RightButtonReleased)
+                return;
+
+            ResetSceneHostNavigationState();
+            RenderSceneHostFrameIfPossible();
+            e.Handled = true;
+        }
+
+        private void OnSceneHostPointerMoved(object? sender, PointerEventArgs e)
+        {
+            if (!_isSceneHostRightDragging)
+                return;
+
+            if (string.IsNullOrWhiteSpace(_currentPreviewCameraId))
+                return;
+
+            Point currentPosition = e.GetPosition(_sceneHost);
+            Vector delta = currentPosition - _sceneHostLastPointerPosition;
+            _sceneHostLastPointerPosition = currentPosition;
+
+            double yawDelta = delta.X * SceneHostLookSensitivity;
+            double pitchDelta = delta.Y * SceneHostLookSensitivity;
+            bool changed = false;
+
+            if (yawDelta != 0.0)
+            {
+                _previewCameraEditorViewYawDegrees += yawDelta;
+                changed = true;
+            }
+
+            if (pitchDelta != 0.0)
+            {
+                _previewCameraEditorViewPitchDegrees = Math.Clamp(
+                    _previewCameraEditorViewPitchDegrees + pitchDelta,
+                    -89.0,
+                    89.0);
+
+                changed = true;
+            }
+
+            if (changed)
+            {
+                UpdatePreviewCameraEditorRotationFromViewAngles();
+                ApplyPreviewCameraEditorStateToRuntime();
+            }
+
+            RenderSceneHostFrameIfPossible();
+
+            e.Handled = true;
+        }
+
+        private void OnSceneHostPointerCaptureLost(object? sender, PointerCaptureLostEventArgs e)
+        {
+            ResetSceneHostNavigationState();
+        }
+
+        private void OnSceneHostLostFocus(object? sender, RoutedEventArgs e)
+        {
+            ResetSceneHostNavigationState();
+        }
+
+        private void OnSceneHostKeyDown(object? sender, KeyEventArgs e)
+        {
+            if (!IsSceneHostNavigationKey(e.Key))
+                return;
+
+            _sceneHostNavigationKeys.Add(e.Key);
+
+            if (_isSceneHostRightDragging)
+                e.Handled = true;
+        }
+
+        private void OnSceneHostKeyUp(object? sender, KeyEventArgs e)
+        {
+            if (!IsSceneHostNavigationKey(e.Key))
+                return;
+
+            _sceneHostNavigationKeys.Remove(e.Key);
+
+            if (_isSceneHostRightDragging)
+                e.Handled = true;
+        }
+
+        private bool IsSceneHostNavigationKey(Key key)
+        {
+            return key == Key.W || key == Key.A || key == Key.S || key == Key.D;
+        }
+
+        private void ResetSceneHostNavigationState()
+        {
+            _isSceneHostRightDragging = false;
+            _sceneHostNavigationKeys.Clear();
+            _sceneHostNavigationLastTickUtc = DateTime.UtcNow;
+
+            if (_sceneHostCapturedPointer != null)
+            {
+                _sceneHostCapturedPointer.Capture(null);
+                _sceneHostCapturedPointer = null;
+            }
+        }
+
+        private bool TryNormalizeDouble3(Double3 value, out Double3 normalized)
+        {
+            double length = Math.Sqrt(value.X * value.X + value.Y * value.Y + value.Z * value.Z);
+
+            if (length <= 1e-12)
+            {
+                normalized = Double3.Zero;
+                return false;
+            }
+
+            normalized = value / length;
+            return true;
+        }
+
+        private void RefreshCurrentPreviewCameraId()
+        {
+            _currentPreviewCameraId = _previewCameraEditorId;
+        }
+
+        private void InitializePreviewCameraEditorState(SceneData sourceScene)
+        {
+            SceneObject? sourceCamera = sourceScene.Objects.FirstOrDefault(
+                o => string.Equals(o.Type, "Camera", StringComparison.Ordinal));
+
+            _previewCameraEditorId = CreateUniquePreviewCameraId(sourceScene);
+            _previewCameraEditorRuntimeName = CreateUniquePreviewCameraName(sourceScene);
+
+            if (sourceCamera?.Transform != null)
+            {
+                _previewCameraEditorPosition = sourceCamera.Transform.LocalPosition;
+                _previewCameraEditorViewPitchDegrees = sourceCamera.Transform.LocalRotation.X;
+                _previewCameraEditorViewYawDegrees = sourceCamera.Transform.LocalRotation.Y;
+            }
+            else
+            {
+                _previewCameraEditorPosition = new Double3(0.0, 0.0, 5.0);
+                _previewCameraEditorViewPitchDegrees = 0.0;
+                _previewCameraEditorViewYawDegrees = 180.0;
+            }
+
+            UpdatePreviewCameraEditorRotationFromViewAngles();
+            _previewCameraEditorData = BuildPreviewCameraData(sourceCamera?.Data, true);
+        }
+
+        private void EnsurePreviewCameraEditorState(SceneData sourceScene)
+        {
+            if (!string.IsNullOrWhiteSpace(_previewCameraEditorId) &&
+                !string.IsNullOrWhiteSpace(_previewCameraEditorRuntimeName))
+                return;
+
+            InitializePreviewCameraEditorState(sourceScene);
+        }
+
+        private string CreateUniquePreviewCameraId(SceneData sourceScene)
+        {
+            HashSet<string> ids = new HashSet<string>(
+                sourceScene.Objects
+                    .Where(o => !string.IsNullOrWhiteSpace(o.Id))
+                    .Select(o => o.Id),
+                StringComparer.Ordinal);
+
+            while (true)
+            {
+                string candidate = PreviewCameraIdPrefix + Guid.NewGuid().ToString("N");
+                if (!ids.Contains(candidate))
+                    return candidate;
+            }
+        }
+
+        private string CreateUniquePreviewCameraName(SceneData sourceScene)
+        {
+            HashSet<string> names = new HashSet<string>(
+                sourceScene.Objects
+                    .Where(o => !string.IsNullOrWhiteSpace(o.Name))
+                    .Select(o => o.Name!),
+                StringComparer.Ordinal);
+
+            while (true)
+            {
+                string candidate = PreviewCameraNamePrefix + Guid.NewGuid().ToString("N");
+                if (!names.Contains(candidate))
+                    return candidate;
+            }
+        }
+
+        private SceneTransform CreatePreviewCameraTransform()
+        {
+            return new SceneTransform
+            {
+                ParentId = null,
+                LocalPosition = _previewCameraEditorPosition,
+                LocalRotation = _previewCameraEditorRotation,
+                LocalScale = Double3.One
+            };
+        }
+
+        private void ApplyPreviewCameraEditorStateToRuntime()
+        {
+            if (string.IsNullOrWhiteSpace(_currentPreviewCameraId))
+                return;
+
+            EditorHostBridge.SetSceneObjectLocalPosition(
+                EditorPreviewSceneId,
+                _currentPreviewCameraId,
+                _previewCameraEditorPosition);
+
+            EditorHostBridge.SetSceneObjectLocalRotation(
+                EditorPreviewSceneId,
+                _currentPreviewCameraId,
+                _previewCameraEditorRotation);
+        }
+
+        private Double3 GetPreviewCameraForwardFromEditorState()
+        {
+            double pitchRadians = _previewCameraEditorViewPitchDegrees * Math.PI / 180.0;
+            double yawRadians = _previewCameraEditorViewYawDegrees * Math.PI / 180.0;
+
+            Double3 forward = new Double3(
+                Math.Sin(yawRadians) * Math.Cos(pitchRadians),
+                -Math.Sin(pitchRadians),
+                Math.Cos(yawRadians) * Math.Cos(pitchRadians));
+
+            if (!TryNormalizeDouble3(forward, out Double3 normalized))
+                return Double3.Zero;
+
+            return normalized;
+        }
+
+        private Double3 GetPreviewCameraRightFromEditorState()
+        {
+            Double3 forward = GetPreviewCameraForwardFromEditorState();
+            Double3 right = CrossDouble3(new Double3(0.0, 1.0, 0.0), forward);
+
+            if (!TryNormalizeDouble3(right, out Double3 normalized))
+                return Double3.Zero;
+
+            return normalized;
+        }
+
+        private void UpdatePreviewCameraEditorRotationFromViewAngles()
+        {
+            double pitchRadians = _previewCameraEditorViewPitchDegrees * Math.PI / 180.0;
+            double yawRadians = _previewCameraEditorViewYawDegrees * Math.PI / 180.0;
+
+            double m13 = Math.Sin(yawRadians) * Math.Cos(pitchRadians);
+            double m23 = -Math.Sin(pitchRadians);
+            double m33 = Math.Cos(yawRadians) * Math.Cos(pitchRadians);
+            double m12 = Math.Sin(yawRadians) * Math.Sin(pitchRadians);
+            double m11 = Math.Cos(yawRadians);
+
+            double engineY = Math.Asin(ClampUnit(m13));
+            double engineX = Math.Atan2(-m23, m33);
+            double engineZ = Math.Atan2(-m12, m11);
+
+            _previewCameraEditorRotation = new Double3(
+                engineX * 180.0 / Math.PI,
+                engineY * 180.0 / Math.PI,
+                engineZ * 180.0 / Math.PI);
+        }
+
+        private double ClampUnit(double value)
+        {
+            if (value < -1.0)
+                return -1.0;
+
+            if (value > 1.0)
+                return 1.0;
+
+            return value;
+        }
+
+        private Double3 CrossDouble3(Double3 left, Double3 right)
+        {
+            return new Double3(
+                left.Y * right.Z - left.Z * right.Y,
+                left.Z * right.X - left.X * right.Z,
+                left.X * right.Y - left.Y * right.X);
         }
 
         private Control BuildLayout()
@@ -468,7 +848,7 @@ namespace LimitlessSquareEngine.Editor
                     Text = title,
                     VerticalAlignment = VerticalAlignment.Center,
                     Foreground = Brushes.White,
-                    FontSize = 12
+                    FontWeight = FontWeight.Bold
                 }
             };
 
@@ -663,7 +1043,7 @@ namespace LimitlessSquareEngine.Editor
                 return TryApplyParentId(obj, value);
             }));
 
-            root.Children.Add(CreateInspectorSectionHeader("Transform"));
+            root.Children.Add(CreateInspectorSectionHeader("变换"));
             root.Children.Add(CreateVector3PropertyEditor(
                 "位置",
                 () => obj.Transform!.LocalPosition,
@@ -689,7 +1069,7 @@ namespace LimitlessSquareEngine.Editor
                     return PersistSceneObjectChanges(obj, false);
                 }));
 
-            root.Children.Add(CreateInspectorSectionHeader("其它"));
+            root.Children.Add(CreateInspectorSectionHeader("参数"));
             root.Children.Add(CreateTextPropertyEditor("Controller", () => obj.Controller ?? "", value =>
             {
                 obj.Controller = string.IsNullOrWhiteSpace(value) ? null : value;
@@ -745,7 +1125,6 @@ namespace LimitlessSquareEngine.Editor
                 {
                     Text = title,
                     Foreground = Brushes.White,
-                    FontWeight = FontWeight.Bold,
                     VerticalAlignment = VerticalAlignment.Center
                 }
             };
@@ -1106,9 +1485,9 @@ namespace LimitlessSquareEngine.Editor
         {
             Double3 current = getter();
 
-            TextBox xBox = CreateInspectorTextBox(FormatDouble(current.X), new SolidColorBrush(Color.Parse("#331111")));
-            TextBox yBox = CreateInspectorTextBox(FormatDouble(current.Y), new SolidColorBrush(Color.Parse("#113311")));
-            TextBox zBox = CreateInspectorTextBox(FormatDouble(current.Z), new SolidColorBrush(Color.Parse("#111133")));
+            TextBox xBox = CreateInspectorTextBox(FormatDouble(current.X), new SolidColorBrush(Color.Parse("#301010")));
+            TextBox yBox = CreateInspectorTextBox(FormatDouble(current.Y), new SolidColorBrush(Color.Parse("#103010")));
+            TextBox zBox = CreateInspectorTextBox(FormatDouble(current.Z), new SolidColorBrush(Color.Parse("#101030")));
 
             Border CreateAxisTag(string axis, string color)
             {
@@ -1184,9 +1563,9 @@ namespace LimitlessSquareEngine.Editor
                 VerticalAlignment = VerticalAlignment.Center
             };
 
-            Border xTag = CreateAxisTag("X", "#331111");
-            Border yTag = CreateAxisTag("Y", "#113311");
-            Border zTag = CreateAxisTag("Z", "#111133");
+            Border xTag = CreateAxisTag("X", "#551111");
+            Border yTag = CreateAxisTag("Y", "#115511");
+            Border zTag = CreateAxisTag("Z", "#111155");
 
             Grid.SetColumn(xTag, 0);
             Grid.SetColumn(xBox, 1);
@@ -1916,8 +2295,8 @@ namespace LimitlessSquareEngine.Editor
 
             if (isSelected)
             {
-                state.Item.Background = new SolidColorBrush(Color.Parse("#225588"));
-                state.Item.BorderBrush = new SolidColorBrush(Color.Parse("#44AAFF"));
+                state.Item.Background = new SolidColorBrush(Color.Parse("#113355"));
+                state.Item.BorderBrush = new SolidColorBrush(Color.Parse("#225588"));
                 return;
             }
 
@@ -2054,13 +2433,20 @@ namespace LimitlessSquareEngine.Editor
                 _currentTreeCopyPath = openResult.TreeCopyPath;
                 _currentPreviewScenePath = openResult.PreviewScenePath;
                 _currentTreeScene = openResult.TreeScene;
-                _currentPreviewScene = openResult.PreviewScene;
                 _selectedSceneObject = null;
+
+                InitializePreviewCameraEditorState(openResult.TreeScene);
+                _currentPreviewScene = BuildPreviewScene(openResult.TreeScene);
+                SaveSceneData(_currentPreviewScenePath, _currentPreviewScene);
+
+                RefreshCurrentPreviewCameraId();
+                ResetSceneHostNavigationState();
 
                 LeftDockSlot.Content = BuildSceneTreeControl(openResult.TreeScene);
 
                 EditorHostBridge.SetAssetRootAndReloadAssets(assetRootPath);
                 EditorHostBridge.ReloadSceneById(EditorPreviewSceneId);
+                ApplyPreviewCameraEditorStateToRuntime();
 
                 StartSceneOpenForceRefresh();
 
@@ -2091,7 +2477,11 @@ namespace LimitlessSquareEngine.Editor
             File.Copy(originalPath, treeCopyPath, true);
 
             SceneData treeScene = LoadSceneDataFromFile(treeCopyPath);
-            SceneData previewScene = BuildPreviewScene(treeScene);
+            SceneData previewScene = new SceneData
+            {
+                SceneId = EditorPreviewSceneId,
+                Objects = new List<SceneObject>()
+            };
 
             SaveSceneData(previewScenePath, previewScene);
 
@@ -2183,9 +2573,12 @@ namespace LimitlessSquareEngine.Editor
             SaveSceneData(_currentTreeCopyPath, _currentTreeScene);
 
             _currentPreviewScene = BuildPreviewScene(_currentTreeScene);
+
+            RefreshCurrentPreviewCameraId();
             SaveSceneData(_currentPreviewScenePath, _currentPreviewScene);
 
             EditorHostBridge.ReloadSceneById(EditorPreviewSceneId);
+            ApplyPreviewCameraEditorStateToRuntime();
             StartSceneOpenForceRefresh();
 
             if (refreshSceneTree)
@@ -2266,6 +2659,8 @@ namespace LimitlessSquareEngine.Editor
 
         private SceneData BuildPreviewScene(SceneData sourceScene)
         {
+            EnsurePreviewCameraEditorState(sourceScene);
+
             SceneData previewScene = CloneSceneData(sourceScene);
             previewScene.SceneId = EditorPreviewSceneId;
 
@@ -2277,47 +2672,28 @@ namespace LimitlessSquareEngine.Editor
                 {
                     obj.Active = false;
                     obj.Visible = false;
+                    obj.Data = BuildPreviewCameraData(obj.Data, false);
                 }
             }
 
-            SceneObject previewCamera = CreatePreviewCamera(sourceScene, previewScene.Objects);
+            SceneObject previewCamera = CreatePreviewCamera();
             previewScene.Objects.Add(previewCamera);
 
             return previewScene;
         }
 
-        private SceneObject CreatePreviewCamera(SceneData sourceScene, List<SceneObject> targetObjects)
+        private SceneObject CreatePreviewCamera()
         {
-            SceneObject? sourceCamera = sourceScene.Objects.FirstOrDefault(
-                o => string.Equals(o.Type, "Camera", StringComparison.Ordinal));
-
-            string previewCameraId = MakeUniqueObjectId(targetObjects, PreviewCameraIdBase);
-            string previewCameraName = !string.IsNullOrWhiteSpace(sourceCamera?.Name)
-                ? sourceCamera!.Name
-                : "MainCamera";
-
-            SceneTransform previewTransform = sourceCamera?.Transform != null
-                ? CloneTransform(sourceCamera.Transform)
-                : new SceneTransform
-                {
-                    ParentId = null,
-                    LocalPosition = new Double3(0.0, 0.0, 5.0),
-                    LocalRotation = new Double3(0.0, 180.0, 0.0),
-                    LocalScale = Double3.One
-                };
-
-            string previewCameraData = BuildPreviewCameraData(sourceCamera?.Data);
-
             return new SceneObject
             {
-                Id = previewCameraId,
-                Name = previewCameraName,
+                Id = _previewCameraEditorId ?? (PreviewCameraIdPrefix + Guid.NewGuid().ToString("N")),
+                Name = _previewCameraEditorRuntimeName ?? (PreviewCameraNamePrefix + Guid.NewGuid().ToString("N")),
                 Tags = new List<string>(),
                 Active = true,
-                Transform = previewTransform,
+                Transform = CreatePreviewCameraTransform(),
                 Type = "Camera",
                 Controller = null,
-                Data = previewCameraData,
+                Data = _previewCameraEditorData,
                 Mesh = null,
                 Visible = true,
                 RenderTag = "",
@@ -2326,7 +2702,7 @@ namespace LimitlessSquareEngine.Editor
             };
         }
 
-        private string BuildPreviewCameraData(string? sourceData)
+        private string BuildPreviewCameraData(string? sourceData, bool isMainCamera)
         {
             int renderMode = 0;
             double fovOrSize = 75.0;
@@ -2373,28 +2749,8 @@ namespace LimitlessSquareEngine.Editor
                 nearClip,
                 farClip,
                 projectionType,
-                isMainCamera = true
+                isMainCamera
             });
-        }
-
-        private string MakeUniqueObjectId(IEnumerable<SceneObject> objects, string baseId)
-        {
-            HashSet<string> ids = new HashSet<string>(
-                objects.Select(o => o.Id),
-                StringComparer.Ordinal);
-
-            if (!ids.Contains(baseId))
-                return baseId;
-
-            int index = 1;
-            while (true)
-            {
-                string candidate = baseId + index.ToString();
-                if (!ids.Contains(candidate))
-                    return candidate;
-
-                index++;
-            }
         }
 
         private SceneData CloneSceneData(SceneData source)
