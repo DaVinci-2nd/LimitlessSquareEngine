@@ -15,6 +15,17 @@ namespace LimitlessSquareEngine.Engine
 {
     internal class Physics
     {
+        internal delegate bool MeshColliderTriangleResolver(
+            string meshId,
+            out List<Graphics.MeshColliderTriangle> triangles);
+
+        private static MeshColliderTriangleResolver? _meshColliderTriangleResolver;
+
+        internal static void SetMeshColliderTriangleResolver(
+            MeshColliderTriangleResolver resolver)
+        {
+            _meshColliderTriangleResolver = resolver;
+        }
         private sealed class ScenePhysicsRuntime : IDisposable
         {
             public string SceneId { get; init; } = "";
@@ -23,6 +34,7 @@ namespace LimitlessSquareEngine.Engine
             public Dictionary<string, RigidBody> Bodies { get; } = new(StringComparer.Ordinal);
             public List<Scene.SceneRuntimeNode> OrderedPhysicsNodes { get; } = new();
             public Dictionary<string, bool> ForceWakeState { get; } = new(StringComparer.Ordinal);
+            public Dictionary<string, Double3> LastWorldScale { get; } = new(StringComparer.Ordinal);
 
             public double FixedDeltaAccumulator;
             public bool SkipFirstPhysicsStep = true;
@@ -60,6 +72,7 @@ namespace LimitlessSquareEngine.Engine
                 physics.Bodies[node.Source.Id] = body;
                 physics.OrderedPhysicsNodes.Add(node);
                 physics.ForceWakeState[node.Source.Id] = false;
+                physics.LastWorldScale[node.Source.Id] = ResolveWorld(node).Scale;
             }
 
             _sceneWorlds[sceneId] = physics;
@@ -116,6 +129,8 @@ namespace LimitlessSquareEngine.Engine
         private static RigidBody CreateRigidBody(World world, Scene.SceneRuntimeNode node, PhysicsBody config)
         {
             SceneWorldState initialWorld = ResolveWorld(node);
+            MotionType motionType = NormalizeMotionType(config.MotionType);
+            string shapeType = NormalizeShapeType(config.ShapeType);
 
             RigidBody body = world.CreateRigidBody();
             body.Tag = node.Source.Id;
@@ -123,17 +138,19 @@ namespace LimitlessSquareEngine.Engine
             body.Position = ToJVector(initialWorld.Position);
             body.Orientation = ToJQuaternion(initialWorld.Rotation);
 
-            var shape = CreateShape(config);
-            body.AddShape(shape);
+            AddConfiguredShapes(body, node, config, initialWorld, motionType);
 
-            body.SetMassInertia(config.Mass);
+            if (shapeType != "Mesh")
+            {
+                body.SetMassInertia(config.Mass);
+            }
 
             body.Friction = config.Friction;
             body.Restitution = config.Restitution;
             body.EnableSpeculativeContacts = config.EnableSpeculativeContacts;
             body.Damping = (config.LinearDamping, config.AngularDamping);
 
-            switch (NormalizeMotionType(config.MotionType))
+            switch (motionType)
             {
                 case MotionType.Static:
                     body.MotionType = MotionType.Static;
@@ -154,18 +171,158 @@ namespace LimitlessSquareEngine.Engine
                 default:
                     throw new InvalidOperationException($"[X] Unsupported physics motion type '{config.MotionType}'.");
             }
+
             return body;
         }
 
-        private static RigidBodyShape CreateShape(PhysicsBody config)
+        private static void AddConfiguredShapes(
+            RigidBody body,
+            Scene.SceneRuntimeNode node,
+            PhysicsBody config,
+            SceneWorldState initialWorld,
+            MotionType motionType)
+        {
+            string shapeType = NormalizeShapeType(config.ShapeType);
+
+            if (shapeType != "Mesh")
+            {
+                body.AddShape(CreatePrimitiveShape(config));
+                return;
+            }
+
+            AddMeshShapes(body, node, config, initialWorld.Scale, motionType);
+        }
+
+        private static RigidBodyShape CreatePrimitiveShape(PhysicsBody config)
         {
             return NormalizeShapeType(config.ShapeType) switch
             {
                 "Box" => new BoxShape(ToJVector(config.Size)),
                 "Sphere" => new SphereShape(config.Radius),
                 "Capsule" => new CapsuleShape(config.Radius, config.Length),
-                _ => throw new InvalidOperationException($"[X] Unsupported physics shape type '{config.ShapeType}'.")
+                _ => throw new InvalidOperationException(
+                    $"[X] Primitive shape builder does not support '{config.ShapeType}'.")
             };
+        }
+
+        private static void AddMeshShapes(
+            RigidBody body,
+            Scene.SceneRuntimeNode node,
+            PhysicsBody config,
+            Double3 worldScale,
+            MotionType motionType)
+        {
+            if (motionType == MotionType.Dynamic)
+            {
+                throw new InvalidOperationException(
+                    $"[X] Mesh collider on object '{node.Source.Id}' only supports Static or Kinematic motion.");
+            }
+
+            if (string.IsNullOrWhiteSpace(node.Source.Mesh))
+            {
+                throw new InvalidOperationException(
+                    $"[X] Mesh collider requires SceneObject.Mesh. object='{node.Source.Id}'.");
+            }
+
+            if (_meshColliderTriangleResolver == null)
+            {
+                throw new InvalidOperationException(
+                    "[X] Mesh collider requires Graphics to be bound before scene loading.");
+            }
+
+            if (!_meshColliderTriangleResolver(node.Source.Mesh, out List<Graphics.MeshColliderTriangle> sourceTriangles) ||
+                sourceTriangles.Count == 0)
+            {
+                throw new InvalidOperationException(
+                    $"[X] Mesh collider source mesh '{node.Source.Mesh}' was not found or contains no triangles.");
+            }
+
+            List<JTriangle> triangles = BuildScaledMeshTriangles(sourceTriangles, worldScale);
+            TriangleMesh triangleMesh = new TriangleMesh(triangles);
+
+            foreach (TriangleShape triangleShape in TriangleShape.CreateAllShapes(triangleMesh))
+            {
+                body.AddShape(triangleShape, setMassInertia: false);
+            }
+        }
+
+        private static List<JTriangle> BuildScaledMeshTriangles(
+            IReadOnlyList<Graphics.MeshColliderTriangle> sourceTriangles,
+            Double3 scale)
+        {
+            var result = new List<JTriangle>(sourceTriangles.Count);
+
+            int skippedDegenerateCount = 0;
+            bool flipWinding = scale.X * scale.Y * scale.Z > 0.0;
+
+            foreach (Graphics.MeshColliderTriangle tri in sourceTriangles)
+            {
+                Double3 pa = ScalePoint(tri.A, scale);
+                Double3 pb = ScalePoint(tri.B, scale);
+                Double3 pc = ScalePoint(tri.C, scale);
+
+                JVector a = new JVector(pa.X, pa.Y, -pa.Z);
+                JVector b = new JVector(pb.X, pb.Y, -pb.Z);
+                JVector c = new JVector(pc.X, pc.Y, -pc.Z);
+
+                if (IsDegenerateTriangle(a, b, c))
+                {
+                    skippedDegenerateCount++;
+                    continue;
+                }
+
+                result.Add(flipWinding
+                    ? new JTriangle(a, c, b)
+                    : new JTriangle(a, b, c));
+            }
+
+            if (result.Count == 0)
+            {
+                throw new InvalidOperationException(
+                    "[X] Mesh collider contains no valid triangles after degenerate triangle filtering.");
+            }
+
+            if (skippedDegenerateCount > 0)
+            {
+                Console.WriteLine(
+                    $"[!] Mesh collider skipped {skippedDegenerateCount} degenerate triangles.");
+            }
+
+            return result;
+        }
+
+        private static bool IsDegenerateTriangle(JVector a, JVector b, JVector c)
+        {
+            const double pointEpsilonSq = 1e-12;
+            const double areaEpsilonSq = 1e-12;
+
+            JVector ab = b - a;
+            JVector ac = c - a;
+            JVector bc = c - b;
+
+            double abLenSq = ab.LengthSquared();
+            double acLenSq = ac.LengthSquared();
+            double bcLenSq = bc.LengthSquared();
+
+            if (abLenSq <= pointEpsilonSq ||
+                acLenSq <= pointEpsilonSq ||
+                bcLenSq <= pointEpsilonSq)
+            {
+                return true;
+            }
+
+            JVector cross = JVector.Cross(ab, ac);
+            double crossLenSq = cross.LengthSquared();
+
+            return crossLenSq <= areaEpsilonSq;
+        }
+
+        private static Double3 ScalePoint(Double3 point, Double3 scale)
+        {
+            return new Double3(
+                point.X * scale.X,
+                point.Y * scale.Y,
+                point.Z * scale.Z);
         }
 
         private static void PushDirtySceneTransformsToPhysics(ScenePhysicsRuntime physics)
@@ -203,7 +360,15 @@ namespace LimitlessSquareEngine.Engine
                 bool posChanged = !MathHelper.CloseToZero(body.Position - newPos);
                 bool rotChanged = !SameRotation(body.Orientation, newRot);
 
-                if (!posChanged && !rotChanged)
+                Double3 previousScale = physics.LastWorldScale.TryGetValue(id, out Double3 cachedScale)
+                    ? cachedScale
+                    : worldState.Scale;
+
+                bool scaleChanged =
+                    UsesWorldScale(config) &&
+                    !SameScale(previousScale, worldState.Scale);
+
+                if (!posChanged && !rotChanged && !scaleChanged)
                     continue;
 
                 RecreateNonDynamicBody(physics, node, config, body);
@@ -225,6 +390,7 @@ namespace LimitlessSquareEngine.Engine
 
             physics.Bodies[node.Source.Id] = newBody;
             physics.ForceWakeState[node.Source.Id] = false;
+            physics.LastWorldScale[node.Source.Id] = ResolveWorld(node).Scale;
         }
 
         private static bool SameRotation(JQuaternion a, JQuaternion b)
@@ -234,6 +400,19 @@ namespace LimitlessSquareEngine.Engine
                 Math.Abs(a.Y - b.Y) <= 1e-9 &&
                 Math.Abs(a.Z - b.Z) <= 1e-9 &&
                 Math.Abs(a.W - b.W) <= 1e-9;
+        }
+
+        private static bool SameScale(Double3 a, Double3 b)
+        {
+            return
+                Math.Abs(a.X - b.X) <= 1e-9 &&
+                Math.Abs(a.Y - b.Y) <= 1e-9 &&
+                Math.Abs(a.Z - b.Z) <= 1e-9;
+        }
+
+        private static bool UsesWorldScale(PhysicsBody config)
+        {
+            return NormalizeShapeType(config.ShapeType) == "Mesh";
         }
 
         internal static bool HasBody(string sceneId, string objectId)
@@ -635,6 +814,7 @@ namespace LimitlessSquareEngine.Engine
                 "Box" => "Box",
                 "Sphere" => "Sphere",
                 "Capsule" => "Capsule",
+                "Mesh" => "Mesh",
                 _ => throw new InvalidOperationException($"[X] Unsupported physics shapeType '{shapeType}'.")
             };
         }

@@ -1,4 +1,5 @@
 ﻿using MoonSharp.Interpreter;
+using LimitlessSquareEngine.Engine;
 using Silk.NET.OpenGL;
 using System;
 using System.Collections.Generic;
@@ -96,6 +97,20 @@ namespace LimitlessSquareEngine
                 Vertices = surfaces[0].Vertices;
                 PrimitiveType = surfaces[0].PrimitiveType;
                 VertexStrideFloats = surfaces[0].VertexStrideFloats;
+            }
+        }
+
+        internal readonly struct MeshColliderTriangle
+        {
+            public Double3 A { get; }
+            public Double3 B { get; }
+            public Double3 C { get; }
+
+            public MeshColliderTriangle(Double3 a, Double3 b, Double3 c)
+            {
+                A = a;
+                B = b;
+                C = c;
             }
         }
 
@@ -361,29 +376,74 @@ namespace LimitlessSquareEngine
         }
 
         [MoonSharpHidden]
-        private bool TryRegisterSceneMeshOnDemand(string meshId)
+        internal bool TryGetMeshColliderTriangles(
+            string meshId,
+            out List<MeshColliderTriangle> triangles)
         {
+            triangles = new List<MeshColliderTriangle>();
+
             if (string.IsNullOrWhiteSpace(meshId))
                 return false;
 
-            string assetsRoot = Path.Combine(AppContext.BaseDirectory, "Assets");
-            string objFilePath = Path.Combine(
-                assetsRoot,
-                meshId.Replace('/', Path.DirectorySeparatorChar) + ".obj");
-
-            if (!File.Exists(objFilePath))
+            if (!_meshes.TryGetValue(meshId, out MeshData mesh))
                 return false;
 
-            try
+            foreach (MeshSurfaceData surface in mesh.Surfaces)
             {
-                RegisterObjMeshFromFile(assetsRoot, objFilePath);
-                return _meshes.ContainsKey(meshId);
+                if (surface.PrimitiveType != PrimitiveType.Triangles)
+                {
+                    throw new InvalidOperationException(
+                        $"[X] Mesh collider only supports triangle surfaces. mesh='{meshId}', surface='{surface.Id}'.");
+                }
+
+                int stride = surface.VertexStrideFloats;
+                float[] vertices = surface.Vertices;
+
+                if (vertices == null || vertices.Length == 0)
+                {
+                    throw new InvalidOperationException(
+                        $"[X] Mesh surface '{surface.Id}' in mesh '{meshId}' contains no vertices.");
+                }
+
+                if (vertices.Length % stride != 0)
+                {
+                    throw new InvalidOperationException(
+                        $"[X] Mesh surface '{surface.Id}' in mesh '{meshId}' is not aligned to vertex stride {stride}.");
+                }
+
+                int vertexCount = vertices.Length / stride;
+                if (vertexCount % 3 != 0)
+                {
+                    throw new InvalidOperationException(
+                        $"[X] Mesh surface '{surface.Id}' in mesh '{meshId}' is not triangle-list data.");
+                }
+
+                for (int v = 0; v < vertexCount; v += 3)
+                {
+                    int i0 = v * stride;
+                    int i1 = (v + 1) * stride;
+                    int i2 = (v + 2) * stride;
+
+                    Double3 a = new Double3(
+                        vertices[i0 + 0],
+                        vertices[i0 + 1],
+                        vertices[i0 + 2]);
+
+                    Double3 b = new Double3(
+                        vertices[i1 + 0],
+                        vertices[i1 + 1],
+                        vertices[i1 + 2]);
+
+                    Double3 c = new Double3(
+                        vertices[i2 + 0],
+                        vertices[i2 + 1],
+                        vertices[i2 + 2]);
+
+                    triangles.Add(new MeshColliderTriangle(a, b, c));
+                }
             }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"[!] Failed to register mesh '{meshId}' from '{objFilePath}': {ex.Message}");
-                return false;
-            }
+
+            return triangles.Count > 0;
         }
 
         private List<MeshSurfaceData> BuildObjSurfacesFromAssimpScene(

@@ -209,7 +209,7 @@ namespace LimitlessSquareEngine.Engine
         // Static / Dynamic / Kinematic
         public string MotionType { get; set; } = "Static";
 
-        // Box / Sphere / Capsule
+        // Box / Sphere / Capsule / Mesh
         public string ShapeType { get; set; } = "Box";
 
         // Box
@@ -432,6 +432,7 @@ namespace LimitlessSquareEngine.Engine
         public static void BindGraphics(Graphics graphics)
         {
             _boundGraphics = graphics;
+            Physics.SetMeshColliderTriangleResolver(graphics.TryGetMeshColliderTriangles);
         }
 
         internal sealed class SceneRuntimeNode

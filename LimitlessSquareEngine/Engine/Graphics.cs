@@ -6344,12 +6344,8 @@ namespace LimitlessSquareEngine
 
                 if (!_meshes.TryGetValue(obj.Mesh, out MeshData mesh))
                 {
-                    if (!TryRegisterSceneMeshOnDemand(obj.Mesh) ||
-                        !_meshes.TryGetValue(obj.Mesh, out mesh))
-                    {
-                        Console.WriteLine($"[!] Mesh '{obj.Mesh}' not found for object '{obj.ObjectId}'.");
-                        continue;
-                    }
+                    Console.WriteLine($"[!] Mesh '{obj.Mesh}' not found for object '{obj.ObjectId}'.");
+                    continue;
                 }
 
                 Double3 relativePosition = obj.WorldPosition - cameraWorld.Position;

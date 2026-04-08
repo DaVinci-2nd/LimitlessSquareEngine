@@ -2364,9 +2364,10 @@ namespace LimitlessSquareEngine
                         shapeType = prop.Value.GetString()?.Trim() ?? string.Empty;
                         if (shapeType != "Box" &&
                             shapeType != "Sphere" &&
-                            shapeType != "Capsule")
+                            shapeType != "Capsule" &&
+                            shapeType != "Mesh")
                         {
-                            reason = $"Object '{objectId}' physics.shapeType must be 'Box', 'Sphere' or 'Capsule'.";
+                            reason = $"Object '{objectId}' physics.shapeType must be 'Box', 'Sphere', 'Capsule' or 'Mesh'.";
                             return false;
                         }
                         break;
@@ -2475,15 +2476,19 @@ namespace LimitlessSquareEngine
 
             if (shapeType == "Box")
             {
-                
+
             }
             else if (shapeType == "Sphere")
             {
-                
+
             }
             else if (shapeType == "Capsule")
             {
-                
+
+            }
+            else if (shapeType == "Mesh")
+            {
+
             }
 
             return true;
