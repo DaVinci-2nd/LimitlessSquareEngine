@@ -27,7 +27,10 @@ namespace LimitlessSquareEngine.Editor
     {
         private readonly EmbeddedGameHost _sceneHost;
 
+        private readonly PreviewOrientationGizmoOverlay _previewOrientationGizmo;
+
         public EmbeddedGameHost SceneHost => _sceneHost;
+        public bool IsSceneHostNavigationActive => _isSceneHostRightDragging;
 
         // 预留给后续功能窗口的插槽
         public ContentControl ToolbarSlot { get; } = new ContentControl();
@@ -62,6 +65,7 @@ namespace LimitlessSquareEngine.Editor
         private bool _isSceneHostRightDragging;
         private Point _sceneHostLastPointerPosition;
         private IPointer? _sceneHostCapturedPointer;
+        private double _sceneHostMoveSpeedMultiplier = 1.0;
 
         private const string EditorPreviewSceneId = "__editor_preview_scene__";
         private const string EditorPreviewDirectoryName = "EditorPreview";
@@ -70,7 +74,9 @@ namespace LimitlessSquareEngine.Editor
         private const string PreviewCameraIdPrefix = "__lse_editor_preview_camera__";
         private const string PreviewCameraNamePrefix = "__lse_editor_preview_camera_name__";
         private const double SceneHostMoveSpeed = 6.0;
-        private const double SceneHostLookSensitivity = 0.15;
+        private const double SceneHostLookSensitivity = 0.2;
+        private const double SceneHostMoveSpeedMultiplierStepUp = 1.25;
+        private const double SceneHostMoveSpeedMultiplierStepDown = 0.8;
 
         private const double InspectorTextBoxHeight = 22;
         private static readonly Thickness InspectorTextBoxPadding = new Thickness(6, 1, 6, 1);
@@ -117,10 +123,33 @@ namespace LimitlessSquareEngine.Editor
             _sceneHost.PointerPressed += OnSceneHostPointerPressed;
             _sceneHost.PointerReleased += OnSceneHostPointerReleased;
             _sceneHost.PointerMoved += OnSceneHostPointerMoved;
+            _sceneHost.PointerWheelChanged += OnSceneHostPointerWheelChanged;
             _sceneHost.PointerCaptureLost += OnSceneHostPointerCaptureLost;
             _sceneHost.LostFocus += OnSceneHostLostFocus;
             _sceneHost.KeyDown += OnSceneHostKeyDown;
             _sceneHost.KeyUp += OnSceneHostKeyUp;
+
+            _previewOrientationGizmo = new PreviewOrientationGizmoOverlay
+            {
+                HorizontalAlignment = HorizontalAlignment.Stretch,
+                VerticalAlignment = VerticalAlignment.Stretch,
+                IsHitTestVisible = false
+            };
+
+            _previewOrientationGizmo.SetCameraStateProvider(() =>
+            {
+                if (!EditorHostBridge.IsRenderWindowAlive)
+                    return null;
+
+                if (string.IsNullOrWhiteSpace(_currentPreviewCameraId))
+                    return null;
+
+                Double3 right = GetPreviewCameraRightFromEditorState();
+                Double3 up = GetPreviewCameraUpFromEditorState();
+                Double3 forward = GetPreviewCameraForwardFromEditorState();
+
+                return new PreviewOrientationGizmoOverlay.CameraOrientationState(right, up, forward);
+            });
 
             Opened += (_, _) =>
             {
@@ -261,6 +290,7 @@ namespace LimitlessSquareEngine.Editor
                 return;
 
             _sceneHost.PresentFrame(frame);
+            _previewOrientationGizmo.InvalidateVisual();
         }
 
         private void RenderSceneHostFrameIfPossible()
@@ -290,6 +320,7 @@ namespace LimitlessSquareEngine.Editor
 
             Double3 forward = GetPreviewCameraForwardFromEditorState();
             Double3 right = GetPreviewCameraRightFromEditorState();
+            Double3 up = GetPreviewCameraUpFromEditorState();
             Double3 move = Double3.Zero;
 
             if (_sceneHostNavigationKeys.Contains(Key.W))
@@ -304,10 +335,17 @@ namespace LimitlessSquareEngine.Editor
             if (_sceneHostNavigationKeys.Contains(Key.A))
                 move -= right;
 
+            if (_sceneHostNavigationKeys.Contains(Key.Space))
+                move += up;
+
+            if (_sceneHostNavigationKeys.Contains(Key.LeftShift) ||
+                _sceneHostNavigationKeys.Contains(Key.RightShift))
+                move -= up;
+
             if (!TryNormalizeDouble3(move, out Double3 normalized))
                 return;
 
-            Double3 positionDelta = normalized * (SceneHostMoveSpeed * deltaSeconds);
+            Double3 positionDelta = normalized * (SceneHostMoveSpeed * _sceneHostMoveSpeedMultiplier * deltaSeconds);
             _previewCameraEditorPosition += positionDelta;
 
             ApplyPreviewCameraEditorStateToRuntime();
@@ -316,6 +354,19 @@ namespace LimitlessSquareEngine.Editor
         private void OnSceneHostPointerPressed(object? sender, PointerPressedEventArgs e)
         {
             PointerPoint point = e.GetCurrentPoint(_sceneHost);
+
+            if (point.Properties.PointerUpdateKind == PointerUpdateKind.MiddleButtonPressed)
+            {
+                _sceneHostMoveSpeedMultiplier = 1.0;
+
+                if (_isSceneHostRightDragging)
+                {
+                    RenderSceneHostFrameIfPossible();
+                    e.Handled = true;
+                }
+
+                return;
+            }
 
             if (point.Properties.PointerUpdateKind != PointerUpdateKind.RightButtonPressed)
                 return;
@@ -387,6 +438,28 @@ namespace LimitlessSquareEngine.Editor
             e.Handled = true;
         }
 
+        private void OnSceneHostPointerWheelChanged(object? sender, PointerWheelEventArgs e)
+        {
+            if (!_isSceneHostRightDragging)
+                return;
+
+            if (e.Delta.Y > 0.0)
+            {
+                _sceneHostMoveSpeedMultiplier *= SceneHostMoveSpeedMultiplierStepUp;
+            }
+            else if (e.Delta.Y < 0.0)
+            {
+                _sceneHostMoveSpeedMultiplier *= SceneHostMoveSpeedMultiplierStepDown;
+            }
+            else
+            {
+                return;
+            }
+
+            RenderSceneHostFrameIfPossible();
+            e.Handled = true;
+        }
+
         private void OnSceneHostPointerCaptureLost(object? sender, PointerCaptureLostEventArgs e)
         {
             ResetSceneHostNavigationState();
@@ -405,7 +478,10 @@ namespace LimitlessSquareEngine.Editor
             _sceneHostNavigationKeys.Add(e.Key);
 
             if (_isSceneHostRightDragging)
+            {
+                RenderSceneHostFrameIfPossible();
                 e.Handled = true;
+            }
         }
 
         private void OnSceneHostKeyUp(object? sender, KeyEventArgs e)
@@ -416,12 +492,21 @@ namespace LimitlessSquareEngine.Editor
             _sceneHostNavigationKeys.Remove(e.Key);
 
             if (_isSceneHostRightDragging)
+            {
+                RenderSceneHostFrameIfPossible();
                 e.Handled = true;
+            }
         }
 
         private bool IsSceneHostNavigationKey(Key key)
         {
-            return key == Key.W || key == Key.A || key == Key.S || key == Key.D;
+            return key == Key.W ||
+                   key == Key.A ||
+                   key == Key.S ||
+                   key == Key.D ||
+                   key == Key.Space ||
+                   key == Key.LeftShift ||
+                   key == Key.RightShift;
         }
 
         private void ResetSceneHostNavigationState()
@@ -547,6 +632,8 @@ namespace LimitlessSquareEngine.Editor
                 EditorPreviewSceneId,
                 _currentPreviewCameraId,
                 _previewCameraEditorRotation);
+
+            _previewOrientationGizmo.InvalidateVisual();
         }
 
         private Double3 GetPreviewCameraForwardFromEditorState()
@@ -571,6 +658,18 @@ namespace LimitlessSquareEngine.Editor
             Double3 right = CrossDouble3(new Double3(0.0, 1.0, 0.0), forward);
 
             if (!TryNormalizeDouble3(right, out Double3 normalized))
+                return Double3.Zero;
+
+            return normalized;
+        }
+
+        private Double3 GetPreviewCameraUpFromEditorState()
+        {
+            Double3 forward = GetPreviewCameraForwardFromEditorState();
+            Double3 right = GetPreviewCameraRightFromEditorState();
+            Double3 up = CrossDouble3(forward, right);
+
+            if (!TryNormalizeDouble3(up, out Double3 normalized))
                 return Double3.Zero;
 
             return normalized;
@@ -645,7 +744,7 @@ namespace LimitlessSquareEngine.Editor
             workspace.RowDefinitions.Add(new RowDefinition(320, GridUnitType.Pixel));
 
             Control leftPanel = CreateDockContainer("场景树/画布树", LeftDockSlot);
-            Control scenePanel = CreateSceneContainer();
+            Control scenePanel = CreateDockContainer("场景/画布", CreateSceneHostContent());
             Control rightPanel = CreateDockContainer("查看器", RightDockSlot);
             Control bottomPanel = CreateBottomWorkspace();
 
@@ -793,45 +892,30 @@ namespace LimitlessSquareEngine.Editor
             };
         }
 
-        private Control CreateSceneContainer()
+        private Control CreateSceneHostContent()
         {
-            Grid sceneGrid = new Grid();
-            sceneGrid.RowDefinitions.Add(new RowDefinition(32, GridUnitType.Pixel));
-            sceneGrid.RowDefinitions.Add(new RowDefinition(1, GridUnitType.Star));
-
-            Border header = new Border
-            {
-                Background = new SolidColorBrush(Color.Parse("#222222")),
-                BorderBrush = new SolidColorBrush(Color.Parse("#444444")),
-                BorderThickness = new Thickness(0, 0, 0, 1),
-                Padding = new Thickness(10, 0),
-                Child = new TextBlock
-                {
-                    Text = "场景/画布",
-                    VerticalAlignment = VerticalAlignment.Center,
-                    Foreground = Brushes.White,
-                    FontSize = 12
-                }
-            };
+            Grid overlayRoot = new Grid();
 
             Border hostBorder = new Border
             {
                 Background = Brushes.Black,
                 BorderBrush = new SolidColorBrush(Color.Parse("#444444")),
-                BorderThickness = new Thickness(1),
+                BorderThickness = new Thickness(0),
                 Child = _sceneHost
             };
 
-            Grid.SetRow(header, 0);
-            Grid.SetRow(hostBorder, 1);
+            overlayRoot.Children.Add(hostBorder);
+            overlayRoot.Children.Add(_previewOrientationGizmo);
 
-            sceneGrid.Children.Add(header);
-            sceneGrid.Children.Add(hostBorder);
-
-            return sceneGrid;
+            return new Border
+            {
+                Background = new SolidColorBrush(Color.Parse("#111111")),
+                Padding = new Thickness(0),
+                Child = overlayRoot
+            };
         }
 
-        private static Control CreateDockContainer(string title, ContentControl slot)
+        private static Control CreateDockContainer(string title, Control content)
         {
             Grid grid = new Grid();
             grid.RowDefinitions.Add(new RowDefinition(32, GridUnitType.Pixel));
@@ -857,7 +941,7 @@ namespace LimitlessSquareEngine.Editor
                 Background = new SolidColorBrush(Color.Parse("#111111")),
                 BorderBrush = new SolidColorBrush(Color.Parse("#444444")),
                 BorderThickness = new Thickness(1),
-                Child = slot
+                Child = content
             };
 
             Grid.SetRow(header, 0);
@@ -2986,5 +3070,296 @@ namespace LimitlessSquareEngine.Editor
 
             return string.Equals(leftFullPath, rightFullPath, comparison);
         }
+    }
+
+    public sealed class PreviewOrientationGizmoOverlay : Control
+    {
+        public readonly record struct CameraOrientationState(Double3 Right, Double3 Up, Double3 Forward);
+
+        private Func<CameraOrientationState?>? _cameraStateProvider;
+
+        private static readonly IBrush XBrush = new SolidColorBrush(Color.Parse("#FF0000"));
+        private static readonly IBrush YBrush = new SolidColorBrush(Color.Parse("#00FF00"));
+        private static readonly IBrush ZBrush = new SolidColorBrush(Color.Parse("#0000FF"));
+        private static readonly IBrush WhiteBrush = Brushes.White;
+
+        private static readonly Pen XPen = new Pen(XBrush, 2);
+        private static readonly Pen YPen = new Pen(YBrush, 2);
+        private static readonly Pen ZPen = new Pen(ZBrush, 2);
+
+        public void SetCameraStateProvider(Func<CameraOrientationState?> provider)
+        {
+            _cameraStateProvider = provider;
+            InvalidateVisual();
+        }
+
+        public override void Render(DrawingContext context)
+        {
+            base.Render(context);
+
+            CameraOrientationState? state = _cameraStateProvider?.Invoke();
+            if (state == null)
+                return;
+
+            Size size = Bounds.Size;
+            if (size.Width <= 0 || size.Height <= 0)
+                return;
+
+            Point center = new Point(size.Width - 56, 56);
+            double centerRadius = 6.0;
+            double axisBaseOffset = centerRadius;
+            double axisLength = 28.0;
+            double coneLength = 10.0;
+            double coneBaseRadius = 4.5;
+
+            GizmoAxis xAxis = BuildAxis(
+                center,
+                new Double3(1.0, 0.0, 0.0),
+                state.Value,
+                axisBaseOffset,
+                axisLength,
+                coneLength,
+                coneBaseRadius,
+                XBrush,
+                XPen);
+
+            GizmoAxis yAxis = BuildAxis(
+                center,
+                new Double3(0.0, 1.0, 0.0),
+                state.Value,
+                axisBaseOffset,
+                axisLength,
+                coneLength,
+                coneBaseRadius,
+                YBrush,
+                YPen);
+
+            GizmoAxis zAxis = BuildAxis(
+                center,
+                new Double3(0.0, 0.0, 1.0),
+                state.Value,
+                axisBaseOffset,
+                axisLength,
+                coneLength,
+                coneBaseRadius,
+                ZBrush,
+                ZPen);
+
+            List<GizmoAxis> frontAxes = new List<GizmoAxis>();
+            List<GizmoAxis> backAxes = new List<GizmoAxis>();
+
+            foreach (GizmoAxis axis in new[] { xAxis, yAxis, zAxis })
+            {
+                if (axis.Depth >= 0.0)
+                    backAxes.Add(axis);
+                else
+                    frontAxes.Add(axis);
+            }
+
+            frontAxes.Sort((a, b) => b.Depth.CompareTo(a.Depth));
+            backAxes.Sort((a, b) => a.Depth.CompareTo(b.Depth));
+
+            foreach (GizmoAxis axis in backAxes)
+                DrawAxis(context, axis);
+
+            context.DrawEllipse(WhiteBrush, null, center, centerRadius, centerRadius);
+
+            foreach (GizmoAxis axis in frontAxes)
+                DrawAxis(context, axis);
+        }
+
+        private static GizmoAxis BuildAxis(
+            Point center,
+            Double3 worldAxis,
+            CameraOrientationState camera,
+            double axisBaseOffset,
+            double axisLength,
+            double coneLength,
+            double coneBaseRadius,
+            IBrush brush,
+            Pen pen)
+        {
+            Double3 axis = Normalize3(worldAxis);
+
+            BuildPerpendicularBasis(axis, out Double3 side, out Double3 upOnPlane);
+
+            Double3 lineStart3 = axis * axisBaseOffset;
+            Double3 lineEnd3 = axis * (axisBaseOffset + axisLength);
+            Double3 coneTip3 = axis * (axisBaseOffset + axisLength + coneLength);
+            Double3 coneBaseCenter3 = lineEnd3;
+
+            Point lineStart = ProjectToScreen(center, lineStart3, camera);
+            Point lineEnd = ProjectToScreen(center, lineEnd3, camera);
+            Point coneTip = ProjectToScreen(center, coneTip3, camera);
+            Point coneBaseCenter = ProjectToScreen(center, coneBaseCenter3, camera);
+
+            Double3 majorAxis3 = Cross(camera.Forward, axis);
+            if (majorAxis3.X * majorAxis3.X + majorAxis3.Y * majorAxis3.Y + majorAxis3.Z * majorAxis3.Z <= 1e-8)
+                majorAxis3 = side;
+            else
+                majorAxis3 = Normalize3(majorAxis3);
+
+            Vector majorAxis2D = new Vector(
+                Dot(majorAxis3, camera.Right),
+                -Dot(majorAxis3, camera.Up));
+
+            double majorAxis2DLength = Math.Sqrt(
+                majorAxis2D.X * majorAxis2D.X +
+                majorAxis2D.Y * majorAxis2D.Y);
+
+            if (majorAxis2DLength <= 1e-8)
+                majorAxis2D = new Vector(1.0, 0.0);
+            else
+                majorAxis2D /= majorAxis2DLength;
+
+            Point ellipseAxisA = coneBaseCenter + majorAxis2D * coneBaseRadius;
+            Point ellipseAxisB = coneBaseCenter - majorAxis2D * coneBaseRadius;
+            Point ellipseAxisC = ProjectToScreen(center, coneBaseCenter3 + upOnPlane * coneBaseRadius, camera);
+            Point ellipseAxisD = ProjectToScreen(center, coneBaseCenter3 - upOnPlane * coneBaseRadius, camera);
+
+            double facing = Math.Abs(Dot(axis, camera.Forward));
+            facing = Math.Clamp(facing, 0.0, 1.0);
+
+            double ellipseRadiusX = coneBaseRadius;
+            double ellipseRadiusY = coneBaseRadius * facing;
+            double ellipseRotation = Math.Atan2(majorAxis2D.Y, majorAxis2D.X);
+
+            StreamGeometry triangle = new StreamGeometry();
+            using (StreamGeometryContext gc = triangle.Open())
+            {
+                gc.BeginFigure(coneTip, true);
+                gc.LineTo(ellipseAxisA);
+                gc.LineTo(ellipseAxisB);
+                gc.EndFigure(true);
+            }
+
+            double depth = Dot(axis, camera.Forward);
+
+            return new GizmoAxis(
+                brush,
+                pen,
+                lineStart,
+                lineEnd,
+                coneBaseCenter,
+                coneTip,
+                triangle,
+                ellipseRadiusX,
+                ellipseRadiusY,
+                ellipseRotation,
+                depth);
+        }
+
+        private static void DrawAxis(DrawingContext context, GizmoAxis axis)
+        {
+            context.DrawLine(axis.Pen, axis.LineStart, axis.LineEnd);
+            context.DrawGeometry(axis.Brush, null, axis.TriangleGeometry);
+
+            if (axis.EllipseRadiusY > 0.01)
+            {
+                Matrix transform =
+                    Matrix.CreateTranslation(-axis.ConeBaseCenter.X, -axis.ConeBaseCenter.Y) *
+                    Matrix.CreateRotation(axis.EllipseRotation) *
+                    Matrix.CreateTranslation(axis.ConeBaseCenter.X, axis.ConeBaseCenter.Y);
+
+                using (context.PushTransform(transform))
+                {
+                    context.DrawEllipse(
+                        axis.Brush,
+                        null,
+                        axis.ConeBaseCenter,
+                        axis.EllipseRadiusX,
+                        axis.EllipseRadiusY);
+                }
+            }
+            else
+            {
+                Vector normal = new Vector(Math.Cos(axis.EllipseRotation), Math.Sin(axis.EllipseRotation));
+                Point a = Add(axis.ConeBaseCenter, normal * axis.EllipseRadiusX);
+                Point b = Add(axis.ConeBaseCenter, normal * -axis.EllipseRadiusX);
+                context.DrawLine(new Pen(axis.Brush, 1), a, b);
+            }
+        }
+
+        private static double Dot(Double3 a, Double3 b)
+        {
+            return a.X * b.X + a.Y * b.Y + a.Z * b.Z;
+        }
+
+        private static Point ProjectToScreen(
+    Point center,
+    Double3 point,
+    CameraOrientationState camera)
+        {
+            double x = Dot(point, camera.Right);
+            double y = -Dot(point, camera.Up);
+            return new Point(center.X + x, center.Y + y);
+        }
+
+        private static void BuildPerpendicularBasis(
+            Double3 axis,
+            out Double3 side,
+            out Double3 upOnPlane)
+        {
+            Double3 helper =
+                Math.Abs(axis.Y) < 0.9
+                ? new Double3(0.0, 1.0, 0.0)
+                : new Double3(1.0, 0.0, 0.0);
+
+            side = Cross(axis, helper);
+            side = Normalize3(side);
+
+            upOnPlane = Cross(axis, side);
+            upOnPlane = Normalize3(upOnPlane);
+        }
+
+        private static Double3 Normalize3(Double3 value)
+        {
+            double length = Math.Sqrt(value.X * value.X + value.Y * value.Y + value.Z * value.Z);
+            if (length <= 1e-8)
+                return Double3.Zero;
+
+            return value / length;
+        }
+
+        private static Double3 Cross(Double3 a, Double3 b)
+        {
+            return new Double3(
+                a.Y * b.Z - a.Z * b.Y,
+                a.Z * b.X - a.X * b.Z,
+                a.X * b.Y - a.Y * b.X);
+        }
+
+        private static Point Add(Point point, Vector vector)
+        {
+            return new Point(point.X + vector.X, point.Y + vector.Y);
+        }
+
+        private readonly record struct Vector2(double X, double Y)
+        {
+            public double Length => Math.Sqrt(X * X + Y * Y);
+
+            public static Vector operator *(Vector2 value, double scalar)
+            {
+                return new Vector(value.X * scalar, value.Y * scalar);
+            }
+
+            public static Vector operator *(double scalar, Vector2 value)
+            {
+                return new Vector(value.X * scalar, value.Y * scalar);
+            }
+        }
+
+        private readonly record struct GizmoAxis(
+            IBrush Brush,
+            Pen Pen,
+            Point LineStart,
+            Point LineEnd,
+            Point ConeBaseCenter,
+            Point ConeTip,
+            StreamGeometry TriangleGeometry,
+            double EllipseRadiusX,
+            double EllipseRadiusY,
+            double EllipseRotation,
+            double Depth);
     }
 }

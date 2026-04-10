@@ -81,6 +81,10 @@ namespace LimitlessSquareEngine.Editor
             timer.Interval = TimeSpan.FromMilliseconds(16);
             timer.Tick += (_, _) =>
             {
+                timer.Interval = window.IsSceneHostNavigationActive
+                    ? TimeSpan.FromMilliseconds(1)
+                    : TimeSpan.FromMilliseconds(16);
+
                 if (EditorHostBridge.IsRenderWindowAlive)
                 {
                     window.TickSceneHostNavigation();
