@@ -157,6 +157,46 @@ namespace LimitlessSquareEngine.Engine
         }
     }
 
+    internal sealed class CameraScalarPostProcessSettings
+    {
+        public bool Enabled { get; set; } = false;
+        public double Value { get; set; } = 1.0;
+    }
+
+    internal sealed class CameraHuePostProcessSettings
+    {
+        public bool Enabled { get; set; } = false;
+        public double Degrees { get; set; } = 0.0;
+    }
+
+    internal sealed class CameraTemperaturePostProcessSettings
+    {
+        public bool Enabled { get; set; } = false;
+        public double Value { get; set; } = 0.0;
+    }
+
+    internal sealed class CameraBloomPostProcessSettings
+    {
+        public bool Enabled { get; set; } = false;
+        public double Threshold { get; set; } = 1.0;
+        public double SoftKnee { get; set; } = 0.5;
+        public double Intensity { get; set; } = 0.7;
+        public int Iterations { get; set; } = 4;
+        public int Downsample { get; set; } = 2;
+    }
+
+    internal sealed class CameraPostProcessSettings
+    {
+        public bool Enabled { get; set; } = false;
+
+        public CameraScalarPostProcessSettings Brightness { get; set; } = new();
+        public CameraScalarPostProcessSettings Contrast { get; set; } = new();
+        public CameraScalarPostProcessSettings Saturation { get; set; } = new();
+        public CameraHuePostProcessSettings Hue { get; set; } = new();
+        public CameraTemperaturePostProcessSettings Temperature { get; set; } = new();
+        public CameraBloomPostProcessSettings Bloom { get; set; } = new();
+    }
+
     /// <summary>
     /// 相机参数
     /// </summary>
@@ -168,6 +208,7 @@ namespace LimitlessSquareEngine.Engine
         public double FarClip { get; set; } = 1000.0;
         public int ProjectionType { get; set; } = 0;
         public bool IsMainCamera { get; set; } = false;
+        public CameraPostProcessSettings PostProcess { get; set; } = new();
     }
 
     /// <summary>
@@ -1337,6 +1378,10 @@ namespace LimitlessSquareEngine.Engine
                         settings.IsMainCamera = prop.Value.GetBoolean();
                         break;
 
+                    case "postProcess":
+                        ParseCameraPostProcessSettings(prop.Value, settings.PostProcess, objectId);
+                        break;
+
                     default:
                         throw new InvalidDataException($"[X] Camera '{objectId}' data contains unknown or wrong-cased property '{prop.Name}'.");
                 }
@@ -1346,6 +1391,202 @@ namespace LimitlessSquareEngine.Engine
                 throw new InvalidDataException($"[X] Camera '{objectId}' data.farClip must be greater than data.nearClip.");
 
             return settings;
+        }
+
+        private static void ParseCameraPostProcessSettings(
+            JsonElement element,
+            CameraPostProcessSettings settings,
+            string objectId)
+        {
+            if (element.ValueKind != JsonValueKind.Object)
+                throw new InvalidDataException($"[X] Camera '{objectId}' data.postProcess must be an object.");
+
+            foreach (JsonProperty prop in element.EnumerateObject())
+            {
+                switch (prop.Name)
+                {
+                    case "enabled":
+                        settings.Enabled = ReadStrictBoolean(prop.Value, $"Camera '{objectId}' data.postProcess.enabled");
+                        break;
+
+                    case "brightness":
+                        ParseCameraScalarPostProcessSettings(prop.Value, settings.Brightness, objectId, "brightness", allowNegative: false);
+                        break;
+
+                    case "contrast":
+                        ParseCameraScalarPostProcessSettings(prop.Value, settings.Contrast, objectId, "contrast", allowNegative: false);
+                        break;
+
+                    case "saturation":
+                        ParseCameraScalarPostProcessSettings(prop.Value, settings.Saturation, objectId, "saturation", allowNegative: false);
+                        break;
+
+                    case "hue":
+                        ParseCameraHuePostProcessSettings(prop.Value, settings.Hue, objectId);
+                        break;
+
+                    case "temperature":
+                        ParseCameraTemperaturePostProcessSettings(prop.Value, settings.Temperature, objectId);
+                        break;
+
+                    case "bloom":
+                        ParseCameraBloomPostProcessSettings(prop.Value, settings.Bloom, objectId);
+                        break;
+
+                    default:
+                        throw new InvalidDataException($"[X] Camera '{objectId}' data.postProcess contains unknown or wrong-cased property '{prop.Name}'.");
+                }
+            }
+        }
+
+        private static void ParseCameraScalarPostProcessSettings(
+            JsonElement element,
+            CameraScalarPostProcessSettings settings,
+            string objectId,
+            string propertyName,
+            bool allowNegative)
+        {
+            if (element.ValueKind != JsonValueKind.Object)
+                throw new InvalidDataException($"[X] Camera '{objectId}' data.postProcess.{propertyName} must be an object.");
+
+            foreach (JsonProperty prop in element.EnumerateObject())
+            {
+                switch (prop.Name)
+                {
+                    case "enabled":
+                        settings.Enabled = ReadStrictBoolean(prop.Value, $"Camera '{objectId}' data.postProcess.{propertyName}.enabled");
+                        break;
+
+                    case "value":
+                        if (prop.Value.ValueKind != JsonValueKind.Number || !prop.Value.TryGetDouble(out double value))
+                            throw new InvalidDataException($"[X] Camera '{objectId}' data.postProcess.{propertyName}.value must be a number.");
+
+                        if (!allowNegative && value < 0.0)
+                            throw new InvalidDataException($"[X] Camera '{objectId}' data.postProcess.{propertyName}.value must be >= 0.");
+
+                        settings.Value = value;
+                        break;
+
+                    default:
+                        throw new InvalidDataException($"[X] Camera '{objectId}' data.postProcess.{propertyName} contains unknown or wrong-cased property '{prop.Name}'.");
+                }
+            }
+        }
+
+        private static void ParseCameraHuePostProcessSettings(
+            JsonElement element,
+            CameraHuePostProcessSettings settings,
+            string objectId)
+        {
+            if (element.ValueKind != JsonValueKind.Object)
+                throw new InvalidDataException($"[X] Camera '{objectId}' data.postProcess.hue must be an object.");
+
+            foreach (JsonProperty prop in element.EnumerateObject())
+            {
+                switch (prop.Name)
+                {
+                    case "enabled":
+                        settings.Enabled = ReadStrictBoolean(prop.Value, $"Camera '{objectId}' data.postProcess.hue.enabled");
+                        break;
+
+                    case "degrees":
+                        if (prop.Value.ValueKind != JsonValueKind.Number || !prop.Value.TryGetDouble(out double degrees))
+                            throw new InvalidDataException($"[X] Camera '{objectId}' data.postProcess.hue.degrees must be a number.");
+                        settings.Degrees = degrees;
+                        break;
+
+                    default:
+                        throw new InvalidDataException($"[X] Camera '{objectId}' data.postProcess.hue contains unknown or wrong-cased property '{prop.Name}'.");
+                }
+            }
+        }
+
+        private static void ParseCameraTemperaturePostProcessSettings(
+            JsonElement element,
+            CameraTemperaturePostProcessSettings settings,
+            string objectId)
+        {
+            if (element.ValueKind != JsonValueKind.Object)
+                throw new InvalidDataException($"[X] Camera '{objectId}' data.postProcess.temperature must be an object.");
+
+            foreach (JsonProperty prop in element.EnumerateObject())
+            {
+                switch (prop.Name)
+                {
+                    case "enabled":
+                        settings.Enabled = ReadStrictBoolean(prop.Value, $"Camera '{objectId}' data.postProcess.temperature.enabled");
+                        break;
+
+                    case "value":
+                        if (prop.Value.ValueKind != JsonValueKind.Number || !prop.Value.TryGetDouble(out double value))
+                            throw new InvalidDataException($"[X] Camera '{objectId}' data.postProcess.temperature.value must be a number.");
+                        settings.Value = value;
+                        break;
+
+                    default:
+                        throw new InvalidDataException($"[X] Camera '{objectId}' data.postProcess.temperature contains unknown or wrong-cased property '{prop.Name}'.");
+                }
+            }
+        }
+
+        private static void ParseCameraBloomPostProcessSettings(
+            JsonElement element,
+            CameraBloomPostProcessSettings settings,
+            string objectId)
+        {
+            if (element.ValueKind != JsonValueKind.Object)
+                throw new InvalidDataException($"[X] Camera '{objectId}' data.postProcess.bloom must be an object.");
+
+            foreach (JsonProperty prop in element.EnumerateObject())
+            {
+                switch (prop.Name)
+                {
+                    case "enabled":
+                        settings.Enabled = ReadStrictBoolean(prop.Value, $"Camera '{objectId}' data.postProcess.bloom.enabled");
+                        break;
+
+                    case "threshold":
+                        if (prop.Value.ValueKind != JsonValueKind.Number || !prop.Value.TryGetDouble(out double threshold) || threshold < 0.0)
+                            throw new InvalidDataException($"[X] Camera '{objectId}' data.postProcess.bloom.threshold must be >= 0.");
+                        settings.Threshold = threshold;
+                        break;
+
+                    case "softKnee":
+                        if (prop.Value.ValueKind != JsonValueKind.Number || !prop.Value.TryGetDouble(out double softKnee) || softKnee < 0.0)
+                            throw new InvalidDataException($"[X] Camera '{objectId}' data.postProcess.bloom.softKnee must be >= 0.");
+                        settings.SoftKnee = softKnee;
+                        break;
+
+                    case "intensity":
+                        if (prop.Value.ValueKind != JsonValueKind.Number || !prop.Value.TryGetDouble(out double intensity) || intensity < 0.0)
+                            throw new InvalidDataException($"[X] Camera '{objectId}' data.postProcess.bloom.intensity must be >= 0.");
+                        settings.Intensity = intensity;
+                        break;
+
+                    case "iterations":
+                        if (prop.Value.ValueKind != JsonValueKind.Number || !prop.Value.TryGetInt32(out int iterations) || iterations < 1)
+                            throw new InvalidDataException($"[X] Camera '{objectId}' data.postProcess.bloom.iterations must be >= 1.");
+                        settings.Iterations = iterations;
+                        break;
+
+                    case "downsample":
+                        if (prop.Value.ValueKind != JsonValueKind.Number || !prop.Value.TryGetInt32(out int downsample) || downsample < 1)
+                            throw new InvalidDataException($"[X] Camera '{objectId}' data.postProcess.bloom.downsample must be >= 1.");
+                        settings.Downsample = downsample;
+                        break;
+
+                    default:
+                        throw new InvalidDataException($"[X] Camera '{objectId}' data.postProcess.bloom contains unknown or wrong-cased property '{prop.Name}'.");
+                }
+            }
+        }
+
+        private static bool ReadStrictBoolean(JsonElement element, string fieldName)
+        {
+            if (element.ValueKind != JsonValueKind.True && element.ValueKind != JsonValueKind.False)
+                throw new InvalidDataException($"[X] {fieldName} must be true or false.");
+
+            return element.GetBoolean();
         }
 
         private static LightRenderSettings ParseLightSettings(string? rawData, string objectId)

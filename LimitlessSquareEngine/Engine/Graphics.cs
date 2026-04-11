@@ -329,7 +329,7 @@ namespace LimitlessSquareEngine
                 Matrix4x4.CreateLookAt(Vector3.Zero, -Vector3.UnitX,  -Vector3.UnitY), // -X
                 Matrix4x4.CreateLookAt(Vector3.Zero,  Vector3.UnitY,   Vector3.UnitZ), // +Y
                 Matrix4x4.CreateLookAt(Vector3.Zero, -Vector3.UnitY,  -Vector3.UnitZ), // -Y
-                Matrix4x4.CreateLookAt(Vector3.Zero,  Vector3.UnitZ,  -Vector3.UnitY), // +Z
+                Matrix4x4.CreateLookAt(Vector3.Zero,  Vector3.UnitX,  -Vector3.UnitY), // +Z
                 Matrix4x4.CreateLookAt(Vector3.Zero, -Vector3.UnitZ,  -Vector3.UnitY), // -Z
             };
         }
@@ -578,6 +578,75 @@ namespace LimitlessSquareEngine
         private readonly Dictionary<string, SkyboxData> _cameraSkyboxes = new(StringComparer.Ordinal);
 
         private readonly Dictionary<string, FogSettings> _cameraFogSettings = new(StringComparer.Ordinal);
+
+        private sealed class CameraPostProcessSettings
+        {
+            public string CameraObjectId { get; set; } = "";
+
+            public bool Enabled { get; set; } = false;
+
+            public bool BrightnessEnabled { get; set; } = false;
+            public float Brightness { get; set; } = 1f;
+
+            public bool ContrastEnabled { get; set; } = false;
+            public float Contrast { get; set; } = 1f;
+
+            public bool SaturationEnabled { get; set; } = false;
+            public float Saturation { get; set; } = 1f;
+
+            public bool HueEnabled { get; set; } = false;
+            public float HueDegrees { get; set; } = 0f;
+
+            public bool TemperatureEnabled { get; set; } = false;
+            public float Temperature { get; set; } = 0f;
+
+            public bool BloomEnabled { get; set; } = false;
+            public float BloomThreshold { get; set; } = 1f;
+            public float BloomSoftKnee { get; set; } = 0.5f;
+            public float BloomIntensity { get; set; } = 0.7f;
+            public int BloomIterations { get; set; } = 10;
+            public int BloomDownsample { get; set; } = 2;
+        }
+
+        private readonly Dictionary<string, CameraPostProcessSettings> _cameraPostProcessSettings = new(StringComparer.Ordinal);
+
+        private uint _postProcessSceneFramebuffer = 0;
+        private uint _postProcessSceneColorTexture = 0;
+        private uint _postProcessSceneDepthTexture = 0;
+
+        private uint _postProcessPingFramebuffer = 0;
+        private uint _postProcessPingTexture = 0;
+        private uint _postProcessPongFramebuffer = 0;
+        private uint _postProcessPongTexture = 0;
+
+        private int _postProcessSceneWidth = 0;
+        private int _postProcessSceneHeight = 0;
+        private int _postProcessBloomWidth = 0;
+        private int _postProcessBloomHeight = 0;
+
+        private uint _postProcessExtractProgram = 0;
+        private uint _postProcessBlurProgram = 0;
+        private uint _postProcessCompositeProgram = 0;
+
+        private int _postProcessExtractSourceLoc = -1;
+        private int _postProcessExtractThresholdLoc = -1;
+        private int _postProcessExtractSoftKneeLoc = -1;
+
+        private int _postProcessBlurSourceLoc = -1;
+        private int _postProcessBlurTexelSizeLoc = -1;
+        private int _postProcessBlurHorizontalLoc = -1;
+
+        private int _postProcessCompositeSceneLoc = -1;
+        private int _postProcessCompositeBloomLoc = -1;
+        private int _postProcessCompositeBloomEnabledLoc = -1;
+        private int _postProcessCompositeBloomIntensityLoc = -1;
+        private int _postProcessCompositeBrightnessLoc = -1;
+        private int _postProcessCompositeContrastLoc = -1;
+        private int _postProcessCompositeSaturationLoc = -1;
+        private int _postProcessCompositeHueDegreesLoc = -1;
+        private int _postProcessCompositeTemperatureLoc = -1;
+
+        private readonly List<RenderCommand> _postProcessSceneCommandsScratch = new();
 
         private void InitializeReflectionCaptureResources()
         {
@@ -3435,6 +3504,186 @@ namespace LimitlessSquareEngine
             settings.End = Math.Max(settings.Start + 0.0001f, end);
         }
 
+        private CameraPostProcessSettings GetOrCreateCameraPostProcessSettings(string cameraObjectId)
+        {
+            if (string.IsNullOrWhiteSpace(cameraObjectId))
+                throw new ArgumentException("[X] Camera id cannot be null or empty.", nameof(cameraObjectId));
+
+            string key = cameraObjectId.Trim();
+
+            if (!_cameraPostProcessSettings.TryGetValue(key, out var settings))
+            {
+                settings = new CameraPostProcessSettings
+                {
+                    CameraObjectId = key
+                };
+                _cameraPostProcessSettings[key] = settings;
+            }
+
+            return settings;
+        }
+
+        private CameraPostProcessSettings? ResolvePostProcessForCamera(string cameraObjectId)
+        {
+            if (string.IsNullOrWhiteSpace(cameraObjectId))
+                return null;
+
+            if (_cameraPostProcessSettings.TryGetValue(cameraObjectId.Trim(), out var settings))
+                return settings;
+
+            return null;
+        }
+
+        private static bool NeedsPostProcess(CameraPostProcessSettings? settings)
+        {
+            if (settings == null || !settings.Enabled)
+                return false;
+
+            if (settings.BrightnessEnabled)
+                return true;
+
+            if (settings.ContrastEnabled)
+                return true;
+
+            if (settings.SaturationEnabled)
+                return true;
+
+            if (settings.HueEnabled)
+                return true;
+
+            if (settings.TemperatureEnabled)
+                return true;
+
+            if (settings.BloomEnabled)
+                return true;
+
+            return false;
+        }
+
+        private static bool NeedsBloom(CameraPostProcessSettings settings)
+        {
+            if (settings == null)
+                return false;
+
+            if (!settings.BloomEnabled)
+                return false;
+
+            if (settings.BloomIntensity <= 0.0001f)
+                return false;
+
+            return true;
+        }
+
+        public void SetCameraPostProcessEnabled(string cameraObjectId, bool enabled)
+        {
+            CameraPostProcessSettings settings = GetOrCreateCameraPostProcessSettings(cameraObjectId);
+            settings.Enabled = enabled;
+        }
+
+        public void SetCameraPostBrightnessEnabled(string cameraObjectId, bool enabled)
+        {
+            CameraPostProcessSettings settings = GetOrCreateCameraPostProcessSettings(cameraObjectId);
+            settings.BrightnessEnabled = enabled;
+        }
+
+        public void SetCameraPostContrastEnabled(string cameraObjectId, bool enabled)
+        {
+            CameraPostProcessSettings settings = GetOrCreateCameraPostProcessSettings(cameraObjectId);
+            settings.ContrastEnabled = enabled;
+        }
+
+        public void SetCameraPostSaturationEnabled(string cameraObjectId, bool enabled)
+        {
+            CameraPostProcessSettings settings = GetOrCreateCameraPostProcessSettings(cameraObjectId);
+            settings.SaturationEnabled = enabled;
+        }
+
+        public void SetCameraPostHueEnabled(string cameraObjectId, bool enabled)
+        {
+            CameraPostProcessSettings settings = GetOrCreateCameraPostProcessSettings(cameraObjectId);
+            settings.HueEnabled = enabled;
+        }
+
+        public void SetCameraPostTemperatureEnabled(string cameraObjectId, bool enabled)
+        {
+            CameraPostProcessSettings settings = GetOrCreateCameraPostProcessSettings(cameraObjectId);
+            settings.TemperatureEnabled = enabled;
+        }
+
+        public void SetCameraPostBrightness(string cameraObjectId, float value)
+        {
+            CameraPostProcessSettings settings = GetOrCreateCameraPostProcessSettings(cameraObjectId);
+            settings.Brightness = Math.Max(0f, value);
+        }
+
+        public void SetCameraPostContrast(string cameraObjectId, float value)
+        {
+            CameraPostProcessSettings settings = GetOrCreateCameraPostProcessSettings(cameraObjectId);
+            settings.Contrast = Math.Max(0f, value);
+        }
+
+        public void SetCameraPostSaturation(string cameraObjectId, float value)
+        {
+            CameraPostProcessSettings settings = GetOrCreateCameraPostProcessSettings(cameraObjectId);
+            settings.Saturation = Math.Max(0f, value);
+        }
+
+        public void SetCameraPostHue(string cameraObjectId, float degrees)
+        {
+            CameraPostProcessSettings settings = GetOrCreateCameraPostProcessSettings(cameraObjectId);
+            settings.HueDegrees = degrees;
+        }
+
+        public void SetCameraPostTemperature(string cameraObjectId, float value)
+        {
+            CameraPostProcessSettings settings = GetOrCreateCameraPostProcessSettings(cameraObjectId);
+            settings.Temperature = Math.Clamp(value, -1f, 1f);
+        }
+
+        public void SetCameraBloomEnabled(string cameraObjectId, bool enabled)
+        {
+            CameraPostProcessSettings settings = GetOrCreateCameraPostProcessSettings(cameraObjectId);
+            settings.BloomEnabled = enabled;
+        }
+
+        public void SetCameraBloomThreshold(string cameraObjectId, float value)
+        {
+            CameraPostProcessSettings settings = GetOrCreateCameraPostProcessSettings(cameraObjectId);
+            settings.BloomThreshold = Math.Max(0f, value);
+        }
+
+        public void SetCameraBloomSoftKnee(string cameraObjectId, float value)
+        {
+            CameraPostProcessSettings settings = GetOrCreateCameraPostProcessSettings(cameraObjectId);
+            settings.BloomSoftKnee = Math.Max(0.0001f, value);
+        }
+
+        public void SetCameraBloomIntensity(string cameraObjectId, float value)
+        {
+            CameraPostProcessSettings settings = GetOrCreateCameraPostProcessSettings(cameraObjectId);
+            settings.BloomIntensity = Math.Max(0f, value);
+        }
+
+        public void SetCameraBloomIterations(string cameraObjectId, int value)
+        {
+            CameraPostProcessSettings settings = GetOrCreateCameraPostProcessSettings(cameraObjectId);
+            settings.BloomIterations = Math.Clamp(value, 1, 16);
+        }
+
+        public void SetCameraBloomDownsample(string cameraObjectId, int value)
+        {
+            CameraPostProcessSettings settings = GetOrCreateCameraPostProcessSettings(cameraObjectId);
+            settings.BloomDownsample = Math.Clamp(value, 1, 8);
+        }
+
+        public void ClearCameraPostProcess(string cameraObjectId)
+        {
+            if (string.IsNullOrWhiteSpace(cameraObjectId))
+                return;
+
+            _cameraPostProcessSettings.Remove(cameraObjectId.Trim());
+        }
+
         public void SetMainCameraFogRange(float start, float end)
         {
             string mainCameraId = ResolveMainScreenCameraId();
@@ -3491,7 +3740,16 @@ namespace LimitlessSquareEngine
             _gl.BindVertexArray(_quadVao);
             _gl.BindBuffer(BufferTargetARB.ArrayBuffer, _quadVbo);
 
-            float[] vertices = new float[6 * 9];
+            float[] vertices =
+            {
+                -1f, -1f, 0f, 1f, 1f, 1f, 1f, 0f, 0f,
+                 1f, -1f, 0f, 1f, 1f, 1f, 1f, 1f, 0f,
+                 1f,  1f, 0f, 1f, 1f, 1f, 1f, 1f, 1f,
+
+                 1f,  1f, 0f, 1f, 1f, 1f, 1f, 1f, 1f,
+                -1f,  1f, 0f, 1f, 1f, 1f, 1f, 0f, 1f,
+                -1f, -1f, 0f, 1f, 1f, 1f, 1f, 0f, 0f
+            };
 
             _gl.BufferData(BufferTargetARB.ArrayBuffer, (ReadOnlySpan<float>)vertices, BufferUsageARB.DynamicDraw);
 
@@ -3507,6 +3765,13 @@ namespace LimitlessSquareEngine
             _gl.BindVertexArray(0);
 
             _quadInitialized = true;
+        }
+
+        private void DrawFullscreenQuad()
+        {
+            _gl.BindVertexArray(_quadVao);
+            _gl.DrawArrays(PrimitiveType.Triangles, 0, 6);
+            _gl.BindVertexArray(0);
         }
 
         /// <summary>
@@ -3536,6 +3801,7 @@ namespace LimitlessSquareEngine
             _gl.EnableVertexAttribArray(2);
 
             InitializeLightingSupportResources();
+            InitializePostProcessResources();
             const GLEnum TextureCubeMapSeamless = (GLEnum)0x884F;
             _gl.Enable(TextureCubeMapSeamless);
             _gl.Enable(GLEnum.DepthTest);
@@ -4086,6 +4352,611 @@ namespace LimitlessSquareEngine
 
                 _textures.Remove(fullPath);
             }
+        }
+
+        private uint CreatePostProcessExtractProgram()
+        {
+            string vertexSource = @"#version 430 core
+                layout(location = 0) in vec3 aPos;
+                layout(location = 2) in vec2 aUv;
+                out vec2 vUv;
+                void main()
+                {
+                    vUv = aUv;
+                    gl_Position = vec4(aPos.xy, 0.0, 1.0);
+                }";
+
+            string fragmentSource = @"#version 430 core
+                in vec2 vUv;
+                out vec4 FragColor;
+                uniform sampler2D uSource;
+                uniform float uThreshold;
+                uniform float uSoftKnee;
+                void main()
+                {
+                    vec3 color = texture(uSource, vUv).rgb;
+                    float brightness = max(max(color.r, color.g), color.b);
+                    float knee = max(uSoftKnee, 0.0001);
+                    float t = smoothstep(uThreshold - knee, uThreshold + knee, brightness);
+                    FragColor = vec4(color * t, 1.0);
+                }";
+
+            uint vs = CompileShader(ShaderType.VertexShader, vertexSource);
+            uint fs = CompileShader(ShaderType.FragmentShader, fragmentSource);
+
+            uint program = _gl.CreateProgram();
+            _gl.AttachShader(program, vs);
+            _gl.AttachShader(program, fs);
+            _gl.LinkProgram(program);
+
+            _gl.GetProgram(program, ProgramPropertyARB.LinkStatus, out int success);
+            if (success == 0)
+            {
+                string infoLog = _gl.GetProgramInfoLog(program);
+                throw new Exception($"[X] Post process extract shader link failed: {infoLog}");
+            }
+
+            _gl.DetachShader(program, vs);
+            _gl.DetachShader(program, fs);
+            _gl.DeleteShader(vs);
+            _gl.DeleteShader(fs);
+
+            return program;
+        }
+
+        private uint CreatePostProcessBlurProgram()
+        {
+            string vertexSource = @"#version 430 core
+                layout(location = 0) in vec3 aPos;
+                layout(location = 2) in vec2 aUv;
+                out vec2 vUv;
+                void main()
+                {
+                    vUv = aUv;
+                    gl_Position = vec4(aPos.xy, 0.0, 1.0);
+                }";
+
+            string fragmentSource = @"#version 430 core
+                in vec2 vUv;
+                out vec4 FragColor;
+                uniform sampler2D uSource;
+                uniform vec2 uTexelSize;
+                uniform int uHorizontal;
+                void main()
+                {
+                    vec2 axis = uHorizontal == 1 ? vec2(uTexelSize.x, 0.0) : vec2(0.0, uTexelSize.y);
+
+                    vec3 result = texture(uSource, vUv).rgb * 0.2270270270;
+                    result += texture(uSource, vUv + axis * 1.3846153846).rgb * 0.3162162162;
+                    result += texture(uSource, vUv - axis * 1.3846153846).rgb * 0.3162162162;
+                    result += texture(uSource, vUv + axis * 3.2307692308).rgb * 0.0702702703;
+                    result += texture(uSource, vUv - axis * 3.2307692308).rgb * 0.0702702703;
+
+                    FragColor = vec4(result, 1.0);
+                }";
+
+            uint vs = CompileShader(ShaderType.VertexShader, vertexSource);
+            uint fs = CompileShader(ShaderType.FragmentShader, fragmentSource);
+
+            uint program = _gl.CreateProgram();
+            _gl.AttachShader(program, vs);
+            _gl.AttachShader(program, fs);
+            _gl.LinkProgram(program);
+
+            _gl.GetProgram(program, ProgramPropertyARB.LinkStatus, out int success);
+            if (success == 0)
+            {
+                string infoLog = _gl.GetProgramInfoLog(program);
+                throw new Exception($"[X] Post process blur shader link failed: {infoLog}");
+            }
+
+            _gl.DetachShader(program, vs);
+            _gl.DetachShader(program, fs);
+            _gl.DeleteShader(vs);
+            _gl.DeleteShader(fs);
+
+            return program;
+        }
+
+        private uint CreatePostProcessCompositeProgram()
+        {
+            string vertexSource = @"#version 430 core
+                layout(location = 0) in vec3 aPos;
+                layout(location = 2) in vec2 aUv;
+                out vec2 vUv;
+                void main()
+                {
+                    vUv = aUv;
+                    gl_Position = vec4(aPos.xy, 0.0, 1.0);
+                }";
+
+            string fragmentSource = @"#version 430 core
+                in vec2 vUv;
+                out vec4 FragColor;
+
+                uniform sampler2D uSceneTexture;
+                uniform sampler2D uBloomTexture;
+                uniform int uBloomEnabled;
+                uniform float uBloomIntensity;
+
+                uniform float uBrightness;
+                uniform float uContrast;
+                uniform float uSaturation;
+                uniform float uHueDegrees;
+                uniform float uTemperature;
+
+                vec3 ApplyContrast(vec3 color, float contrast)
+                {
+                    return (color - vec3(0.5)) * contrast + vec3(0.5);
+                }
+
+                vec3 ApplySaturation(vec3 color, float saturation)
+                {
+                    float luma = dot(color, vec3(0.2126, 0.7152, 0.0722));
+                    return mix(vec3(luma), color, saturation);
+                }
+
+                vec3 ApplyTemperature(vec3 color, float temperature)
+                {
+                    float t = clamp(temperature, -1.0, 1.0);
+                    vec3 warm = vec3(1.0 + t * 0.1, 1.0, 1.0 - t * 0.1);
+                    return color * warm;
+                }
+
+                vec3 ApplyHue(vec3 color, float hueDegrees)
+                {
+                    float angle = radians(hueDegrees);
+                    float s = sin(angle);
+                    float c = cos(angle);
+
+                    mat3 toYiq = mat3(
+                        0.299, 0.587, 0.114,
+                        0.596, -0.274, -0.322,
+                        0.211, -0.523, 0.312
+                    );
+
+                    mat3 toRgb = mat3(
+                        1.0, 0.956, 0.621,
+                        1.0, -0.272, -0.647,
+                        1.0, -1.106, 1.703
+                    );
+
+                    vec3 yiq = toYiq * color;
+                    vec2 iq = mat2(c, -s, s, c) * yiq.yz;
+                    yiq.y = iq.x;
+                    yiq.z = iq.y;
+
+                    return toRgb * yiq;
+                }
+
+                void main()
+                {
+                    vec3 color = texture(uSceneTexture, vUv).rgb;
+
+                    if (uBloomEnabled == 1)
+                        color += texture(uBloomTexture, vUv).rgb * uBloomIntensity;
+
+                    color *= uBrightness;
+                    color = ApplyContrast(color, uContrast);
+                    color = ApplySaturation(color, uSaturation);
+                    color = ApplyHue(color, uHueDegrees);
+                    color = ApplyTemperature(color, uTemperature);
+
+                    FragColor = vec4(max(color, 0.0), 1.0);
+                }";
+            uint vs = CompileShader(ShaderType.VertexShader, vertexSource);
+            uint fs = CompileShader(ShaderType.FragmentShader, fragmentSource);
+
+            uint program = _gl.CreateProgram();
+            _gl.AttachShader(program, vs);
+            _gl.AttachShader(program, fs);
+            _gl.LinkProgram(program);
+
+            _gl.GetProgram(program, ProgramPropertyARB.LinkStatus, out int success);
+            if (success == 0)
+            {
+                string infoLog = _gl.GetProgramInfoLog(program);
+                throw new Exception($"[X] Post process composite shader link failed: {infoLog}");
+            }
+
+            _gl.DetachShader(program, vs);
+            _gl.DetachShader(program, fs);
+            _gl.DeleteShader(vs);
+            _gl.DeleteShader(fs);
+
+            return program;
+        }
+
+        private void InitializePostProcessResources()
+        {
+            if (_postProcessExtractProgram == 0)
+            {
+                _postProcessExtractProgram = CreatePostProcessExtractProgram();
+                _postProcessExtractSourceLoc = _gl.GetUniformLocation(_postProcessExtractProgram, "uSource");
+                _postProcessExtractThresholdLoc = _gl.GetUniformLocation(_postProcessExtractProgram, "uThreshold");
+                _postProcessExtractSoftKneeLoc = _gl.GetUniformLocation(_postProcessExtractProgram, "uSoftKnee");
+            }
+
+            if (_postProcessBlurProgram == 0)
+            {
+                _postProcessBlurProgram = CreatePostProcessBlurProgram();
+                _postProcessBlurSourceLoc = _gl.GetUniformLocation(_postProcessBlurProgram, "uSource");
+                _postProcessBlurTexelSizeLoc = _gl.GetUniformLocation(_postProcessBlurProgram, "uTexelSize");
+                _postProcessBlurHorizontalLoc = _gl.GetUniformLocation(_postProcessBlurProgram, "uHorizontal");
+            }
+
+            if (_postProcessCompositeProgram == 0)
+            {
+                _postProcessCompositeProgram = CreatePostProcessCompositeProgram();
+                _postProcessCompositeSceneLoc = _gl.GetUniformLocation(_postProcessCompositeProgram, "uSceneTexture");
+                _postProcessCompositeBloomLoc = _gl.GetUniformLocation(_postProcessCompositeProgram, "uBloomTexture");
+                _postProcessCompositeBloomEnabledLoc = _gl.GetUniformLocation(_postProcessCompositeProgram, "uBloomEnabled");
+                _postProcessCompositeBloomIntensityLoc = _gl.GetUniformLocation(_postProcessCompositeProgram, "uBloomIntensity");
+                _postProcessCompositeBrightnessLoc = _gl.GetUniformLocation(_postProcessCompositeProgram, "uBrightness");
+                _postProcessCompositeContrastLoc = _gl.GetUniformLocation(_postProcessCompositeProgram, "uContrast");
+                _postProcessCompositeSaturationLoc = _gl.GetUniformLocation(_postProcessCompositeProgram, "uSaturation");
+                _postProcessCompositeHueDegreesLoc = _gl.GetUniformLocation(_postProcessCompositeProgram, "uHueDegrees");
+                _postProcessCompositeTemperatureLoc = _gl.GetUniformLocation(_postProcessCompositeProgram, "uTemperature");
+            }
+        }
+
+        private uint CreatePostProcessColorTexture(int width, int height)
+        {
+
+            uint texture = _gl.GenTexture();
+            _gl.BindTexture(TextureTarget.Texture2D, texture);
+
+            float[] emptyColor = new float[Math.Max(1, width) * Math.Max(1, height) * 4];
+
+            _gl.TexImage2D(
+                TextureTarget.Texture2D,
+                0,
+                InternalFormat.Rgba16f,
+                (uint)width,
+                (uint)height,
+                0,
+                PixelFormat.Rgba,
+                PixelType.Float,
+                (ReadOnlySpan<float>)emptyColor);
+
+            _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.Linear);
+            _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMagFilter, (int)TextureMagFilter.Linear);
+            _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapS, (int)TextureWrapMode.ClampToEdge);
+            _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapT, (int)TextureWrapMode.ClampToEdge);
+            _gl.BindTexture(TextureTarget.Texture2D, 0);
+
+            return texture;
+        }
+
+        private uint CreatePostProcessDepthTexture(int width, int height)
+        {
+            uint texture = _gl.GenTexture();
+            _gl.BindTexture(TextureTarget.Texture2D, texture);
+
+            uint[] emptyDepthStencil = new uint[Math.Max(1, width) * Math.Max(1, height)];
+
+            _gl.TexImage2D(
+                TextureTarget.Texture2D,
+                0,
+                InternalFormat.Depth24Stencil8,
+                (uint)width,
+                (uint)height,
+                0,
+                PixelFormat.DepthStencil,
+                PixelType.UnsignedInt248,
+                (ReadOnlySpan<uint>)emptyDepthStencil);
+
+            _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.Nearest);
+            _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMagFilter, (int)TextureMagFilter.Nearest);
+            _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapS, (int)TextureWrapMode.ClampToEdge);
+            _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapT, (int)TextureWrapMode.ClampToEdge);
+            _gl.BindTexture(TextureTarget.Texture2D, 0);
+
+            return texture;
+        }
+
+        private void DeletePostProcessSceneTargets()
+        {
+            if (_postProcessSceneColorTexture != 0)
+            {
+                _gl.DeleteTexture(_postProcessSceneColorTexture);
+                _postProcessSceneColorTexture = 0;
+            }
+
+            if (_postProcessSceneDepthTexture != 0)
+            {
+                _gl.DeleteTexture(_postProcessSceneDepthTexture);
+                _postProcessSceneDepthTexture = 0;
+            }
+
+            if (_postProcessSceneFramebuffer != 0)
+            {
+                _gl.DeleteFramebuffer(_postProcessSceneFramebuffer);
+                _postProcessSceneFramebuffer = 0;
+            }
+
+            _postProcessSceneWidth = 0;
+            _postProcessSceneHeight = 0;
+        }
+
+        private void DeletePostProcessBloomTargets()
+        {
+            if (_postProcessPingTexture != 0)
+            {
+                _gl.DeleteTexture(_postProcessPingTexture);
+                _postProcessPingTexture = 0;
+            }
+
+            if (_postProcessPongTexture != 0)
+            {
+                _gl.DeleteTexture(_postProcessPongTexture);
+                _postProcessPongTexture = 0;
+            }
+
+            if (_postProcessPingFramebuffer != 0)
+            {
+                _gl.DeleteFramebuffer(_postProcessPingFramebuffer);
+                _postProcessPingFramebuffer = 0;
+            }
+
+            if (_postProcessPongFramebuffer != 0)
+            {
+                _gl.DeleteFramebuffer(_postProcessPongFramebuffer);
+                _postProcessPongFramebuffer = 0;
+            }
+
+            _postProcessBloomWidth = 0;
+            _postProcessBloomHeight = 0;
+        }
+
+        private void EnsurePostProcessSceneTargets(int width, int height)
+        {
+            if (_postProcessSceneFramebuffer != 0 &&
+                _postProcessSceneColorTexture != 0 &&
+                _postProcessSceneDepthTexture != 0 &&
+                _postProcessSceneWidth == width &&
+                _postProcessSceneHeight == height)
+            {
+                return;
+            }
+
+            DeletePostProcessSceneTargets();
+
+            _postProcessSceneFramebuffer = _gl.GenFramebuffer();
+            _postProcessSceneColorTexture = CreatePostProcessColorTexture(width, height);
+            _postProcessSceneDepthTexture = CreatePostProcessDepthTexture(width, height);
+
+            _gl.BindFramebuffer(FramebufferTarget.Framebuffer, _postProcessSceneFramebuffer);
+            _gl.FramebufferTexture2D(FramebufferTarget.Framebuffer, FramebufferAttachment.ColorAttachment0, TextureTarget.Texture2D, _postProcessSceneColorTexture, 0);
+            _gl.FramebufferTexture2D(FramebufferTarget.Framebuffer, FramebufferAttachment.DepthStencilAttachment, TextureTarget.Texture2D, _postProcessSceneDepthTexture, 0);
+
+            GLEnum status = _gl.CheckFramebufferStatus(FramebufferTarget.Framebuffer);
+            if (status != GLEnum.FramebufferComplete)
+                throw new Exception($"[X] Post process scene framebuffer incomplete: {status}");
+
+            _gl.BindFramebuffer(FramebufferTarget.Framebuffer, 0);
+
+            _postProcessSceneWidth = width;
+            _postProcessSceneHeight = height;
+        }
+
+        private void EnsurePostProcessBloomTargets(int width, int height)
+        {
+            if (_postProcessPingFramebuffer != 0 &&
+                _postProcessPongFramebuffer != 0 &&
+                _postProcessPingTexture != 0 &&
+                _postProcessPongTexture != 0 &&
+                _postProcessBloomWidth == width &&
+                _postProcessBloomHeight == height)
+            {
+                return;
+            }
+
+            DeletePostProcessBloomTargets();
+
+            _postProcessPingFramebuffer = _gl.GenFramebuffer();
+            _postProcessPingTexture = CreatePostProcessColorTexture(width, height);
+            _gl.BindFramebuffer(FramebufferTarget.Framebuffer, _postProcessPingFramebuffer);
+            _gl.FramebufferTexture2D(FramebufferTarget.Framebuffer, FramebufferAttachment.ColorAttachment0, TextureTarget.Texture2D, _postProcessPingTexture, 0);
+
+            GLEnum pingStatus = _gl.CheckFramebufferStatus(FramebufferTarget.Framebuffer);
+            if (pingStatus != GLEnum.FramebufferComplete)
+                throw new Exception($"[X] Post process ping framebuffer incomplete: {pingStatus}");
+
+            _postProcessPongFramebuffer = _gl.GenFramebuffer();
+            _postProcessPongTexture = CreatePostProcessColorTexture(width, height);
+            _gl.BindFramebuffer(FramebufferTarget.Framebuffer, _postProcessPongFramebuffer);
+            _gl.FramebufferTexture2D(FramebufferTarget.Framebuffer, FramebufferAttachment.ColorAttachment0, TextureTarget.Texture2D, _postProcessPongTexture, 0);
+
+            GLEnum pongStatus = _gl.CheckFramebufferStatus(FramebufferTarget.Framebuffer);
+            if (pongStatus != GLEnum.FramebufferComplete)
+                throw new Exception($"[X] Post process pong framebuffer incomplete: {pongStatus}");
+
+            _gl.BindFramebuffer(FramebufferTarget.Framebuffer, 0);
+
+            _postProcessBloomWidth = width;
+            _postProcessBloomHeight = height;
+        }
+
+        private void CopyBatchCommandsForOffscreen(List<RenderCommand> source, List<RenderCommand> destination, int width, int height)
+        {
+            destination.Clear();
+
+            for (int i = 0; i < source.Count; i++)
+            {
+                RenderCommand cmd = source[i];
+                cmd.ViewportX = 0;
+                cmd.ViewportY = 0;
+                cmd.ViewportWidth = width;
+                cmd.ViewportHeight = height;
+                destination.Add(cmd);
+            }
+        }
+
+        private void RenderBatchToPostProcessSceneTarget(in RenderCommand first, List<RenderCommand> batchCommands)
+        {
+            InitializePostProcessResources();
+            EnsurePostProcessSceneTargets(Math.Max(1, first.ViewportWidth), Math.Max(1, first.ViewportHeight));
+
+            CopyBatchCommandsForOffscreen(batchCommands, _postProcessSceneCommandsScratch, Math.Max(1, first.ViewportWidth), Math.Max(1, first.ViewportHeight));
+
+            _gl.BindFramebuffer(FramebufferTarget.Framebuffer, _postProcessSceneFramebuffer);
+            _gl.Viewport(0, 0, (uint)Math.Max(1, first.ViewportWidth), (uint)Math.Max(1, first.ViewportHeight));
+
+            _gl.Enable(GLEnum.ScissorTest);
+            _gl.Scissor(0, 0, (uint)Math.Max(1, first.ViewportWidth), (uint)Math.Max(1, first.ViewportHeight));
+            _gl.ClearColor(_backgroundColor.X, _backgroundColor.Y, _backgroundColor.Z, _backgroundColor.W);
+            _gl.ClearDepth(first.UseReverseZ ? 0.0 : 1.0);
+            _gl.Clear(ClearBufferMask.ColorBufferBit | ClearBufferMask.DepthBufferBit | ClearBufferMask.StencilBufferBit);
+            _gl.Disable(GLEnum.ScissorTest);
+
+            ExecuteSortedCommands(_postProcessSceneCommandsScratch, first.UseReverseZ);
+        }
+
+        private void ExecuteBloomPasses(CameraPostProcessSettings settings)
+        {
+            if (!NeedsBloom(settings))
+                return;
+
+            int bloomWidth = Math.Max(1, _postProcessSceneWidth / Math.Max(1, settings.BloomDownsample));
+            int bloomHeight = Math.Max(1, _postProcessSceneHeight / Math.Max(1, settings.BloomDownsample));
+
+            EnsurePostProcessBloomTargets(bloomWidth, bloomHeight);
+
+            _gl.Disable(GLEnum.DepthTest);
+            _gl.DepthMask(false);
+            _gl.Disable(GLEnum.ScissorTest);
+            _gl.Disable(GLEnum.Blend);
+            _gl.Disable(GLEnum.CullFace);
+
+            _currentProgram = _postProcessExtractProgram;
+            _gl.UseProgram(_postProcessExtractProgram);
+
+            _gl.BindFramebuffer(FramebufferTarget.Framebuffer, _postProcessPingFramebuffer);
+            _gl.Viewport(0, 0, (uint)bloomWidth, (uint)bloomHeight);
+
+            _gl.ActiveTexture(TextureUnit.Texture0);
+            _gl.BindTexture(TextureTarget.Texture2D, _postProcessSceneColorTexture);
+            if (_postProcessExtractSourceLoc != -1)
+                _gl.Uniform1(_postProcessExtractSourceLoc, 0);
+            if (_postProcessExtractThresholdLoc != -1)
+                _gl.Uniform1(_postProcessExtractThresholdLoc, settings.BloomThreshold);
+            if (_postProcessExtractSoftKneeLoc != -1)
+                _gl.Uniform1(_postProcessExtractSoftKneeLoc, settings.BloomSoftKnee);
+
+            DrawFullscreenQuad();
+
+            _currentProgram = _postProcessBlurProgram;
+            _gl.UseProgram(_postProcessBlurProgram);
+
+            if (_postProcessBlurSourceLoc != -1)
+                _gl.Uniform1(_postProcessBlurSourceLoc, 0);
+
+            for (int i = 0; i < settings.BloomIterations; i++)
+            {
+                _gl.BindFramebuffer(FramebufferTarget.Framebuffer, _postProcessPongFramebuffer);
+                _gl.Viewport(0, 0, (uint)bloomWidth, (uint)bloomHeight);
+                _gl.ActiveTexture(TextureUnit.Texture0);
+                _gl.BindTexture(TextureTarget.Texture2D, _postProcessPingTexture);
+                if (_postProcessBlurTexelSizeLoc != -1)
+                    _gl.Uniform2(_postProcessBlurTexelSizeLoc, 1f / bloomWidth, 1f / bloomHeight);
+                if (_postProcessBlurHorizontalLoc != -1)
+                    _gl.Uniform1(_postProcessBlurHorizontalLoc, 1);
+                DrawFullscreenQuad();
+
+                _gl.BindFramebuffer(FramebufferTarget.Framebuffer, _postProcessPingFramebuffer);
+                _gl.Viewport(0, 0, (uint)bloomWidth, (uint)bloomHeight);
+                _gl.ActiveTexture(TextureUnit.Texture0);
+                _gl.BindTexture(TextureTarget.Texture2D, _postProcessPongTexture);
+                if (_postProcessBlurTexelSizeLoc != -1)
+                    _gl.Uniform2(_postProcessBlurTexelSizeLoc, 1f / bloomWidth, 1f / bloomHeight);
+                if (_postProcessBlurHorizontalLoc != -1)
+                    _gl.Uniform1(_postProcessBlurHorizontalLoc, 0);
+                DrawFullscreenQuad();
+            }
+
+            _gl.ActiveTexture(TextureUnit.Texture0);
+            _gl.BindTexture(TextureTarget.Texture2D, 0);
+        }
+
+        private void CompositePostProcessToBackbuffer(in RenderCommand first, CameraPostProcessSettings settings)
+        {
+            _gl.BindFramebuffer(FramebufferTarget.Framebuffer, 0);
+            _gl.Viewport(first.ViewportX, first.ViewportY, (uint)Math.Max(1, first.ViewportWidth), (uint)Math.Max(1, first.ViewportHeight));
+
+            _gl.Enable(GLEnum.ScissorTest);
+            _gl.Scissor(first.ViewportX, first.ViewportY, (uint)Math.Max(1, first.ViewportWidth), (uint)Math.Max(1, first.ViewportHeight));
+
+            _gl.Disable(GLEnum.DepthTest);
+            _gl.DepthMask(false);
+            _gl.Disable(GLEnum.Blend);
+            _gl.Disable(GLEnum.CullFace);
+
+            _currentProgram = _postProcessCompositeProgram;
+            _gl.UseProgram(_postProcessCompositeProgram);
+
+            _gl.ActiveTexture(TextureUnit.Texture0);
+            _gl.BindTexture(TextureTarget.Texture2D, _postProcessSceneColorTexture);
+            if (_postProcessCompositeSceneLoc != -1)
+                _gl.Uniform1(_postProcessCompositeSceneLoc, 0);
+
+            _gl.ActiveTexture((TextureUnit)((int)TextureUnit.Texture0 + 1));
+            _gl.BindTexture(TextureTarget.Texture2D, NeedsBloom(settings) ? _postProcessPingTexture : _postProcessSceneColorTexture);
+            if (_postProcessCompositeBloomLoc != -1)
+                _gl.Uniform1(_postProcessCompositeBloomLoc, 1);
+
+            if (_postProcessCompositeBloomEnabledLoc != -1)
+                _gl.Uniform1(_postProcessCompositeBloomEnabledLoc, NeedsBloom(settings) ? 1 : 0);
+
+            float compositeBloomIntensity =
+                settings.BloomEnabled ? settings.BloomIntensity : 0f;
+
+            float compositeBrightness =
+                settings.BrightnessEnabled ? settings.Brightness : 1f;
+
+            float compositeContrast =
+                settings.ContrastEnabled ? settings.Contrast : 1f;
+
+            float compositeSaturation =
+                settings.SaturationEnabled ? settings.Saturation : 1f;
+
+            float compositeHueDegrees =
+                settings.HueEnabled ? settings.HueDegrees : 0f;
+
+            float compositeTemperature =
+                settings.TemperatureEnabled ? settings.Temperature : 0f;
+
+            if (_postProcessCompositeBloomIntensityLoc != -1)
+                _gl.Uniform1(_postProcessCompositeBloomIntensityLoc, compositeBloomIntensity);
+
+            if (_postProcessCompositeBrightnessLoc != -1)
+                _gl.Uniform1(_postProcessCompositeBrightnessLoc, compositeBrightness);
+
+            if (_postProcessCompositeContrastLoc != -1)
+                _gl.Uniform1(_postProcessCompositeContrastLoc, compositeContrast);
+
+            if (_postProcessCompositeSaturationLoc != -1)
+                _gl.Uniform1(_postProcessCompositeSaturationLoc, compositeSaturation);
+
+            if (_postProcessCompositeHueDegreesLoc != -1)
+                _gl.Uniform1(_postProcessCompositeHueDegreesLoc, compositeHueDegrees);
+
+            if (_postProcessCompositeTemperatureLoc != -1)
+                _gl.Uniform1(_postProcessCompositeTemperatureLoc, compositeTemperature);
+
+            DrawFullscreenQuad();
+
+            _gl.ActiveTexture((TextureUnit)((int)TextureUnit.Texture0 + 1));
+            _gl.BindTexture(TextureTarget.Texture2D, 0);
+            _gl.ActiveTexture(TextureUnit.Texture0);
+            _gl.BindTexture(TextureTarget.Texture2D, 0);
+
+            _gl.Disable(GLEnum.ScissorTest);
+            _gl.DepthMask(true);
+            _gl.Enable(GLEnum.DepthTest);
+            _gl.DepthFunc(GLEnum.Less);
+            _gl.Enable(GLEnum.Blend);
+            _gl.BlendFunc(GLEnum.SrcAlpha, GLEnum.OneMinusSrcAlpha);
         }
 
         /// <summary>
@@ -6270,6 +7141,35 @@ namespace LimitlessSquareEngine
 
             long batchId = ++_sceneBatchCounter;
 
+            ClearCameraPostProcess(cameraItem.ObjectId);
+
+            LimitlessSquareEngine.Engine.CameraPostProcessSettings postProcess =
+                cameraItem.Settings.PostProcess;
+
+            SetCameraPostProcessEnabled(cameraItem.ObjectId, postProcess.Enabled);
+
+            SetCameraPostBrightnessEnabled(cameraItem.ObjectId, postProcess.Brightness.Enabled);
+            SetCameraPostBrightness(cameraItem.ObjectId, (float)postProcess.Brightness.Value);
+
+            SetCameraPostContrastEnabled(cameraItem.ObjectId, postProcess.Contrast.Enabled);
+            SetCameraPostContrast(cameraItem.ObjectId, (float)postProcess.Contrast.Value);
+
+            SetCameraPostSaturationEnabled(cameraItem.ObjectId, postProcess.Saturation.Enabled);
+            SetCameraPostSaturation(cameraItem.ObjectId, (float)postProcess.Saturation.Value);
+
+            SetCameraPostHueEnabled(cameraItem.ObjectId, postProcess.Hue.Enabled);
+            SetCameraPostHue(cameraItem.ObjectId, (float)postProcess.Hue.Degrees);
+
+            SetCameraPostTemperatureEnabled(cameraItem.ObjectId, postProcess.Temperature.Enabled);
+            SetCameraPostTemperature(cameraItem.ObjectId, (float)postProcess.Temperature.Value);
+
+            SetCameraBloomEnabled(cameraItem.ObjectId, postProcess.Bloom.Enabled);
+            SetCameraBloomThreshold(cameraItem.ObjectId, (float)postProcess.Bloom.Threshold);
+            SetCameraBloomSoftKnee(cameraItem.ObjectId, (float)postProcess.Bloom.SoftKnee);
+            SetCameraBloomIntensity(cameraItem.ObjectId, (float)postProcess.Bloom.Intensity);
+            SetCameraBloomIterations(cameraItem.ObjectId, postProcess.Bloom.Iterations);
+            SetCameraBloomDownsample(cameraItem.ObjectId, postProcess.Bloom.Downsample);
+
             SkyboxData skybox = ResolveSkyboxForCamera(cameraItem.ObjectId, cameraItem.Settings.RenderMode, mainScreenCameraId);
 
             if (skybox != null)
@@ -6642,25 +7542,38 @@ namespace LimitlessSquareEngine
                 CaptureSkyboxReflectionForBatch(first, batchSkybox);
                 PrepareDirectionalShadowBatch(first, batchCommands);
 
-                // 清主屏颜色和深度
-                _gl.BindFramebuffer(FramebufferTarget.Framebuffer, 0);
-                _gl.Viewport(
-                    first.ViewportX,
-                    first.ViewportY,
-                    (uint)Math.Max(1, first.ViewportWidth),
-                    (uint)Math.Max(1, first.ViewportHeight));
+                CameraPostProcessSettings? postSettings = ResolvePostProcessForCamera(first.CameraObjectId);
 
-                _gl.Enable(GLEnum.ScissorTest);
-                _gl.Scissor(
-                    first.ViewportX,
-                    first.ViewportY,
-                    (uint)Math.Max(1, first.ViewportWidth),
-                    (uint)Math.Max(1, first.ViewportHeight));
-                _gl.ClearColor(_backgroundColor.X, _backgroundColor.Y, _backgroundColor.Z, _backgroundColor.W);
-                _gl.ClearDepth(first.UseReverseZ ? 0.0 : 1.0);
-                _gl.Clear(ClearBufferMask.ColorBufferBit | ClearBufferMask.DepthBufferBit | ClearBufferMask.StencilBufferBit);
-                _gl.Disable(GLEnum.ScissorTest);
-                ExecuteSortedCommands(batchCommands, first.UseReverseZ);
+                if (NeedsPostProcess(postSettings))
+                {
+                    RenderBatchToPostProcessSceneTarget(first, batchCommands);
+
+                    if (NeedsBloom(postSettings))
+                        ExecuteBloomPasses(postSettings);
+
+                    CompositePostProcessToBackbuffer(first, postSettings);
+                }
+                else
+                {
+                    _gl.BindFramebuffer(FramebufferTarget.Framebuffer, 0);
+                    _gl.Viewport(
+                        first.ViewportX,
+                        first.ViewportY,
+                        (uint)Math.Max(1, first.ViewportWidth),
+                        (uint)Math.Max(1, first.ViewportHeight));
+
+                    _gl.Enable(GLEnum.ScissorTest);
+                    _gl.Scissor(
+                        first.ViewportX,
+                        first.ViewportY,
+                        (uint)Math.Max(1, first.ViewportWidth),
+                        (uint)Math.Max(1, first.ViewportHeight));
+                    _gl.ClearColor(_backgroundColor.X, _backgroundColor.Y, _backgroundColor.Z, _backgroundColor.W);
+                    _gl.ClearDepth(first.UseReverseZ ? 0.0 : 1.0);
+                    _gl.Clear(ClearBufferMask.ColorBufferBit | ClearBufferMask.DepthBufferBit | ClearBufferMask.StencilBufferBit);
+                    _gl.Disable(GLEnum.ScissorTest);
+                    ExecuteSortedCommands(batchCommands, first.UseReverseZ);
+                }
             }
 
             _gl.BindFramebuffer(FramebufferTarget.Framebuffer, 0);
@@ -7253,6 +8166,45 @@ namespace LimitlessSquareEngine
             _programUniformCache.Clear();
             _programLocationCache.Clear();
             _programMaterialDefaultsCache.Clear();
+
+            DeletePostProcessSceneTargets();
+            DeletePostProcessBloomTargets();
+
+            if (_postProcessExtractProgram != 0)
+            {
+                _gl.DeleteProgram(_postProcessExtractProgram);
+                _postProcessExtractProgram = 0;
+            }
+
+            if (_postProcessBlurProgram != 0)
+            {
+                _gl.DeleteProgram(_postProcessBlurProgram);
+                _postProcessBlurProgram = 0;
+            }
+
+            if (_postProcessCompositeProgram != 0)
+            {
+                _gl.DeleteProgram(_postProcessCompositeProgram);
+                _postProcessCompositeProgram = 0;
+            }
+
+            _postProcessExtractSourceLoc = -1;
+            _postProcessExtractThresholdLoc = -1;
+            _postProcessExtractSoftKneeLoc = -1;
+            _postProcessBlurSourceLoc = -1;
+            _postProcessBlurTexelSizeLoc = -1;
+            _postProcessBlurHorizontalLoc = -1;
+            _postProcessCompositeSceneLoc = -1;
+            _postProcessCompositeBloomLoc = -1;
+            _postProcessCompositeBloomEnabledLoc = -1;
+            _postProcessCompositeBloomIntensityLoc = -1;
+            _postProcessCompositeBrightnessLoc = -1;
+            _postProcessCompositeContrastLoc = -1;
+            _postProcessCompositeSaturationLoc = -1;
+            _postProcessCompositeHueDegreesLoc = -1;
+            _postProcessCompositeTemperatureLoc = -1;
+
+            _cameraPostProcessSettings.Clear();
 
             if (_shadowAtlasTexture != 0)
             {
