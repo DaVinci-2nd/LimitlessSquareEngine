@@ -329,7 +329,7 @@ namespace LimitlessSquareEngine
                 Matrix4x4.CreateLookAt(Vector3.Zero, -Vector3.UnitX,  -Vector3.UnitY), // -X
                 Matrix4x4.CreateLookAt(Vector3.Zero,  Vector3.UnitY,   Vector3.UnitZ), // +Y
                 Matrix4x4.CreateLookAt(Vector3.Zero, -Vector3.UnitY,  -Vector3.UnitZ), // -Y
-                Matrix4x4.CreateLookAt(Vector3.Zero,  Vector3.UnitX,  -Vector3.UnitY), // +Z
+                Matrix4x4.CreateLookAt(Vector3.Zero,  Vector3.UnitZ,  -Vector3.UnitY), // +Z
                 Matrix4x4.CreateLookAt(Vector3.Zero, -Vector3.UnitZ,  -Vector3.UnitY), // -Z
             };
         }
@@ -604,7 +604,7 @@ namespace LimitlessSquareEngine
             public float BloomThreshold { get; set; } = 1f;
             public float BloomSoftKnee { get; set; } = 0.5f;
             public float BloomIntensity { get; set; } = 0.7f;
-            public int BloomIterations { get; set; } = 10;
+            public int BloomIterations { get; set; } = 100;
             public int BloomDownsample { get; set; } = 2;
         }
 
