@@ -219,6 +219,8 @@ namespace LimitlessSquareEngine
         private string _capturedSkyboxReflectionSkyboxId = "";
         private uint _capturedSkyboxReflectionProgram = 0;
         private string _capturedSkyboxReflectionParametersRaw = "";
+        private bool _pendingSkyboxReflectionRefreshAfterRender = false;
+        private bool _skyboxRenderedThisFrame = false;
 
         private const int _gpuPointLightStrideFloats = 52;
         private const int _clusterCount = _clusterGridSizeX * _clusterGridSizeY * _clusterGridSizeZ;
@@ -3348,12 +3350,14 @@ namespace LimitlessSquareEngine
         {
             _screenSkybox = BuildSkyboxData("__screen__", shaderName, parametersJson);
             ResetCapturedSkyboxReflectionCache();
+            _pendingSkyboxReflectionRefreshAfterRender = true;
         }
 
         public void ClearScreenSkybox()
         {
             _screenSkybox = null;
             ResetCapturedSkyboxReflectionCache();
+            _pendingSkyboxReflectionRefreshAfterRender = true;
         }
 
         public void SetCameraSkybox(string cameraObjectId, string shaderName, string parametersJson = "{}")
@@ -3364,6 +3368,7 @@ namespace LimitlessSquareEngine
             string key = cameraObjectId.Trim();
             _cameraSkyboxes[key] = BuildSkyboxData(key, shaderName, parametersJson);
             ResetCapturedSkyboxReflectionCache();
+            _pendingSkyboxReflectionRefreshAfterRender = true;
         }
 
         public void ClearCameraSkybox(string cameraObjectId)
@@ -3373,6 +3378,7 @@ namespace LimitlessSquareEngine
 
             _cameraSkyboxes.Remove(cameraObjectId.Trim());
             ResetCapturedSkyboxReflectionCache();
+            _pendingSkyboxReflectionRefreshAfterRender = true;
         }
 
         private FogSettings GetOrCreateFogSettings(string cameraObjectId)
@@ -7500,6 +7506,7 @@ namespace LimitlessSquareEngine
         [MoonSharpHidden]
         public void ExecuteRenderQueue()
         {
+            _skyboxRenderedThisFrame = false;
             _sceneCommandsScratch.Clear();
             _canvasCommandsScratch.Clear();
 
@@ -7515,6 +7522,12 @@ namespace LimitlessSquareEngine
 
             ExecuteScenePass(_sceneCommandsScratch);
             ExecuteCanvasPass(_canvasCommandsScratch);
+
+            if (_pendingSkyboxReflectionRefreshAfterRender && _skyboxRenderedThisFrame)
+            {
+                ResetCapturedSkyboxReflectionCache();
+                _pendingSkyboxReflectionRefreshAfterRender = false;
+            }
 
             _renderQueue.Clear();
         }
@@ -7539,7 +7552,12 @@ namespace LimitlessSquareEngine
                     .Select(c => c.Skybox)
                     .FirstOrDefault();
 
-                CaptureSkyboxReflectionForBatch(first, batchSkybox);
+                if (batchSkybox != null)
+                    _skyboxRenderedThisFrame = true;
+
+                if (!_pendingSkyboxReflectionRefreshAfterRender)
+                    CaptureSkyboxReflectionForBatch(first, batchSkybox);
+
                 PrepareDirectionalShadowBatch(first, batchCommands);
 
                 CameraPostProcessSettings? postSettings = ResolvePostProcessForCamera(first.CameraObjectId);
