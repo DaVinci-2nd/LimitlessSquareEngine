@@ -48,6 +48,18 @@ namespace LimitlessSquareEngine.Editor
         private string? _currentPreviewScenePath;
         private SceneData? _currentTreeScene;
         private SceneData? _currentPreviewScene;
+
+        private string? _currentSceneOriginalPath;
+        private Border? _sceneTreeDockHeader;
+        private TextBlock? _sceneTreeDockHeaderTitleText;
+        private TextBlock? _sceneTreeDockHeaderDirtyMarkText;
+        private MenuItem? _saveSceneMenuItem;
+        private MenuItem? _undoSceneMenuItem;
+        private MenuItem? _redoSceneMenuItem;
+        private readonly List<SceneData> _sceneUndoStack = new List<SceneData>();
+        private readonly List<SceneData> _sceneRedoStack = new List<SceneData>();
+        private bool _isApplyingSceneHistory;
+
         private SceneObject? _selectedSceneObject;
         private bool _isUpdatingSceneInspector;
         private bool _isProgrammaticSceneTreeSelection;
@@ -743,7 +755,7 @@ namespace LimitlessSquareEngine.Editor
             workspace.RowDefinitions.Add(new RowDefinition(5, GridUnitType.Pixel));
             workspace.RowDefinitions.Add(new RowDefinition(320, GridUnitType.Pixel));
 
-            Control leftPanel = CreateDockContainer("场景树/画布树", LeftDockSlot);
+            Control leftPanel = CreateSceneTreeDockContainer();
             Control scenePanel = CreateDockContainer("场景/画布", CreateSceneHostContent());
             Control rightPanel = CreateDockContainer("查看器", RightDockSlot);
             Control bottomPanel = CreateBottomWorkspace();
@@ -953,6 +965,66 @@ namespace LimitlessSquareEngine.Editor
             return grid;
         }
 
+        private Control CreateSceneTreeDockContainer()
+        {
+            Grid grid = new Grid();
+            grid.RowDefinitions.Add(new RowDefinition(32, GridUnitType.Pixel));
+            grid.RowDefinitions.Add(new RowDefinition(1, GridUnitType.Star));
+
+            _sceneTreeDockHeaderTitleText = new TextBlock
+            {
+                Text = "场景树/画布树",
+                VerticalAlignment = VerticalAlignment.Center,
+                Foreground = Brushes.White,
+                FontWeight = FontWeight.Bold
+            };
+
+            _sceneTreeDockHeaderDirtyMarkText = new TextBlock
+            {
+                Text = "",
+                VerticalAlignment = VerticalAlignment.Center,
+                HorizontalAlignment = HorizontalAlignment.Right,
+                Foreground = Brushes.White,
+                FontWeight = FontWeight.Bold
+            };
+
+            Grid headerContent = new Grid
+            {
+                ColumnDefinitions = new ColumnDefinitions("*,Auto")
+            };
+
+            Grid.SetColumn(_sceneTreeDockHeaderTitleText, 0);
+            Grid.SetColumn(_sceneTreeDockHeaderDirtyMarkText, 1);
+
+            headerContent.Children.Add(_sceneTreeDockHeaderTitleText);
+            headerContent.Children.Add(_sceneTreeDockHeaderDirtyMarkText);
+
+            _sceneTreeDockHeader = new Border
+            {
+                Background = new SolidColorBrush(Color.Parse("#222222")),
+                BorderBrush = new SolidColorBrush(Color.Parse("#444444")),
+                BorderThickness = new Thickness(0, 0, 0, 1),
+                Padding = new Thickness(10, 0),
+                Child = headerContent
+            };
+
+            Border body = new Border
+            {
+                Background = new SolidColorBrush(Color.Parse("#111111")),
+                BorderBrush = new SolidColorBrush(Color.Parse("#444444")),
+                BorderThickness = new Thickness(1),
+                Child = LeftDockSlot
+            };
+
+            Grid.SetRow(_sceneTreeDockHeader, 0);
+            Grid.SetRow(body, 1);
+
+            grid.Children.Add(_sceneTreeDockHeader);
+            grid.Children.Add(body);
+
+            return grid;
+        }
+
         private Control CreateBottomWorkspace()
         {
             Grid grid = new Grid();
@@ -1113,12 +1185,27 @@ namespace LimitlessSquareEngine.Editor
 
             root.Children.Add(CreateTextPropertyEditor("名称", () => obj.Name ?? "", value =>
             {
-                obj.Name = value;
+                string newValue = value ?? string.Empty;
+                string oldValue = obj.Name ?? string.Empty;
+
+                if (string.Equals(oldValue, newValue, StringComparison.Ordinal))
+                    return true;
+
+                BeginSceneParameterChange();
+                obj.Name = newValue;
                 return PersistSceneObjectChanges(obj, true);
             }));
+
             root.Children.Add(CreateTextPropertyEditor("类型", () => obj.Type ?? "", value =>
             {
-                obj.Type = value;
+                string newValue = value ?? string.Empty;
+                string oldValue = obj.Type ?? string.Empty;
+
+                if (string.Equals(oldValue, newValue, StringComparison.Ordinal))
+                    return true;
+
+                BeginSceneParameterChange();
+                obj.Type = newValue;
                 return PersistSceneObjectChanges(obj, true);
             }));
 
@@ -1128,27 +1215,42 @@ namespace LimitlessSquareEngine.Editor
             }));
 
             root.Children.Add(CreateInspectorSectionHeader("变换"));
+
             root.Children.Add(CreateVector3PropertyEditor(
                 "位置",
                 () => obj.Transform!.LocalPosition,
                 value =>
                 {
+                    if (Double3Equals(obj.Transform!.LocalPosition, value))
+                        return true;
+
+                    BeginSceneParameterChange();
                     obj.Transform!.LocalPosition = value;
                     return PersistSceneObjectChanges(obj, false);
                 }));
+
             root.Children.Add(CreateVector3PropertyEditor(
                 "旋转",
                 () => obj.Transform!.LocalRotation,
                 value =>
                 {
+                    if (Double3Equals(obj.Transform!.LocalRotation, value))
+                        return true;
+
+                    BeginSceneParameterChange();
                     obj.Transform!.LocalRotation = value;
                     return PersistSceneObjectChanges(obj, false);
                 }));
+
             root.Children.Add(CreateVector3PropertyEditor(
                 "缩放",
                 () => obj.Transform!.LocalScale,
                 value =>
                 {
+                    if (Double3Equals(obj.Transform!.LocalScale, value))
+                        return true;
+
+                    BeginSceneParameterChange();
                     obj.Transform!.LocalScale = value;
                     return PersistSceneObjectChanges(obj, false);
                 }));
@@ -1156,33 +1258,77 @@ namespace LimitlessSquareEngine.Editor
             root.Children.Add(CreateInspectorSectionHeader("参数"));
             root.Children.Add(CreateTextPropertyEditor("Controller", () => obj.Controller ?? "", value =>
             {
-                obj.Controller = string.IsNullOrWhiteSpace(value) ? null : value;
+                string? newValue = string.IsNullOrWhiteSpace(value) ? null : value;
+                string? oldValue = obj.Controller;
+
+                if (string.Equals(oldValue ?? string.Empty, newValue ?? string.Empty, StringComparison.Ordinal))
+                    return true;
+
+                BeginSceneParameterChange();
+                obj.Controller = newValue;
                 return PersistSceneObjectChanges(obj, false);
             }));
             root.Children.Add(CreateTextPropertyEditor("Mesh", () => obj.Mesh ?? "", value =>
             {
-                obj.Mesh = string.IsNullOrWhiteSpace(value) ? null : value;
+                string? newValue = string.IsNullOrWhiteSpace(value) ? null : value;
+                string? oldValue = obj.Mesh;
+
+                if (string.Equals(oldValue ?? string.Empty, newValue ?? string.Empty, StringComparison.Ordinal))
+                    return true;
+
+                BeginSceneParameterChange();
+                obj.Mesh = newValue;
                 return PersistSceneObjectChanges(obj, false);
             }));
             root.Children.Add(CreateTextPropertyEditor("RenderTag", () => obj.RenderTag ?? "", value =>
             {
-                obj.RenderTag = value ?? "";
+                string newValue = value ?? "";
+                string oldValue = obj.RenderTag ?? "";
+
+                if (string.Equals(oldValue, newValue, StringComparison.Ordinal))
+                    return true;
+
+                BeginSceneParameterChange();
+                obj.RenderTag = newValue;
                 return PersistSceneObjectChanges(obj, false);
             }));
             root.Children.Add(CreateTextPropertyEditor("Tags", () => obj.Tags == null ? "" : string.Join(", ", obj.Tags), value =>
             {
-                obj.Tags = SplitCommaSeparatedList(value);
+                List<string> newValue = SplitCommaSeparatedList(value);
+                string oldText = obj.Tags == null ? "" : string.Join(", ", obj.Tags);
+                string newText = newValue.Count == 0 ? "" : string.Join(", ", newValue);
+
+                if (string.Equals(oldText, newText, StringComparison.Ordinal))
+                    return true;
+
+                BeginSceneParameterChange();
+                obj.Tags = newValue;
                 return PersistSceneObjectChanges(obj, false);
             }));
             root.Children.Add(CreateTextPropertyEditor("Materials", () => obj.Materials == null ? "" : string.Join(", ", obj.Materials), value =>
             {
                 List<string> list = SplitCommaSeparatedList(value);
-                obj.Materials = list.Count == 0 ? null : list;
+                List<string>? newValue = list.Count == 0 ? null : list;
+                string oldText = obj.Materials == null ? "" : string.Join(", ", obj.Materials);
+                string newText = newValue == null ? "" : string.Join(", ", newValue);
+
+                if (string.Equals(oldText, newText, StringComparison.Ordinal))
+                    return true;
+
+                BeginSceneParameterChange();
+                obj.Materials = newValue;
                 return PersistSceneObjectChanges(obj, false);
             }));
             root.Children.Add(CreateTextPropertyEditor("Data", () => obj.Data ?? "", value =>
             {
-                obj.Data = string.IsNullOrWhiteSpace(value) ? null : value;
+                string? newValue = string.IsNullOrWhiteSpace(value) ? null : value;
+                string? oldValue = obj.Data;
+
+                if (string.Equals(oldValue ?? string.Empty, newValue ?? string.Empty, StringComparison.Ordinal))
+                    return true;
+
+                BeginSceneParameterChange();
+                obj.Data = newValue;
                 return PersistSceneObjectChanges(obj, false);
             }));
 
@@ -1238,6 +1384,27 @@ namespace LimitlessSquareEngine.Editor
         {
             if (!HasPrimaryCommandModifier(e.KeyModifiers))
                 return;
+
+            if (e.Key == Key.S)
+            {
+                if (TrySaveCurrentSceneToOriginalFile())
+                    e.Handled = true;
+                return;
+            }
+
+            if (e.Key == Key.Z)
+            {
+                if (TryHandleSceneUndoCommand())
+                    e.Handled = true;
+                return;
+            }
+
+            if (e.Key == Key.Y)
+            {
+                if (TryHandleSceneRedoCommand())
+                    e.Handled = true;
+                return;
+            }
 
             TextBox? textBox = GetFocusedTextBox();
             if (textBox == null)
@@ -1414,12 +1581,20 @@ namespace LimitlessSquareEngine.Editor
         {
             Control activeToggle = CreateInlineBoolToggle("A", () => obj.Active, value =>
             {
+                if (obj.Active == value)
+                    return true;
+
+                BeginSceneParameterChange();
                 obj.Active = value;
                 return PersistSceneObjectChanges(obj, false);
             });
 
             Control visibleToggle = CreateInlineBoolToggle("V", () => obj.Visible, value =>
             {
+                if (obj.Visible == value)
+                    return true;
+
+                BeginSceneParameterChange();
                 obj.Visible = value;
                 return PersistSceneObjectChanges(obj, false);
             });
@@ -1693,6 +1868,13 @@ namespace LimitlessSquareEngine.Editor
             return false;
         }
 
+        private bool Double3Equals(Double3 left, Double3 right)
+        {
+            return left.X == right.X &&
+                   left.Y == right.Y &&
+                   left.Z == right.Z;
+        }
+
         private List<string> SplitCommaSeparatedList(string text)
         {
             return (text ?? string.Empty)
@@ -1718,6 +1900,8 @@ namespace LimitlessSquareEngine.Editor
 
             if (string.Equals(oldId, newId, StringComparison.Ordinal))
                 return true;
+
+            BeginSceneParameterChange();
 
             target.Id = newId;
 
@@ -1756,6 +1940,12 @@ namespace LimitlessSquareEngine.Editor
             }
 
             target.Transform ??= CloneTransform(null);
+
+            string? oldParentId = target.Transform.ParentId;
+            if (string.Equals(oldParentId, parentId, StringComparison.Ordinal))
+                return true;
+
+            BeginSceneParameterChange();
             target.Transform.ParentId = parentId;
 
             return PersistSceneObjectChanges(target, true);
@@ -1833,16 +2023,18 @@ namespace LimitlessSquareEngine.Editor
         {
             MenuItem newItem = new MenuItem { Header = "新建" };
             MenuItem openItem = new MenuItem { Header = "打开" };
-            MenuItem saveItem = new MenuItem { Header = "保存" };
+            _saveSceneMenuItem = new MenuItem { Header = "保存", IsEnabled = false };
             MenuItem exitItem = new MenuItem { Header = "退出" };
 
             openItem.Click += async (_, _) => await OpenProjectFolderAsync();
+            _saveSceneMenuItem.Click += (_, _) => TrySaveCurrentSceneToOriginalFile();
+            exitItem.Click += (_, _) => Close();
 
             return new[]
             {
                 newItem,
                 openItem,
-                saveItem,
+                _saveSceneMenuItem,
                 new MenuItem { Header = "-" },
                 exitItem
             };
@@ -1850,13 +2042,15 @@ namespace LimitlessSquareEngine.Editor
 
         private IEnumerable<MenuItem> CreateEditMenuItems()
         {
-            MenuItem undoItem = new MenuItem { Header = "撤销" };
-            MenuItem redoItem = new MenuItem { Header = "重做" };
+            _undoSceneMenuItem = new MenuItem { Header = "撤销", IsEnabled = false };
+            _redoSceneMenuItem = new MenuItem { Header = "重做", IsEnabled = false };
             MenuItem cutItem = new MenuItem { Header = "剪切" };
             MenuItem copyItem = new MenuItem { Header = "复制" };
             MenuItem pasteItem = new MenuItem { Header = "粘贴" };
             MenuItem selectAllItem = new MenuItem { Header = "全选" };
 
+            _undoSceneMenuItem.Click += (_, _) => TryHandleSceneUndoCommand();
+            _redoSceneMenuItem.Click += (_, _) => TryHandleSceneRedoCommand();
             cutItem.Click += async (_, _) => await TryExecuteClipboardCommandAsync(ClipboardCommand.Cut);
             copyItem.Click += async (_, _) => await TryExecuteClipboardCommandAsync(ClipboardCommand.Copy);
             pasteItem.Click += async (_, _) => await TryExecuteClipboardCommandAsync(ClipboardCommand.Paste);
@@ -1864,8 +2058,8 @@ namespace LimitlessSquareEngine.Editor
 
             return new[]
             {
-                undoItem,
-                redoItem,
+                _undoSceneMenuItem,
+                _redoSceneMenuItem,
                 new MenuItem { Header = "-" },
                 cutItem,
                 copyItem,
@@ -2514,10 +2708,14 @@ namespace LimitlessSquareEngine.Editor
                 string assetRootPath = ResolveSceneAssetRoot(filePath);
                 EditorSceneOpenResult openResult = PrepareEditorSceneCopies(filePath, assetRootPath);
 
+                _currentSceneOriginalPath = Path.GetFullPath(filePath);
                 _currentTreeCopyPath = openResult.TreeCopyPath;
                 _currentPreviewScenePath = openResult.PreviewScenePath;
                 _currentTreeScene = openResult.TreeScene;
                 _selectedSceneObject = null;
+                _sceneUndoStack.Clear();
+                _sceneRedoStack.Clear();
+                _isApplyingSceneHistory = false;
 
                 InitializePreviewCameraEditorState(openResult.TreeScene);
                 _currentPreviewScene = BuildPreviewScene(openResult.TreeScene);
@@ -2527,6 +2725,8 @@ namespace LimitlessSquareEngine.Editor
                 ResetSceneHostNavigationState();
 
                 LeftDockSlot.Content = BuildSceneTreeControl(openResult.TreeScene);
+
+                UpdateSceneDirtyVisualState();
 
                 EditorHostBridge.SetAssetRootAndReloadAssets(assetRootPath);
                 EditorHostBridge.ReloadSceneById(EditorPreviewSceneId);
@@ -2647,6 +2847,83 @@ namespace LimitlessSquareEngine.Editor
             File.WriteAllText(filePath, json);
         }
 
+        private void UpdateSceneDirtyVisualState()
+        {
+            bool isDirty = IsCurrentSceneTreeDirty();
+
+            if (_sceneTreeDockHeaderDirtyMarkText != null)
+                _sceneTreeDockHeaderDirtyMarkText.Text = isDirty ? "*" : string.Empty;
+
+            if (_saveSceneMenuItem != null)
+                _saveSceneMenuItem.IsEnabled = isDirty;
+
+            if (_undoSceneMenuItem != null)
+                _undoSceneMenuItem.IsEnabled = _sceneUndoStack.Count > 0;
+
+            if (_redoSceneMenuItem != null)
+                _redoSceneMenuItem.IsEnabled = _sceneRedoStack.Count > 0;
+        }
+
+        private bool IsCurrentSceneTreeDirty()
+        {
+            if (string.IsNullOrWhiteSpace(_currentSceneOriginalPath) ||
+                string.IsNullOrWhiteSpace(_currentTreeCopyPath) ||
+                !File.Exists(_currentSceneOriginalPath) ||
+                !File.Exists(_currentTreeCopyPath))
+                return false;
+
+            return !FilesContentEqual(_currentSceneOriginalPath, _currentTreeCopyPath);
+        }
+
+        private bool FilesContentEqual(string leftPath, string rightPath)
+        {
+            byte[] leftBytes = File.ReadAllBytes(leftPath);
+            byte[] rightBytes = File.ReadAllBytes(rightPath);
+
+            if (leftBytes.Length != rightBytes.Length)
+                return false;
+
+            for (int i = 0; i < leftBytes.Length; i++)
+            {
+                if (leftBytes[i] != rightBytes[i])
+                    return false;
+            }
+
+            return true;
+        }
+
+        private bool TrySaveCurrentSceneToOriginalFile()
+        {
+            if (string.IsNullOrWhiteSpace(_currentSceneOriginalPath) ||
+                string.IsNullOrWhiteSpace(_currentTreeCopyPath) ||
+                !File.Exists(_currentTreeCopyPath))
+                return false;
+
+            if (!IsCurrentSceneTreeDirty())
+            {
+                UpdateSceneDirtyVisualState();
+                return false;
+            }
+
+            File.Copy(_currentTreeCopyPath, _currentSceneOriginalPath, true);
+            UpdateSceneDirtyVisualState();
+            return true;
+        }
+
+        private bool TryHandleSceneUndoCommand()
+        {
+            bool result = TryUndoSceneChange();
+            UpdateSceneDirtyVisualState();
+            return result;
+        }
+
+        private bool TryHandleSceneRedoCommand()
+        {
+            bool result = TryRedoSceneChange();
+            UpdateSceneDirtyVisualState();
+            return result;
+        }
+
         private bool PersistSceneObjectChanges(SceneObject target, bool refreshSceneTree)
         {
             if (_currentTreeScene == null ||
@@ -2683,7 +2960,13 @@ namespace LimitlessSquareEngine.Editor
                     {
                         _isProgrammaticSceneTreeSelection = false;
                     }
+
+                    UpdateSceneDirtyVisualState();
                 }, DispatcherPriority.Background);
+            }
+            else
+            {
+                UpdateSceneDirtyVisualState();
             }
 
             return true;
@@ -2909,6 +3192,93 @@ namespace LimitlessSquareEngine.Editor
                 LinearDamping = source.LinearDamping,
                 AngularDamping = source.AngularDamping
             };
+        }
+
+        private void PushUndoSceneState()
+        {
+            if (_currentTreeScene == null)
+                return;
+
+            _sceneUndoStack.Add(CloneSceneData(_currentTreeScene));
+            _undoSceneMenuItem?.SetCurrentValue(MenuItem.IsEnabledProperty, true);
+        }
+
+        private void ClearRedoSceneState()
+        {
+            _sceneRedoStack.Clear();
+            _redoSceneMenuItem?.SetCurrentValue(MenuItem.IsEnabledProperty, false);
+        }
+
+        private void BeginSceneParameterChange()
+        {
+            if (_currentTreeScene == null)
+                return;
+
+            if (_isApplyingSceneHistory)
+                return;
+
+            PushUndoSceneState();
+            ClearRedoSceneState();
+        }
+
+        private bool TryUndoSceneChange()
+        {
+            if (_currentTreeScene == null || _sceneUndoStack.Count == 0)
+                return false;
+
+            _sceneRedoStack.Add(CloneSceneData(_currentTreeScene));
+
+            SceneData previous = _sceneUndoStack[_sceneUndoStack.Count - 1];
+            _sceneUndoStack.RemoveAt(_sceneUndoStack.Count - 1);
+
+            ApplySceneState(previous);
+            return true;
+        }
+
+        private bool TryRedoSceneChange()
+        {
+            if (_currentTreeScene == null || _sceneRedoStack.Count == 0)
+                return false;
+
+            _sceneUndoStack.Add(CloneSceneData(_currentTreeScene));
+
+            SceneData next = _sceneRedoStack[_sceneRedoStack.Count - 1];
+            _sceneRedoStack.RemoveAt(_sceneRedoStack.Count - 1);
+
+            ApplySceneState(next);
+            return true;
+        }
+
+        private void ApplySceneState(SceneData sceneState)
+        {
+            if (string.IsNullOrWhiteSpace(_currentTreeCopyPath) ||
+                string.IsNullOrWhiteSpace(_currentPreviewScenePath))
+                return;
+
+            _isApplyingSceneHistory = true;
+            try
+            {
+                _currentTreeScene = CloneSceneData(sceneState);
+                SaveSceneData(_currentTreeCopyPath, _currentTreeScene);
+
+                _currentPreviewScene = BuildPreviewScene(_currentTreeScene);
+
+                RefreshCurrentPreviewCameraId();
+                SaveSceneData(_currentPreviewScenePath, _currentPreviewScene);
+
+                _selectedSceneObject = null;
+                LeftDockSlot.Content = BuildSceneTreeControl(_currentTreeScene);
+                RightDockSlot.Content = CreatePlaceholder("未选中文件或节点");
+
+                EditorHostBridge.ReloadSceneById(EditorPreviewSceneId);
+                ApplyPreviewCameraEditorStateToRuntime();
+                StartSceneOpenForceRefresh();
+            }
+            finally
+            {
+                _isApplyingSceneHistory = false;
+                UpdateSceneDirtyVisualState();
+            }
         }
 
         private Control BuildSceneTreeControl(SceneData scene)
