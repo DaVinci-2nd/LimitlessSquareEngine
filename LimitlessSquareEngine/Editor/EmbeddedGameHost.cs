@@ -54,6 +54,11 @@ namespace LimitlessSquareEngine.Editor
             RenderSurfaceResized?.Invoke(size);
         }
 
+        public void NotifyHostLayoutChanged()
+        {
+            PublishSize();
+        }
+
         public void PresentFrame(EditorRenderedFrame frame)
         {
             if (frame == null || frame.Width <= 0 || frame.Height <= 0 || frame.PixelsRgba == null || frame.PixelsRgba.Length == 0)

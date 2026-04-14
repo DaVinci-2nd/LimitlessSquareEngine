@@ -171,6 +171,15 @@ namespace LimitlessSquareEngine.Editor
                 }, DispatcherPriority.Render);
             };
 
+            SizeChanged += (_, _) =>
+            {
+                Dispatcher.UIThread.Post(() =>
+                {
+                    _sceneHost.NotifyHostLayoutChanged();
+                    ForceSyncScenePreviewSurface();
+                }, DispatcherPriority.Render);
+            };
+
             Closed += (_, _) =>
             {
                 ResetSceneHostNavigationState();
@@ -305,16 +314,6 @@ namespace LimitlessSquareEngine.Editor
             _previewOrientationGizmo.InvalidateVisual();
         }
 
-        private void RenderSceneHostFrameIfPossible()
-        {
-            if (!EditorHostBridge.IsRenderWindowAlive)
-                return;
-
-            EditorHostBridge.RunRenderFrame();
-            PresentLatestFrame();
-            _sceneHost.InvalidateVisual();
-        }
-
         public void TickSceneHostNavigation()
         {
             DateTime now = DateTime.UtcNow;
@@ -369,14 +368,11 @@ namespace LimitlessSquareEngine.Editor
 
             if (point.Properties.PointerUpdateKind == PointerUpdateKind.MiddleButtonPressed)
             {
+                if (!_isSceneHostRightDragging)
+                    return;
+
                 _sceneHostMoveSpeedMultiplier = 1.0;
-
-                if (_isSceneHostRightDragging)
-                {
-                    RenderSceneHostFrameIfPossible();
-                    e.Handled = true;
-                }
-
+                e.Handled = true;
                 return;
             }
 
@@ -403,7 +399,6 @@ namespace LimitlessSquareEngine.Editor
                 return;
 
             ResetSceneHostNavigationState();
-            RenderSceneHostFrameIfPossible();
             e.Handled = true;
         }
 
@@ -445,8 +440,6 @@ namespace LimitlessSquareEngine.Editor
                 ApplyPreviewCameraEditorStateToRuntime();
             }
 
-            RenderSceneHostFrameIfPossible();
-
             e.Handled = true;
         }
 
@@ -468,7 +461,6 @@ namespace LimitlessSquareEngine.Editor
                 return;
             }
 
-            RenderSceneHostFrameIfPossible();
             e.Handled = true;
         }
 
@@ -490,10 +482,7 @@ namespace LimitlessSquareEngine.Editor
             _sceneHostNavigationKeys.Add(e.Key);
 
             if (_isSceneHostRightDragging)
-            {
-                RenderSceneHostFrameIfPossible();
                 e.Handled = true;
-            }
         }
 
         private void OnSceneHostKeyUp(object? sender, KeyEventArgs e)
@@ -504,10 +493,7 @@ namespace LimitlessSquareEngine.Editor
             _sceneHostNavigationKeys.Remove(e.Key);
 
             if (_isSceneHostRightDragging)
-            {
-                RenderSceneHostFrameIfPossible();
                 e.Handled = true;
-            }
         }
 
         private bool IsSceneHostNavigationKey(Key key)
@@ -3457,6 +3443,8 @@ namespace LimitlessSquareEngine.Editor
         private static readonly Pen YPen = new Pen(YBrush, 2);
         private static readonly Pen ZPen = new Pen(ZBrush, 2);
 
+        public double FovDegrees { get; set; } = 70.0;
+
         public void SetCameraStateProvider(Func<CameraOrientationState?> provider)
         {
             _cameraStateProvider = provider;
@@ -3491,7 +3479,8 @@ namespace LimitlessSquareEngine.Editor
                 coneLength,
                 coneBaseRadius,
                 XBrush,
-                XPen);
+                XPen,
+                FovDegrees);
 
             GizmoAxis yAxis = BuildAxis(
                 center,
@@ -3502,7 +3491,8 @@ namespace LimitlessSquareEngine.Editor
                 coneLength,
                 coneBaseRadius,
                 YBrush,
-                YPen);
+                YPen,
+                FovDegrees);
 
             GizmoAxis zAxis = BuildAxis(
                 center,
@@ -3513,7 +3503,8 @@ namespace LimitlessSquareEngine.Editor
                 coneLength,
                 coneBaseRadius,
                 ZBrush,
-                ZPen);
+                ZPen,
+                FovDegrees);
 
             List<GizmoAxis> frontAxes = new List<GizmoAxis>();
             List<GizmoAxis> backAxes = new List<GizmoAxis>();
@@ -3539,15 +3530,16 @@ namespace LimitlessSquareEngine.Editor
         }
 
         private static GizmoAxis BuildAxis(
-            Point center,
-            Double3 worldAxis,
-            CameraOrientationState camera,
-            double axisBaseOffset,
-            double axisLength,
-            double coneLength,
-            double coneBaseRadius,
-            IBrush brush,
-            Pen pen)
+    Point center,
+    Double3 worldAxis,
+    CameraOrientationState camera,
+    double axisBaseOffset,
+    double axisLength,
+    double coneLength,
+    double coneBaseRadius,
+    IBrush brush,
+    Pen pen,
+    double fovDegrees)
         {
             Double3 axis = Normalize3(worldAxis);
 
@@ -3558,10 +3550,10 @@ namespace LimitlessSquareEngine.Editor
             Double3 coneTip3 = axis * (axisBaseOffset + axisLength + coneLength);
             Double3 coneBaseCenter3 = lineEnd3;
 
-            Point lineStart = ProjectToScreen(center, lineStart3, camera);
-            Point lineEnd = ProjectToScreen(center, lineEnd3, camera);
-            Point coneTip = ProjectToScreen(center, coneTip3, camera);
-            Point coneBaseCenter = ProjectToScreen(center, coneBaseCenter3, camera);
+            ProjectedPoint lineStart = ProjectToScreen(center, lineStart3, camera, fovDegrees);
+            ProjectedPoint lineEnd = ProjectToScreen(center, lineEnd3, camera, fovDegrees);
+            ProjectedPoint coneTip = ProjectToScreen(center, coneTip3, camera, fovDegrees);
+            ProjectedPoint coneBaseCenter = ProjectToScreen(center, coneBaseCenter3, camera, fovDegrees);
 
             Double3 majorAxis3 = Cross(camera.Forward, axis);
             if (majorAxis3.X * majorAxis3.X + majorAxis3.Y * majorAxis3.Y + majorAxis3.Z * majorAxis3.Z <= 1e-8)
@@ -3582,22 +3574,24 @@ namespace LimitlessSquareEngine.Editor
             else
                 majorAxis2D /= majorAxis2DLength;
 
-            Point ellipseAxisA = coneBaseCenter + majorAxis2D * coneBaseRadius;
-            Point ellipseAxisB = coneBaseCenter - majorAxis2D * coneBaseRadius;
-            Point ellipseAxisC = ProjectToScreen(center, coneBaseCenter3 + upOnPlane * coneBaseRadius, camera);
-            Point ellipseAxisD = ProjectToScreen(center, coneBaseCenter3 - upOnPlane * coneBaseRadius, camera);
+            double coneBaseScale = coneBaseCenter.Scale;
+            Point ellipseAxisA = coneBaseCenter.Position + majorAxis2D * (coneBaseRadius * coneBaseScale);
+            Point ellipseAxisB = coneBaseCenter.Position - majorAxis2D * (coneBaseRadius * coneBaseScale);
+
+            ProjectedPoint ellipseAxisCPoint = ProjectToScreen(center, coneBaseCenter3 + upOnPlane * coneBaseRadius, camera, fovDegrees);
+            ProjectedPoint ellipseAxisDPoint = ProjectToScreen(center, coneBaseCenter3 - upOnPlane * coneBaseRadius, camera, fovDegrees);
 
             double facing = Math.Abs(Dot(axis, camera.Forward));
             facing = Math.Clamp(facing, 0.0, 1.0);
 
-            double ellipseRadiusX = coneBaseRadius;
-            double ellipseRadiusY = coneBaseRadius * facing;
+            double ellipseRadiusX = coneBaseRadius * coneBaseScale;
+            double ellipseRadiusY = ellipseRadiusX * facing;
             double ellipseRotation = Math.Atan2(majorAxis2D.Y, majorAxis2D.X);
 
             StreamGeometry triangle = new StreamGeometry();
             using (StreamGeometryContext gc = triangle.Open())
             {
-                gc.BeginFigure(coneTip, true);
+                gc.BeginFigure(coneTip.Position, true);
                 gc.LineTo(ellipseAxisA);
                 gc.LineTo(ellipseAxisB);
                 gc.EndFigure(true);
@@ -3608,10 +3602,10 @@ namespace LimitlessSquareEngine.Editor
             return new GizmoAxis(
                 brush,
                 pen,
-                lineStart,
-                lineEnd,
-                coneBaseCenter,
-                coneTip,
+                lineStart.Position,
+                lineEnd.Position,
+                coneBaseCenter.Position,
+                coneTip.Position,
                 triangle,
                 ellipseRadiusX,
                 ellipseRadiusY,
@@ -3655,14 +3649,30 @@ namespace LimitlessSquareEngine.Editor
             return a.X * b.X + a.Y * b.Y + a.Z * b.Z;
         }
 
-        private static Point ProjectToScreen(
-    Point center,
-    Double3 point,
-    CameraOrientationState camera)
+        private readonly record struct ProjectedPoint(Point Position, double Scale);
+
+        private static ProjectedPoint ProjectToScreen(
+            Point center,
+            Double3 point,
+            CameraOrientationState camera,
+            double fovDegrees)
         {
             double x = Dot(point, camera.Right);
             double y = -Dot(point, camera.Up);
-            return new Point(center.X + x, center.Y + y);
+            double z = Dot(point, camera.Forward);
+
+            if (Math.Abs(fovDegrees) <= 1e-8)
+                return new ProjectedPoint(new Point(center.X + x, center.Y + y), 1.0);
+
+            double fovRadians = fovDegrees * Math.PI / 180.0;
+            double focalLength = 56.0 / Math.Tan(fovRadians * 0.5);
+            double perspectiveDistance = focalLength + 56.0;
+            double scale = perspectiveDistance / (perspectiveDistance + z);
+            scale = Math.Clamp(scale, 0.7, 1.35);
+
+            return new ProjectedPoint(
+                new Point(center.X + x * scale, center.Y + y * scale),
+                scale);
         }
 
         private static void BuildPerpendicularBasis(
