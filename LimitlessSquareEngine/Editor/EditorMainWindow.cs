@@ -79,6 +79,20 @@ namespace LimitlessSquareEngine.Editor
         private IPointer? _sceneHostCapturedPointer;
         private double _sceneHostMoveSpeedMultiplier = 1.0;
 
+        private Button? _playButton;
+        private Button? _pauseButton;
+        private Button? _stepButton;
+        private Window? _playbackWindow;
+        private bool _isPlaybackRunning;
+        private bool _isPlaybackPaused;
+        private EditorEmbeddingMode _playbackEmbeddingMode = EditorEmbeddingMode.Unsupported;
+        private nint _playbackWindowNativeHandle;
+        private Process? _playbackProcess;
+        private string? _playbackControlFilePath;
+        private WindowState _playbackWindowState = WindowState.Normal;
+        private DateTime _playbackSuppressFocusUntilUtc = DateTime.MinValue;
+        private DispatcherTimer? _playbackDeferredFocusTimer;
+
         private const string EditorPreviewSceneId = "__editor_preview_scene__";
         private const string EditorPreviewDirectoryName = "EditorPreview";
         private const string EditorTreeCopyDirectoryName = "EditorTreeCopies";
@@ -182,6 +196,7 @@ namespace LimitlessSquareEngine.Editor
 
             Closed += (_, _) =>
             {
+                StopPlayback();
                 ResetSceneHostNavigationState();
             };
 
@@ -218,6 +233,14 @@ namespace LimitlessSquareEngine.Editor
             Copy,
             Paste,
             SelectAll
+        }
+
+        private enum PlaybackButtonGlyph
+        {
+            PlayTriangle,
+            StopSquare,
+            PauseBars,
+            StepCircle
         }
 
         private void OnSceneHostResized(PixelSize hostSize)
@@ -312,6 +335,397 @@ namespace LimitlessSquareEngine.Editor
 
             _sceneHost.PresentFrame(frame);
             _previewOrientationGizmo.InvalidateVisual();
+        }
+
+        private void EnsurePlaybackWindow()
+        {
+            if (_playbackWindow != null)
+                return;
+
+            _playbackEmbeddingMode = ResolvePlaybackEmbeddingMode();
+
+            _playbackWindow = new Window
+            {
+                Title = "Game",
+                Width = 960,
+                Height = 540,
+                MinWidth = 320,
+                MinHeight = 180,
+                Background = Brushes.Black,
+                Content = null,
+                ShowInTaskbar = false,
+                SystemDecorations = SystemDecorations.Full,
+                CanResize = true
+            };
+
+            _playbackWindow.Opened += (_, _) =>
+            {
+                _playbackWindowState = _playbackWindow?.WindowState ?? WindowState.Normal;
+
+                if (!TryGetPlaybackWindowNativeHandle(out nint handle))
+                    return;
+
+                _playbackWindowNativeHandle = handle;
+            };
+
+            _playbackWindow.Activated += (_, _) =>
+            {
+                if (!_isPlaybackRunning || _playbackWindow == null)
+                    return;
+
+                if (_playbackWindow.WindowState == WindowState.Minimized)
+                    return;
+
+                RequestDeferredPlaybackFocus();
+            };
+
+            _playbackWindow.PositionChanged += (_, _) =>
+            {
+                if (!_isPlaybackRunning)
+                    return;
+
+                SuppressPlaybackFocusFor(220);
+                RequestDeferredPlaybackFocus(260);
+            };
+
+            _playbackWindow.PropertyChanged += (_, e) =>
+            {
+                if (e.Property != Window.WindowStateProperty || _playbackWindow == null)
+                    return;
+
+                WindowState state = _playbackWindow.WindowState;
+                WindowState previousState = _playbackWindowState;
+                _playbackWindowState = state;
+
+                if (!_isPlaybackRunning)
+                    return;
+
+                if (state == WindowState.Minimized)
+                {
+                    SuppressPlaybackFocusFor(600);
+                    QueuePlaybackCommand("resize 1 1");
+                    return;
+                }
+
+                if (previousState == WindowState.Minimized)
+                {
+                    SuppressPlaybackFocusFor(220);
+
+                    Dispatcher.UIThread.Post(() =>
+                    {
+                        if (!_isPlaybackRunning || _playbackWindow == null)
+                            return;
+
+                        if (_playbackWindow.WindowState == WindowState.Minimized)
+                            return;
+
+                        PixelSize size = GetPlaybackWindowPixelSize();
+                        if (size.Width <= 0 || size.Height <= 0)
+                            return;
+
+                        QueuePlaybackCommand($"resize {size.Width} {size.Height}");
+                        RequestDeferredPlaybackFocus(260);
+                    }, DispatcherPriority.Background);
+                }
+            };
+
+            _playbackWindow.SizeChanged += (_, _) =>
+            {
+                if (!_isPlaybackRunning || _playbackWindow == null)
+                    return;
+
+                if (_playbackWindow.WindowState == WindowState.Minimized)
+                    return;
+
+                PixelSize size = GetPlaybackWindowPixelSize();
+                if (size.Width <= 0 || size.Height <= 0)
+                    return;
+
+                QueuePlaybackCommand($"resize {size.Width} {size.Height}");
+
+                if (DateTime.UtcNow >= _playbackSuppressFocusUntilUtc)
+                    RequestDeferredPlaybackFocus(140);
+            };
+
+            _playbackWindow.Closed += (_, _) =>
+            {
+                _playbackDeferredFocusTimer?.Stop();
+
+                if (_isPlaybackRunning)
+                    StopPlayback();
+
+                _playbackWindow = null;
+                _playbackWindowNativeHandle = 0;
+            };
+        }
+
+        private EditorEmbeddingMode ResolvePlaybackEmbeddingMode()
+        {
+            EditorHostBootstrapInfo info = EditorHostBridge.GetBootstrapInfo();
+
+            if (info.EmbeddingMode == EditorEmbeddingMode.ForeignChildWindow)
+            {
+                if (info.Win32Hwnd != 0)
+                    return EditorEmbeddingMode.ForeignChildWindow;
+
+                if (info.X11Window != 0 && info.X11Display != 0)
+                    return EditorEmbeddingMode.ForeignChildWindow;
+            }
+
+            if (info.EmbeddingMode == EditorEmbeddingMode.CocoaViewHost && info.CocoaContentView != 0)
+                return EditorEmbeddingMode.CocoaViewHost;
+
+            return EditorEmbeddingMode.Unsupported;
+        }
+
+        private bool TryGetPlaybackWindowNativeHandle(out nint handle)
+        {
+            handle = 0;
+
+            if (_playbackWindow == null)
+                return false;
+
+            object? impl = _playbackWindow.PlatformImpl;
+            if (impl == null)
+                return false;
+
+            IntPtr nativeHandle = TryExtractPlatformHandle(impl);
+            if (nativeHandle == IntPtr.Zero)
+                return false;
+
+            if (_playbackEmbeddingMode == EditorEmbeddingMode.CocoaViewHost)
+            {
+                nint contentView = CocoaNativeInterop.GetContentView(nativeHandle);
+                if (contentView == 0)
+                    return false;
+
+                handle = contentView;
+                return true;
+            }
+
+            handle = nativeHandle;
+            return true;
+        }
+
+        private PixelSize GetPlaybackWindowPixelSize()
+        {
+            if (_playbackWindow == null)
+                return default;
+
+            double scaling = TopLevel.GetTopLevel(_playbackWindow)?.RenderScaling ?? 1.0;
+            Size clientSize = _playbackWindow.ClientSize;
+
+            int width = Math.Max(1, (int)Math.Round(clientSize.Width * scaling));
+            int height = Math.Max(1, (int)Math.Round(clientSize.Height * scaling));
+
+            return new PixelSize(width, height);
+        }
+
+        private void SuppressPlaybackFocusFor(int milliseconds)
+        {
+            DateTime until = DateTime.UtcNow.AddMilliseconds(milliseconds);
+            if (until > _playbackSuppressFocusUntilUtc)
+                _playbackSuppressFocusUntilUtc = until;
+        }
+
+        private void RequestDeferredPlaybackFocus(int delayMilliseconds = 180)
+        {
+            if (_playbackWindow == null || !_isPlaybackRunning)
+                return;
+
+            _playbackDeferredFocusTimer ??= new DispatcherTimer();
+            _playbackDeferredFocusTimer.Stop();
+            _playbackDeferredFocusTimer.Interval = TimeSpan.FromMilliseconds(delayMilliseconds);
+
+            _playbackDeferredFocusTimer.Tick -= OnPlaybackDeferredFocusTimerTick;
+            _playbackDeferredFocusTimer.Tick += OnPlaybackDeferredFocusTimerTick;
+            _playbackDeferredFocusTimer.Start();
+        }
+
+        private void OnPlaybackDeferredFocusTimerTick(object? sender, EventArgs e)
+        {
+            _playbackDeferredFocusTimer?.Stop();
+
+            if (!_isPlaybackRunning || _playbackWindow == null)
+                return;
+
+            if (_playbackWindow.WindowState == WindowState.Minimized)
+                return;
+
+            if (DateTime.UtcNow < _playbackSuppressFocusUntilUtc)
+            {
+                RequestDeferredPlaybackFocus(120);
+                return;
+            }
+
+            QueuePlaybackCommand("focus");
+        }
+
+        private IntPtr TryExtractPlatformHandle(object platformImpl)
+        {
+            Type implType = platformImpl.GetType();
+
+            System.Reflection.PropertyInfo? handleProperty = implType.GetProperty(
+                "Handle",
+                System.Reflection.BindingFlags.Instance |
+                System.Reflection.BindingFlags.Public |
+                System.Reflection.BindingFlags.NonPublic);
+
+            if (handleProperty == null)
+                return IntPtr.Zero;
+
+            object? platformHandle = handleProperty.GetValue(platformImpl);
+            if (platformHandle == null)
+                return IntPtr.Zero;
+
+            Type platformHandleType = platformHandle.GetType();
+
+            System.Reflection.PropertyInfo? rawHandleProperty = platformHandleType.GetProperty(
+                "Handle",
+                System.Reflection.BindingFlags.Instance |
+                System.Reflection.BindingFlags.Public |
+                System.Reflection.BindingFlags.NonPublic);
+
+            if (rawHandleProperty == null)
+                return IntPtr.Zero;
+
+            object? rawHandleValue = rawHandleProperty.GetValue(platformHandle);
+            if (rawHandleValue == null)
+                return IntPtr.Zero;
+
+            return ConvertObjectToIntPtr(rawHandleValue);
+        }
+
+        private IntPtr ConvertObjectToIntPtr(object value)
+        {
+            if (value is IntPtr intPtrValue)
+                return intPtrValue;
+
+            if (value is int intValue)
+                return new IntPtr(intValue);
+
+            if (value is long longValue)
+                return new IntPtr(longValue);
+
+            if (value is uint uintValue)
+                return new IntPtr(unchecked((long)uintValue));
+
+            if (value is ulong ulongValue)
+                return new IntPtr(unchecked((long)ulongValue));
+
+            return IntPtr.Zero;
+        }
+
+        private void ShowPlaybackWindowAsChild()
+        {
+            EnsurePlaybackWindow();
+
+            if (_playbackWindow == null)
+                return;
+
+            if (!_playbackWindow.IsVisible)
+                _playbackWindow.Show(this);
+
+            _playbackWindow.Activate();
+
+            if (_isPlaybackRunning)
+                QueuePlaybackCommand("focus");
+        }
+
+        private string CreatePlaybackControlFilePath()
+        {
+            string fileName = "lse-playback-control-" + Guid.NewGuid().ToString("N") + ".cmd";
+            return Path.Combine(Path.GetTempPath(), fileName);
+        }
+
+        private void QueuePlaybackCommand(string command)
+        {
+            if (string.IsNullOrWhiteSpace(_playbackControlFilePath))
+                return;
+
+            try
+            {
+                File.AppendAllText(
+                    _playbackControlFilePath,
+                    command + Environment.NewLine,
+                    Encoding.UTF8);
+            }
+            catch
+            {
+            }
+        }
+
+        private string BuildExternalHostedGameArguments()
+        {
+            if (_playbackWindow == null)
+                throw new InvalidOperationException("Playback window is not ready.");
+
+            if (_playbackWindowNativeHandle == 0)
+                throw new InvalidOperationException("Playback native window handle is missing.");
+
+            if (string.IsNullOrWhiteSpace(_playbackControlFilePath))
+                throw new InvalidOperationException("Playback control file path is missing.");
+
+            PixelSize size = GetPlaybackWindowPixelSize();
+
+            string arguments = EngineLaunchArgumentBuilder.BuildGameModeArguments(_projectRootPath ?? AppContext.BaseDirectory);
+            arguments += " --external-host";
+            arguments += $" --external-host-width={size.Width}";
+            arguments += $" --external-host-height={size.Height}";
+            arguments += $" --external-control-file=\"{_playbackControlFilePath}\"";
+
+            if (_playbackEmbeddingMode == EditorEmbeddingMode.CocoaViewHost)
+            {
+                arguments += " --external-host-mode=cocoa";
+                arguments += $" --external-host-cocoa-parent=0x{_playbackWindowNativeHandle.ToInt64():X}";
+                return arguments;
+            }
+
+            EditorHostBootstrapInfo info = EditorHostBridge.GetBootstrapInfo();
+
+            if (_playbackEmbeddingMode == EditorEmbeddingMode.ForeignChildWindow)
+            {
+                if (info.Win32Hwnd != 0)
+                {
+                    arguments += " --external-host-mode=win32";
+                    arguments += $" --external-host-win32-parent=0x{_playbackWindowNativeHandle.ToInt64():X}";
+                    return arguments;
+                }
+
+                if (info.X11Window != 0 && info.X11Display != 0)
+                {
+                    arguments += " --external-host-mode=x11";
+                    arguments += $" --external-host-x11-parent=0x{_playbackWindowNativeHandle.ToInt64():X}";
+                    return arguments;
+                }
+            }
+
+            throw new InvalidOperationException("Unsupported playback embedding mode.");
+        }
+
+        private string ResolveEngineExecutablePath()
+        {
+            string processPath = Environment.ProcessPath ?? string.Empty;
+            if (!string.IsNullOrWhiteSpace(processPath) && File.Exists(processPath))
+                return processPath;
+
+            string baseDirectory = AppContext.BaseDirectory;
+
+            string[] candidates =
+            {
+                Path.Combine(baseDirectory, "LimitlessSquareEngine.exe"),
+                Path.Combine(baseDirectory, "LimitlessSquareEngine"),
+                Path.Combine(baseDirectory, "Limitless Square Engine.exe"),
+                Path.Combine(baseDirectory, "Limitless Square Engine")
+            };
+
+            foreach (string candidate in candidates)
+            {
+                if (File.Exists(candidate))
+                    return candidate;
+            }
+
+            throw new FileNotFoundException("Game executable not found.");
         }
 
         public void TickSceneHostNavigation()
@@ -850,6 +1264,85 @@ namespace LimitlessSquareEngine.Editor
             return grid;
         }
 
+        private sealed class PlaybackGlyphIcon : Control
+        {
+            public static readonly StyledProperty<PlaybackButtonGlyph> GlyphProperty =
+                AvaloniaProperty.Register<PlaybackGlyphIcon, PlaybackButtonGlyph>(nameof(Glyph), PlaybackButtonGlyph.PlayTriangle);
+
+            public PlaybackButtonGlyph Glyph
+            {
+                get => GetValue(GlyphProperty);
+                set => SetValue(GlyphProperty, value);
+            }
+
+            public PlaybackGlyphIcon()
+            {
+                Width = 14;
+                Height = 14;
+                HorizontalAlignment = HorizontalAlignment.Center;
+                VerticalAlignment = VerticalAlignment.Center;
+                IsHitTestVisible = false;
+            }
+
+            public override void Render(DrawingContext context)
+            {
+                base.Render(context);
+
+                Rect bounds = new Rect(Bounds.Size);
+                if (bounds.Width <= 0 || bounds.Height <= 0)
+                    return;
+
+                IBrush brush = Brushes.White;
+
+                switch (Glyph)
+                {
+                    case PlaybackButtonGlyph.PlayTriangle:
+                        {
+                            StreamGeometry geometry = new StreamGeometry();
+                            using StreamGeometryContext gc = geometry.Open();
+                            gc.BeginFigure(new Point(bounds.Left + 3, bounds.Top + 2), true);
+                            gc.LineTo(new Point(bounds.Right - 2, bounds.Center.Y));
+                            gc.LineTo(new Point(bounds.Left + 3, bounds.Bottom - 2));
+                            gc.EndFigure(true);
+                            context.DrawGeometry(brush, null, geometry);
+                            break;
+                        }
+
+                    case PlaybackButtonGlyph.StopSquare:
+                        {
+                            Rect rect = new Rect(bounds.Left + 3, bounds.Top + 3, bounds.Width - 6, bounds.Height - 6);
+                            context.DrawRectangle(brush, null, rect);
+                            break;
+                        }
+
+                    case PlaybackButtonGlyph.PauseBars:
+                        {
+                            double totalWidth = bounds.Width - 4;
+                            double gap = totalWidth / 5;
+                            double barWidth = gap * 1.5;
+                            double barHeight = bounds.Height - 4;
+                            double left = bounds.Left + (bounds.Width - (barWidth * 2 + gap)) / 2;
+                            double top = bounds.Top + 2;
+
+                            Rect leftBar = new Rect(left, top, barWidth, barHeight);
+                            Rect rightBar = new Rect(left + barWidth + gap, top, barWidth, barHeight);
+
+                            context.DrawRectangle(brush, null, leftBar);
+                            context.DrawRectangle(brush, null, rightBar);
+                            break;
+                        }
+
+                    case PlaybackButtonGlyph.StepCircle:
+                        {
+                            Point center = bounds.Center;
+                            double radius = Math.Min(bounds.Width, bounds.Height) / 2 - 2;
+                            context.DrawEllipse(brush, null, center, radius, radius);
+                            break;
+                        }
+                }
+            }
+        }
+
         private Control CreatePlaybackControls()
         {
             StackPanel panel = new StackPanel
@@ -860,25 +1353,29 @@ namespace LimitlessSquareEngine.Editor
                 VerticalAlignment = VerticalAlignment.Center
             };
 
-            panel.Children.Add(CreatePlaybackButton("▶"));
-            panel.Children.Add(CreatePlaybackButton("◯"));
-            panel.Children.Add(CreatePlaybackButton("▷"));
+            _playButton = CreatePlaybackButton(PlaybackButtonGlyph.PlayTriangle);
+            _pauseButton = CreatePlaybackButton(PlaybackButtonGlyph.PauseBars);
+            _stepButton = CreatePlaybackButton(PlaybackButtonGlyph.StepCircle);
 
+            _playButton.Click += (_, _) => TogglePlayback();
+            _pauseButton.Click += (_, _) => TogglePausePlayback();
+            _stepButton.Click += (_, _) => StepPlayback();
+
+            panel.Children.Add(_playButton);
+            panel.Children.Add(_pauseButton);
+            panel.Children.Add(_stepButton);
+
+            UpdatePlaybackButtonsVisualState();
             return panel;
         }
 
-        private Button CreatePlaybackButton(string glyph)
+        private Button CreatePlaybackButton(PlaybackButtonGlyph glyph)
         {
             return new Button
             {
-                Content = new TextBlock
+                Content = new PlaybackGlyphIcon
                 {
-                    Text = glyph,
-                    FontSize = 13,
-                    Foreground = Brushes.White,
-                    HorizontalAlignment = HorizontalAlignment.Center,
-                    VerticalAlignment = VerticalAlignment.Center,
-                    TextAlignment = TextAlignment.Center
+                    Glyph = glyph
                 },
                 Width = 30,
                 Height = 24,
@@ -888,6 +1385,255 @@ namespace LimitlessSquareEngine.Editor
                 BorderThickness = new Thickness(1),
                 CornerRadius = new CornerRadius(3)
             };
+        }
+
+        private void ApplyPlaybackButtonStyle(Button button, string backgroundColor, string borderColor)
+        {
+            button.Background = new SolidColorBrush(Color.Parse(backgroundColor));
+            button.BorderBrush = new SolidColorBrush(Color.Parse(borderColor));
+        }
+
+        private void ApplyDefaultPlaybackButtonStyle(Button button)
+        {
+            ApplyPlaybackButtonStyle(button, "#2A2A2A", "#555555");
+        }
+
+        private void UpdatePlaybackButtonsVisualState()
+        {
+            bool hasProjectLoaded = !string.IsNullOrWhiteSpace(_projectRootPath);
+
+            if (_playButton != null)
+            {
+                if (_playButton.Content is PlaybackGlyphIcon playIcon)
+                    playIcon.Glyph = _isPlaybackRunning ? PlaybackButtonGlyph.StopSquare : PlaybackButtonGlyph.PlayTriangle;
+
+                _playButton.IsEnabled = _isPlaybackRunning || hasProjectLoaded;
+
+                if (_isPlaybackRunning)
+                    ApplyPlaybackButtonStyle(_playButton, "#115511", "#339933");
+                else
+                    ApplyDefaultPlaybackButtonStyle(_playButton);
+            }
+
+            if (_pauseButton != null)
+            {
+                _pauseButton.IsEnabled = _isPlaybackRunning;
+
+                if (_isPlaybackRunning && _isPlaybackPaused)
+                    ApplyPlaybackButtonStyle(_pauseButton, "#113355", "#336699");
+                else
+                    ApplyDefaultPlaybackButtonStyle(_pauseButton);
+            }
+
+            if (_stepButton != null)
+            {
+                _stepButton.IsEnabled = _isPlaybackRunning && _isPlaybackPaused;
+                ApplyDefaultPlaybackButtonStyle(_stepButton);
+            }
+        }
+
+        private void TogglePlayback()
+        {
+            if (_isPlaybackRunning)
+            {
+                StopPlayback();
+                return;
+            }
+
+            StartPlayback();
+        }
+
+        private void StartPlayback()
+        {
+            if (string.IsNullOrWhiteSpace(_projectRootPath))
+                return;
+
+            if (_isPlaybackRunning)
+                return;
+
+            EnsurePlaybackWindow();
+            ShowPlaybackWindowAsChild();
+
+            if (_playbackWindow == null)
+                return;
+
+            if (_playbackEmbeddingMode == EditorEmbeddingMode.Unsupported)
+                return;
+
+            _playbackControlFilePath = CreatePlaybackControlFilePath();
+            _isPlaybackPaused = false;
+
+            Dispatcher.UIThread.Post(() =>
+            {
+                try
+                {
+                    if (!TryGetPlaybackWindowNativeHandle(out nint handle) || handle == 0)
+                        return;
+
+                    _playbackWindowNativeHandle = handle;
+
+                    string executablePath = ResolveEngineExecutablePath();
+                    string arguments = BuildExternalHostedGameArguments();
+
+                    ProcessStartInfo startInfo = new ProcessStartInfo
+                    {
+                        FileName = executablePath,
+                        Arguments = arguments,
+                        WorkingDirectory = _projectRootPath!,
+                        UseShellExecute = false
+                    };
+
+                    Process process = new Process
+                    {
+                        StartInfo = startInfo,
+                        EnableRaisingEvents = true
+                    };
+
+                    if (!process.Start())
+                        return;
+
+                    _playbackProcess = process;
+                    _isPlaybackRunning = true;
+                    _isPlaybackPaused = false;
+                    UpdatePlaybackButtonsVisualState();
+
+                    PixelSize size = GetPlaybackWindowPixelSize();
+                    QueuePlaybackCommand($"resize {size.Width} {size.Height}");
+                    QueuePlaybackCommand("focus");
+
+                    Dispatcher.UIThread.Post(() =>
+                    {
+                        if (_isPlaybackRunning)
+                            QueuePlaybackCommand("focus");
+                    }, DispatcherPriority.Render);
+
+                    DispatcherTimer.RunOnce(() =>
+                    {
+                        if (_isPlaybackRunning)
+                            QueuePlaybackCommand("focus");
+                    }, TimeSpan.FromMilliseconds(120));
+
+                    process.Exited += (_, _) =>
+                    {
+                        Dispatcher.UIThread.Post(() =>
+                        {
+                            _isPlaybackRunning = false;
+                            _isPlaybackPaused = false;
+
+                            try
+                            {
+                                _playbackProcess?.Dispose();
+                            }
+                            catch
+                            {
+                            }
+
+                            _playbackProcess = null;
+
+                            if (!string.IsNullOrWhiteSpace(_playbackControlFilePath))
+                            {
+                                try
+                                {
+                                    File.Delete(_playbackControlFilePath);
+                                }
+                                catch
+                                {
+                                }
+
+                                _playbackControlFilePath = null;
+                            }
+
+                            UpdatePlaybackButtonsVisualState();
+                        });
+                    };
+                }
+                catch
+                {
+                }
+            }, DispatcherPriority.Render);
+        }
+
+        private void StopPlayback()
+        {
+            _isPlaybackRunning = false;
+            _isPlaybackPaused = false;
+
+            QueuePlaybackCommand("stop");
+
+            if (_playbackProcess != null)
+            {
+                try
+                {
+                    if (!_playbackProcess.HasExited)
+                        _playbackProcess.Kill(true);
+                }
+                catch
+                {
+                }
+
+                try
+                {
+                    _playbackProcess.Dispose();
+                }
+                catch
+                {
+                }
+
+                _playbackProcess = null;
+            }
+
+            if (!string.IsNullOrWhiteSpace(_playbackControlFilePath))
+            {
+                try
+                {
+                    File.Delete(_playbackControlFilePath);
+                }
+                catch
+                {
+                }
+
+                _playbackControlFilePath = null;
+            }
+
+            if (_playbackWindow != null)
+            {
+                Window window = _playbackWindow;
+                _playbackWindow = null;
+                _playbackWindowNativeHandle = 0;
+                window.Close();
+            }
+
+            UpdatePlaybackButtonsVisualState();
+        }
+
+        private void TogglePausePlayback()
+        {
+            if (!_isPlaybackRunning)
+                return;
+
+            if (_isPlaybackPaused)
+            {
+                QueuePlaybackCommand("resume");
+                _isPlaybackPaused = false;
+            }
+            else
+            {
+                QueuePlaybackCommand("pause");
+                _isPlaybackPaused = true;
+            }
+
+            UpdatePlaybackButtonsVisualState();
+        }
+
+        private void StepPlayback()
+        {
+            if (!_isPlaybackRunning)
+                return;
+
+            if (!_isPlaybackPaused)
+                return;
+
+            QueuePlaybackCommand("step");
         }
 
         private Control CreateSceneHostContent()
@@ -2129,6 +2875,7 @@ namespace LimitlessSquareEngine.Editor
 
             ProjectFilesSlot.Content = treeView;
             ShowResourceDirectory(fullRootPath);
+            UpdatePlaybackButtonsVisualState();
         }
 
         private string ResolveProjectAssetRoot(string projectRootPath)

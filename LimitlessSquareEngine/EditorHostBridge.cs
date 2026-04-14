@@ -21,6 +21,11 @@ namespace LimitlessSquareEngine
         private static Action<string, string, Double3>? _setSceneObjectLocalPosition;
         private static Action<string, string, Double3>? _setSceneObjectLocalRotation;
         private static Func<EditorRenderedFrame?>? _consumeLatestFrame;
+        private static Action<bool>? _setRuntimePaused;
+        private static Func<bool>? _getRuntimePaused;
+        private static Action? _stepRuntimeFrame;
+        private static Action<string>? _setGameStartupFolder;
+        private static Func<string>? _getGameStartupFolder;
 
         internal static void Bind(
             Func<EditorHostBootstrapInfo> bootstrapInfoProvider,
@@ -34,7 +39,12 @@ namespace LimitlessSquareEngine
             Action<string> setAssetRootAndReloadAssets,
             Action<string, string, Double3> setSceneObjectLocalPosition,
             Action<string, string, Double3> setSceneObjectLocalRotation,
-            Func<EditorRenderedFrame?> consumeLatestFrame)
+            Func<EditorRenderedFrame?> consumeLatestFrame,
+            Action<bool> setRuntimePaused,
+            Func<bool> getRuntimePaused,
+            Action stepRuntimeFrame,
+            Action<string> setGameStartupFolder,
+            Func<string> getGameStartupFolder)
         {
             _bootstrapInfoProvider = bootstrapInfoProvider;
             _setRenderWindowVisible = setRenderWindowVisible;
@@ -48,6 +58,11 @@ namespace LimitlessSquareEngine
             _setSceneObjectLocalPosition = setSceneObjectLocalPosition;
             _setSceneObjectLocalRotation = setSceneObjectLocalRotation;
             _consumeLatestFrame = consumeLatestFrame;
+            _setRuntimePaused = setRuntimePaused;
+            _getRuntimePaused = getRuntimePaused;
+            _stepRuntimeFrame = stepRuntimeFrame;
+            _setGameStartupFolder = setGameStartupFolder;
+            _getGameStartupFolder = getGameStartupFolder;
         }
 
         internal static void Unbind()
@@ -64,6 +79,11 @@ namespace LimitlessSquareEngine
             _setSceneObjectLocalPosition = null;
             _setSceneObjectLocalRotation = null;
             _consumeLatestFrame = null;
+            _setRuntimePaused = null;
+            _getRuntimePaused = null;
+            _stepRuntimeFrame = null;
+            _setGameStartupFolder = null;
+            _getGameStartupFolder = null;
         }
 
         public static void SetSceneObjectLocalPosition(string sceneId, string objectId, Double3 value)
@@ -119,6 +139,49 @@ namespace LimitlessSquareEngine
                 throw new InvalidOperationException("Editor host bridge is not bound.");
 
             return _bootstrapInfoProvider();
+        }
+
+        public static void SetRuntimePaused(bool paused)
+        {
+            if (_setRuntimePaused == null)
+                throw new InvalidOperationException("Editor host bridge is not bound.");
+
+            _setRuntimePaused(paused);
+        }
+
+        public static bool GetRuntimePaused()
+        {
+            if (_getRuntimePaused == null)
+                throw new InvalidOperationException("Editor host bridge is not bound.");
+
+            return _getRuntimePaused();
+        }
+
+        public static void StepRuntimeFrame()
+        {
+            if (_stepRuntimeFrame == null)
+                throw new InvalidOperationException("Editor host bridge is not bound.");
+
+            _stepRuntimeFrame();
+        }
+
+        public static void SetGameStartupFolder(string folderPath)
+        {
+            if (string.IsNullOrWhiteSpace(folderPath))
+                throw new ArgumentException("Folder path cannot be null or empty.", nameof(folderPath));
+
+            if (_setGameStartupFolder == null)
+                throw new InvalidOperationException("Editor host bridge is not bound.");
+
+            _setGameStartupFolder(folderPath);
+        }
+
+        public static string GetGameStartupFolder()
+        {
+            if (_getGameStartupFolder == null)
+                throw new InvalidOperationException("Editor host bridge is not bound.");
+
+            return _getGameStartupFolder();
         }
 
         public static bool IsRenderWindowAlive

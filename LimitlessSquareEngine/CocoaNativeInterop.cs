@@ -46,6 +46,9 @@ namespace LimitlessSquareEngine
         [DllImport("/usr/lib/libobjc.A.dylib", EntryPoint = "objc_msgSend")]
         private static extern IntPtr objc_msgSend_NSRect_IntPtr(IntPtr receiver, IntPtr selector, NSRect rect);
 
+        [DllImport("/usr/lib/libobjc.A.dylib", EntryPoint = "objc_msgSend")]
+        private static extern bool objc_msgSend_bool_IntPtr(IntPtr receiver, IntPtr selector, IntPtr arg1);
+
 
         public static nint GetContentView(nint nsWindow)
         {
@@ -107,6 +110,15 @@ namespace LimitlessSquareEngine
                 return 0;
 
             return objc_msgSend_NSRect_IntPtr(viewAlloc, initSel, new NSRect(x, y, width, height));
+        }
+
+        public static void MakeWindowFirstResponder(nint nsWindow, nint responder)
+        {
+            if (nsWindow == 0 || responder == 0)
+                return;
+
+            IntPtr selector = sel_registerName("makeFirstResponder:");
+            objc_msgSend_bool_IntPtr(nsWindow, selector, responder);
         }
     }
 }

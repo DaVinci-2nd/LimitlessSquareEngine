@@ -142,8 +142,18 @@ namespace LimitlessSquareEngine
     {
         // 编辑器程序集文件名
         private const string EditorAssemblyFileName = "Limitless Square Editor.dll";
-        // 是否启用编辑器模式
+        // 运行模式
         private static bool _isEditorMode = false;
+        private static bool _forceGameMode = false;
+        private static bool _forceEditorMode = false;
+        private static bool _isExternalHostMode = false;
+        private static EditorEmbeddingMode _externalHostEmbeddingMode = EditorEmbeddingMode.Unsupported;
+        private static nint _externalHostWin32ParentHwnd;
+        private static nint _externalHostCocoaParentView;
+        private static nint _externalHostX11ParentWindow;
+        private static int _externalHostInitialWidth = 1280;
+        private static int _externalHostInitialHeight = 720;
+
 
         private static string _assetRootPath = Path.Combine(AppContext.BaseDirectory, "Assets");
         private static string? _editorAssemblyPath;
@@ -203,6 +213,16 @@ namespace LimitlessSquareEngine
 
         // 上一帧时间
         private static double _lastFrameTime;
+        // 运行时暂停状态
+        private static bool _runtimePaused = false;
+        // 待执行步进帧数
+        private static int _pendingStepFrameCount = 0;
+        // 固定步长
+        private const float FixedDeltaTime = 0.02f;
+        // 游戏启动文件夹
+        private static string _gameStartupFolder = AppContext.BaseDirectory;
+
+        private static string? _externalControlFilePath;
 
         // 启动Logo显示选项
         static bool _showStartupLogo = true;
@@ -221,6 +241,45 @@ namespace LimitlessSquareEngine
         private static int _titleDisplayedFps = 0;
         // 标题立即刷新标志
         private static bool _windowTitleDirty = true;
+
+        [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
+        private static extern nint SetParent(nint hWndChild, nint hWndNewParent);
+
+        [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
+        private static extern int SetWindowLong(nint hWnd, int nIndex, int dwNewLong);
+
+        [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
+        private static extern bool MoveWindow(nint hWnd, int x, int y, int nWidth, int nHeight, bool bRepaint);
+
+        private const int GWL_STYLE = -16;
+        private const int WS_CHILD = 0x40000000;
+        private const int WS_POPUP = unchecked((int)0x80000000);
+
+        [System.Runtime.InteropServices.DllImport("libX11")]
+        private static extern int XReparentWindow(nint display, nint w, nint parent, int x, int y);
+
+        [System.Runtime.InteropServices.DllImport("libX11")]
+        private static extern int XResizeWindow(nint display, nint w, uint width, uint height);
+
+        [System.Runtime.InteropServices.DllImport("libX11")]
+        private static extern int XMapWindow(nint display, nint w);
+
+        [System.Runtime.InteropServices.DllImport("libX11")]
+        private static extern int XFlush(nint display);
+
+        [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
+        private static extern nint SetFocus(nint hWnd);
+
+        [System.Runtime.InteropServices.DllImport("libX11")]
+        private static extern int XSetInputFocus(nint display, nint focus, int revert_to, nint time);
+
+        [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
+        private static extern bool SetForegroundWindow(nint hWnd);
+
+        [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
+        private static extern bool SetActiveWindow(nint hWnd);
+
+        private const int RevertToParent = 2;
 
         /// <summary>
         /// 显示启动Logo
@@ -481,6 +540,39 @@ namespace LimitlessSquareEngine
             }
         }
 
+        static bool TryPrepareRuntimeFrameTiming(out float deltaTime, out float fixedDeltaTime)
+        {
+            deltaTime = 0f;
+            fixedDeltaTime = FixedDeltaTime;
+
+            if (_window == null)
+                return false;
+
+            double currentTime = _window.Time;
+            float realtimeDelta = (float)(currentTime - _lastFrameTime);
+
+            _lastFrameTime = currentTime;
+
+            if (realtimeDelta < 0f)
+                realtimeDelta = 0f;
+
+            if (_runtimePaused)
+            {
+                if (_pendingStepFrameCount > 0)
+                {
+                    _pendingStepFrameCount--;
+                    deltaTime = FixedDeltaTime;
+                    return true;
+                }
+
+                deltaTime = 0f;
+                return false;
+            }
+
+            deltaTime = realtimeDelta;
+            return true;
+        }
+
         static string ResolveDefaultAssetRootPath()
         {
             if (_isEditorMode)
@@ -696,8 +788,41 @@ namespace LimitlessSquareEngine
             int clampedWidth = Math.Max(1, width);
             int clampedHeight = Math.Max(1, height);
 
+            _externalHostInitialWidth = clampedWidth;
+            _externalHostInitialHeight = clampedHeight;
+
             _window.Size = new Silk.NET.Maths.Vector2D<int>(clampedWidth, clampedHeight);
             _windowTitleDirty = true;
+
+            if (!_isExternalHostMode)
+                return;
+
+            INativeWindow native = _window.Native;
+
+            if (_externalHostEmbeddingMode == EditorEmbeddingMode.CocoaViewHost && native.Cocoa.HasValue)
+            {
+                nint contentView = CocoaNativeInterop.GetContentView(native.Cocoa.Value);
+                if (contentView != 0)
+                    CocoaNativeInterop.SetViewFrame(contentView, 0, 0, clampedWidth, clampedHeight);
+
+                return;
+            }
+
+            if (_externalHostEmbeddingMode == EditorEmbeddingMode.ForeignChildWindow)
+            {
+                if (native.Win32.HasValue)
+                {
+                    MoveWindow(native.Win32.Value.Hwnd, 0, 0, clampedWidth, clampedHeight, true);
+                    return;
+                }
+
+                if (native.X11.HasValue)
+                {
+                    XResizeWindow(native.X11.Value.Display, (nint)native.X11.Value.Window, (uint)clampedWidth, (uint)clampedHeight);
+                    XFlush(native.X11.Value.Display);
+                    return;
+                }
+            }
         }
 
         static void RequestRenderWindowCloseCore()
@@ -711,6 +836,43 @@ namespace LimitlessSquareEngine
         static bool IsRenderWindowAlive()
         {
             return _window != null && !_window.IsClosing;
+        }
+
+        static void SetRuntimePausedCore(bool paused)
+        {
+            _runtimePaused = paused;
+
+            if (_window != null)
+                _lastFrameTime = _window.Time;
+        }
+
+        static bool GetRuntimePausedCore()
+        {
+            return _runtimePaused;
+        }
+
+        static void StepRuntimeFrameCore()
+        {
+            if (!_runtimePaused)
+                return;
+
+            _pendingStepFrameCount++;
+        }
+
+        static void SetGameStartupFolderCore(string folderPath)
+        {
+            if (string.IsNullOrWhiteSpace(folderPath))
+                return;
+
+            if (Path.IsPathRooted(folderPath))
+                _gameStartupFolder = Path.GetFullPath(folderPath);
+            else
+                _gameStartupFolder = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, folderPath));
+        }
+
+        static string GetGameStartupFolderCore()
+        {
+            return _gameStartupFolder;
         }
 
         static void BindEditorHostBridge()
@@ -738,7 +900,12 @@ namespace LimitlessSquareEngine
                 }),
                 (sceneId, objectId, value) => Scene.SetLocalPosition(sceneId, objectId, value),
                 (sceneId, objectId, value) => Scene.SetLocalRotation(sceneId, objectId, value),
-                ConsumeLatestFrameCore);
+                ConsumeLatestFrameCore,
+                paused => QueueEditorHostAction(() => SetRuntimePausedCore(paused)),
+                GetRuntimePausedCore,
+                () => QueueEditorHostAction(StepRuntimeFrameCore),
+                folderPath => QueueEditorHostAction(() => SetGameStartupFolderCore(folderPath)),
+                GetGameStartupFolderCore);
         }
 
         static void UnbindEditorHostBridge()
@@ -1030,8 +1197,11 @@ namespace LimitlessSquareEngine
             var options = WindowOptions.Default;
             _windowBaseTitle = Path.GetFileNameWithoutExtension(Environment.ProcessPath) ?? "Limitless Square Engine";
             options.Title = _windowBaseTitle;
-            options.IsVisible = !_isEditorMode;
+            options.IsVisible = !_isEditorMode && !_isExternalHostMode;
             options.ShouldSwapAutomatically = false;
+            options.Size = new Silk.NET.Maths.Vector2D<int>(
+                Math.Max(1, _externalHostInitialWidth),
+                Math.Max(1, _externalHostInitialHeight));
             _window = Window.Create(options);
 
             // 窗口加载事件
@@ -1068,6 +1238,7 @@ namespace LimitlessSquareEngine
                 _graphics = graphics;
                 Scene.BindGraphics(graphics);
                 BindEditorHostBridge();
+                AttachWindowToExternalHost();
 
                 // 初始化帧时间   
                 _lastFrameTime = _window.Time;
@@ -1799,40 +1970,40 @@ namespace LimitlessSquareEngine
                 return;
 
             ExecuteEditorHostActions();
+            ProcessExternalControlCommands();
 
             // 帧间隔
-            double currentTime = _window.Time;
-            float deltaTime = (float)(currentTime - _lastFrameTime);
-            float fixedDeltaTime = 0.02f;
-            _lastFrameTime = currentTime;
+            bool shouldAdvanceSimulation = TryPrepareRuntimeFrameTiming(out float deltaTime, out float fixedDeltaTime);
             TickWindowTitle(deltaTime);
 
             // 清除颜色缓冲
             _graphics?.ClearBackground();
             // 接收输入更新
             _input?.Update();
-
-            // 遍历所有脚本实例
-            foreach (var instance in _luaScriptInstances)
+            if (shouldAdvanceSimulation)
             {
-                if (instance.LoopFunction != null && instance.LoopFunction.Type == DataType.Function)
+                // 遍历所有脚本实例
+                foreach (var instance in _luaScriptInstances)
                 {
-                    try
+                    if (instance.LoopFunction != null && instance.LoopFunction.Type == DataType.Function)
                     {
-                        instance.LuaScript.Globals["deltaTime"] = deltaTime;
-                        instance.LuaScript.Globals["fixedDeltaTime"] = fixedDeltaTime;
-                        instance.LoopFunction.Function.Call();
-                    }
-                    catch (ScriptRuntimeException ex)
-                    {
-                        Console.WriteLine($"[X] Error in loop function of script '{instance.FilePath}': {ex.DecoratedMessage}");
+                        try
+                        {
+                            instance.LuaScript.Globals["deltaTime"] = deltaTime;
+                            instance.LuaScript.Globals["fixedDeltaTime"] = fixedDeltaTime;
+                            instance.LoopFunction.Function.Call();
+                        }
+                        catch (ScriptRuntimeException ex)
+                        {
+                            Console.WriteLine($"[X] Error in loop function of script '{instance.FilePath}': {ex.DecoratedMessage}");
+                        }
                     }
                 }
+                // 物理引擎
+                Physics.Step(deltaTime, fixedDeltaTime);
+                // 把场景层的脏transform同步到Graphics缓存
+                Scene.FlushDirtyToRenderer();
             }
-            // 物理引擎
-            Physics.Step(deltaTime, fixedDeltaTime);
-            // 把场景层的脏transform同步到Graphics缓存
-            Scene.FlushDirtyToRenderer();
             // 提交场景相机渲染
             _graphics?.QueueLoadedSceneRender();
             // 提交画布渲染
@@ -1850,6 +2021,311 @@ namespace LimitlessSquareEngine
             }
         }
 
+        static void ParseLaunchArguments(string[] args)
+        {
+            foreach (string rawArg in args)
+            {
+                if (string.IsNullOrWhiteSpace(rawArg))
+                    continue;
+
+                string arg = rawArg.Trim();
+
+                if (arg.Equals("--game", StringComparison.OrdinalIgnoreCase))
+                {
+                    _forceGameMode = true;
+                    _forceEditorMode = false;
+                    continue;
+                }
+
+                if (arg.Equals("--editor", StringComparison.OrdinalIgnoreCase))
+                {
+                    _forceEditorMode = true;
+                    _forceGameMode = false;
+                    continue;
+                }
+
+                if (arg.Equals("--external-host", StringComparison.OrdinalIgnoreCase))
+                {
+                    _isExternalHostMode = true;
+                    continue;
+                }
+
+                if (arg.StartsWith("--game-startup-folder=", StringComparison.OrdinalIgnoreCase))
+                {
+                    string value = arg.Substring("--game-startup-folder=".Length).Trim('"');
+                    if (!string.IsNullOrWhiteSpace(value))
+                        SetGameStartupFolderCore(value);
+
+                    continue;
+                }
+
+                if (arg.StartsWith("--external-control-file=", StringComparison.OrdinalIgnoreCase))
+                {
+                    string value = arg.Substring("--external-control-file=".Length).Trim().Trim('"');
+                    if (!string.IsNullOrWhiteSpace(value))
+                        _externalControlFilePath = value;
+
+                    continue;
+                }
+
+                if (arg.StartsWith("--external-host-mode=", StringComparison.OrdinalIgnoreCase))
+                {
+                    string value = arg.Substring("--external-host-mode=".Length).Trim().Trim('"');
+
+                    if (value.Equals("win32", StringComparison.OrdinalIgnoreCase))
+                        _externalHostEmbeddingMode = EditorEmbeddingMode.ForeignChildWindow;
+                    else if (value.Equals("cocoa", StringComparison.OrdinalIgnoreCase))
+                        _externalHostEmbeddingMode = EditorEmbeddingMode.CocoaViewHost;
+                    else if (value.Equals("x11", StringComparison.OrdinalIgnoreCase))
+                        _externalHostEmbeddingMode = EditorEmbeddingMode.ForeignChildWindow;
+                    else if (value.Equals("wayland", StringComparison.OrdinalIgnoreCase))
+                        _externalHostEmbeddingMode = EditorEmbeddingMode.NestedWaylandCompositor;
+                    else
+                        _externalHostEmbeddingMode = EditorEmbeddingMode.Unsupported;
+
+                    continue;
+                }
+
+                if (arg.StartsWith("--external-host-win32-parent=", StringComparison.OrdinalIgnoreCase))
+                {
+                    string value = arg.Substring("--external-host-win32-parent=".Length).Trim().Trim('"');
+                    if (!string.IsNullOrWhiteSpace(value))
+                        _externalHostWin32ParentHwnd = (nint)ParseUnsignedNativeInteger(value);
+
+                    continue;
+                }
+
+                if (arg.StartsWith("--external-host-cocoa-parent=", StringComparison.OrdinalIgnoreCase))
+                {
+                    string value = arg.Substring("--external-host-cocoa-parent=".Length).Trim().Trim('"');
+                    if (!string.IsNullOrWhiteSpace(value))
+                        _externalHostCocoaParentView = (nint)ParseUnsignedNativeInteger(value);
+
+                    continue;
+                }
+
+                if (arg.StartsWith("--external-host-x11-parent=", StringComparison.OrdinalIgnoreCase))
+                {
+                    string value = arg.Substring("--external-host-x11-parent=".Length).Trim().Trim('"');
+                    if (!string.IsNullOrWhiteSpace(value))
+                        _externalHostX11ParentWindow = (nint)ParseUnsignedNativeInteger(value);
+
+                    continue;
+                }
+
+                if (arg.StartsWith("--external-host-width=", StringComparison.OrdinalIgnoreCase))
+                {
+                    string value = arg.Substring("--external-host-width=".Length).Trim().Trim('"');
+                    if (int.TryParse(value, out int width) && width > 0)
+                        _externalHostInitialWidth = width;
+
+                    continue;
+                }
+
+                if (arg.StartsWith("--external-host-height=", StringComparison.OrdinalIgnoreCase))
+                {
+                    string value = arg.Substring("--external-host-height=".Length).Trim().Trim('"');
+                    if (int.TryParse(value, out int height) && height > 0)
+                        _externalHostInitialHeight = height;
+
+                    continue;
+                }
+            }
+        }
+
+        static ulong ParseUnsignedNativeInteger(string text)
+        {
+            if (string.IsNullOrWhiteSpace(text))
+                return 0UL;
+
+            string raw = text.Trim();
+
+            if (raw.StartsWith("0x", StringComparison.OrdinalIgnoreCase))
+                return Convert.ToUInt64(raw.Substring(2), 16);
+
+            return Convert.ToUInt64(raw, System.Globalization.CultureInfo.InvariantCulture);
+        }
+
+        static void FocusExternalHostedWindow()
+        {
+            if (!_isExternalHostMode || _window == null)
+                return;
+
+            INativeWindow native = _window.Native;
+
+            if (_externalHostEmbeddingMode == EditorEmbeddingMode.CocoaViewHost)
+            {
+                if (!native.Cocoa.HasValue)
+                    return;
+
+                nint nsWindow = native.Cocoa.Value;
+                nint contentView = CocoaNativeInterop.GetContentView(nsWindow);
+
+                if (contentView == 0)
+                    return;
+
+                CocoaNativeInterop.MakeWindowFirstResponder(nsWindow, contentView);
+                return;
+            }
+
+            if (_externalHostEmbeddingMode == EditorEmbeddingMode.ForeignChildWindow)
+            {
+                if (native.Win32.HasValue)
+                {
+                    nint hwnd = native.Win32.Value.Hwnd;
+                    SetForegroundWindow(hwnd);
+                    SetActiveWindow(hwnd);
+                    SetFocus(hwnd);
+                    return;
+                }
+
+                if (native.X11.HasValue)
+                {
+                    XMapWindow(native.X11.Value.Display, (nint)native.X11.Value.Window);
+                    XSetInputFocus(
+                        native.X11.Value.Display,
+                        (nint)native.X11.Value.Window,
+                        RevertToParent,
+                        0);
+
+                    XFlush(native.X11.Value.Display);
+                    return;
+                }
+            }
+        }
+
+        static void ProcessExternalControlCommands()
+        {
+            if (string.IsNullOrWhiteSpace(_externalControlFilePath))
+                return;
+
+            if (!File.Exists(_externalControlFilePath))
+                return;
+
+            string[] commands;
+
+            try
+            {
+                commands = File.ReadAllLines(_externalControlFilePath);
+                File.WriteAllText(_externalControlFilePath, string.Empty);
+            }
+            catch
+            {
+                return;
+            }
+
+            foreach (string rawCommand in commands)
+            {
+                string command = rawCommand.Trim();
+                if (string.IsNullOrWhiteSpace(command))
+                    continue;
+
+                if (command.Equals("pause", StringComparison.OrdinalIgnoreCase))
+                {
+                    SetRuntimePausedCore(true);
+                    continue;
+                }
+
+                if (command.Equals("resume", StringComparison.OrdinalIgnoreCase))
+                {
+                    SetRuntimePausedCore(false);
+                    continue;
+                }
+
+                if (command.Equals("step", StringComparison.OrdinalIgnoreCase))
+                {
+                    StepRuntimeFrameCore();
+                    continue;
+                }
+
+                if (command.Equals("focus", StringComparison.OrdinalIgnoreCase))
+                {
+                    FocusExternalHostedWindow();
+                    continue;
+                }
+
+                if (command.Equals("stop", StringComparison.OrdinalIgnoreCase))
+                {
+                    RequestRenderWindowCloseCore();
+                    continue;
+                }
+
+                if (command.StartsWith("resize ", StringComparison.OrdinalIgnoreCase))
+                {
+                    string[] parts = command.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                    if (parts.Length == 3 &&
+                        int.TryParse(parts[1], out int width) &&
+                        int.TryParse(parts[2], out int height))
+                    {
+                        SetRenderWindowSizeCore(width, height);
+                    }
+
+                    continue;
+                }
+            }
+        }
+
+        static void AttachWindowToExternalHost()
+        {
+            if (!_isExternalHostMode || _window == null)
+                return;
+
+            INativeWindow native = _window.Native;
+
+            if (_externalHostEmbeddingMode == EditorEmbeddingMode.CocoaViewHost)
+            {
+                if (!native.Cocoa.HasValue)
+                    return;
+
+                nint cocoaWindow = native.Cocoa.Value;
+                nint cocoaContentView = CocoaNativeInterop.GetContentView(cocoaWindow);
+
+                if (cocoaContentView == 0 || _externalHostCocoaParentView == 0)
+                    return;
+
+                CocoaNativeInterop.RemoveFromSuperview(cocoaContentView);
+                CocoaNativeInterop.AddSubview(_externalHostCocoaParentView, cocoaContentView);
+                CocoaNativeInterop.SetViewFrame(
+                    cocoaContentView,
+                    0,
+                    0,
+                    _externalHostInitialWidth,
+                    _externalHostInitialHeight);
+
+                _window.IsVisible = true;
+                FocusExternalHostedWindow();
+                return;
+            }
+
+            if (_externalHostEmbeddingMode == EditorEmbeddingMode.ForeignChildWindow)
+            {
+                if (native.Win32.HasValue && _externalHostWin32ParentHwnd != 0)
+                {
+                    nint hwnd = native.Win32.Value.Hwnd;
+                    SetParent(hwnd, _externalHostWin32ParentHwnd);
+                    SetWindowLong(hwnd, GWL_STYLE, WS_CHILD);
+                    MoveWindow(hwnd, 0, 0, _externalHostInitialWidth, _externalHostInitialHeight, true);
+                    _window.IsVisible = true;
+                    FocusExternalHostedWindow();
+                    return;
+                }
+
+                if (native.X11.HasValue && _externalHostX11ParentWindow != 0)
+                {
+                    nint display = native.X11.Value.Display;
+                    nint window = (nint)native.X11.Value.Window;
+
+                    XReparentWindow(display, window, _externalHostX11ParentWindow, 0, 0);
+                    XResizeWindow(display, window, (uint)_externalHostInitialWidth, (uint)_externalHostInitialHeight);
+                    XMapWindow(display, window);
+                    XFlush(display);
+                    _window.IsVisible = true;
+                    FocusExternalHostedWindow();
+                    return;
+                }
+            }
+        }
+
         /// <summary>
         /// 解析当前运行模式。
         /// </summary>
@@ -1857,7 +2333,20 @@ namespace LimitlessSquareEngine
         static bool ResolveEditorMode()
         {
             _editorAssemblyPath = Path.Combine(AppContext.BaseDirectory, EditorAssemblyFileName);
-            _isEditorMode = File.Exists(_editorAssemblyPath);
+            bool hasEditorDll = File.Exists(_editorAssemblyPath);
+
+            if (_forceGameMode)
+            {
+                _isEditorMode = false;
+            }
+            else if (_forceEditorMode)
+            {
+                _isEditorMode = hasEditorDll;
+            }
+            else
+            {
+                _isEditorMode = hasEditorDll;
+            }
 
             if (_isEditorMode)
             {
@@ -1875,8 +2364,9 @@ namespace LimitlessSquareEngine
         /// <summary>
         /// 主线程
         /// </summary>
+        /// <param name="args"></param>
         [STAThread]
-        static void Main()
+        static void Main(string[] args)
         {
             Console.WriteLine("////////////////////////////////////////////////////");
             Console.WriteLine("Limitless Square Engine");
@@ -1893,6 +2383,8 @@ namespace LimitlessSquareEngine
             Console.WriteLine("////////////////////////////////////////////////////");
 
             // 启动模式
+            ParseLaunchArguments(args);
+            _gameStartupFolder = Path.GetFullPath(_gameStartupFolder);
             ResolveEditorMode();
             ConfigureEditorMode();
 

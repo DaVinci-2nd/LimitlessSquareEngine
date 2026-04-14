@@ -85,12 +85,12 @@ namespace LimitlessSquareEngine.Editor
                     ? TimeSpan.FromMilliseconds(1)
                     : TimeSpan.FromMilliseconds(16);
 
-                if (EditorHostBridge.IsRenderWindowAlive)
-                {
-                    window.TickSceneHostNavigation();
-                    EditorHostBridge.RunRenderFrame();
-                    window.PresentLatestFrame();
-                }
+                if (!EditorHostBridge.IsRenderWindowAlive)
+                    return;
+
+                window.TickSceneHostNavigation();
+                EditorHostBridge.RunRenderFrame();
+                window.PresentLatestFrame();
             };
 
             window.Closed += (_, _) =>
