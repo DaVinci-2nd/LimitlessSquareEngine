@@ -243,6 +243,19 @@ namespace LimitlessSquareEngine.Editor
             StepCircle
         }
 
+        private enum ResourceIconKind
+        {
+            Folder,
+            GenericFile,
+            LuaFile,
+            JsonFile,
+            SceneJsonFile,
+            MaterialJsonFile,
+            ImageFile,
+            FragFile,
+            VertFile
+        }
+
         private void OnSceneHostResized(PixelSize hostSize)
         {
             if (hostSize.Width > 0 && hostSize.Height > 0)
@@ -384,8 +397,8 @@ namespace LimitlessSquareEngine.Editor
                 if (!_isPlaybackRunning)
                     return;
 
-                SuppressPlaybackFocusFor(220);
-                RequestDeferredPlaybackFocus(260);
+                SuppressPlaybackFocusFor(800);
+                _playbackDeferredFocusTimer?.Stop();
             };
 
             _playbackWindow.PropertyChanged += (_, e) =>
@@ -820,6 +833,11 @@ namespace LimitlessSquareEngine.Editor
         {
             if (!_isSceneHostRightDragging)
                 return;
+
+            PointerPoint point = e.GetCurrentPoint(_sceneHost);
+
+            if (point.Properties.IsMiddleButtonPressed)
+                _sceneHostMoveSpeedMultiplier = 1.0;
 
             if (string.IsNullOrWhiteSpace(_currentPreviewCameraId))
                 return;
@@ -1267,7 +1285,14 @@ namespace LimitlessSquareEngine.Editor
         private sealed class PlaybackGlyphIcon : Control
         {
             public static readonly StyledProperty<PlaybackButtonGlyph> GlyphProperty =
-                AvaloniaProperty.Register<PlaybackGlyphIcon, PlaybackButtonGlyph>(nameof(Glyph), PlaybackButtonGlyph.PlayTriangle);
+                AvaloniaProperty.Register<PlaybackGlyphIcon, PlaybackButtonGlyph>(
+                    nameof(Glyph),
+                    PlaybackButtonGlyph.PlayTriangle);
+
+            static PlaybackGlyphIcon()
+            {
+                AffectsRender<PlaybackGlyphIcon>(GlyphProperty);
+            }
 
             public PlaybackButtonGlyph Glyph
             {
@@ -1310,7 +1335,7 @@ namespace LimitlessSquareEngine.Editor
 
                     case PlaybackButtonGlyph.StopSquare:
                         {
-                            Rect rect = new Rect(bounds.Left + 3, bounds.Top + 3, bounds.Width - 6, bounds.Height - 6);
+                            Rect rect = new Rect(bounds.Left + 2, bounds.Top + 2, bounds.Width - 4, bounds.Height - 4);
                             context.DrawRectangle(brush, null, rect);
                             break;
                         }
@@ -1340,6 +1365,388 @@ namespace LimitlessSquareEngine.Editor
                             break;
                         }
                 }
+            }
+        }
+
+        private sealed class ResourceGlyphIcon : Control
+        {
+            public static readonly StyledProperty<ResourceIconKind> KindProperty =
+                AvaloniaProperty.Register<ResourceGlyphIcon, ResourceIconKind>(
+                    nameof(Kind),
+                    ResourceIconKind.GenericFile);
+
+            public ResourceIconKind Kind
+            {
+                get => GetValue(KindProperty);
+                set => SetValue(KindProperty, value);
+            }
+
+            private static readonly IBrush WhiteBrush = Brushes.White;
+            private static readonly IBrush LuaBrush = new SolidColorBrush(Color.Parse("#103A8A"));
+            private static readonly IBrush JsonBrush = new SolidColorBrush(Color.Parse("#7A1F1F"));
+            private static readonly IBrush SceneBrush = new LinearGradientBrush
+            {
+                StartPoint = new RelativePoint(0, 0, RelativeUnit.Relative),
+                EndPoint = new RelativePoint(0, 1, RelativeUnit.Relative),
+                GradientStops = new GradientStops
+                {
+                    new GradientStop(Color.Parse("#336699"), 0.0),
+                    new GradientStop(Color.Parse("#888888"), 0.5),
+                    new GradientStop(Color.Parse("#226622"), 1.0)
+                }
+            };
+            private static readonly IBrush RainbowBrush = new LinearGradientBrush
+            {
+                StartPoint = new RelativePoint(0, 0, RelativeUnit.Relative),
+                EndPoint = new RelativePoint(1, 1, RelativeUnit.Relative),
+                GradientStops = new GradientStops
+                {
+                    new GradientStop(Color.Parse("#993333"), 0.0),
+                    new GradientStop(Color.Parse("#999933"), 0.2),
+                    new GradientStop(Color.Parse("#339933"), 0.4),
+                    new GradientStop(Color.Parse("#339999"), 0.6),
+                    new GradientStop(Color.Parse("#333399"), 0.8),
+                    new GradientStop(Color.Parse("#993399"), 1.0)
+                }
+            };
+            private static readonly IBrush MaterialBrush = new SolidColorBrush(Color.Parse("#226622"));
+            private static readonly IBrush ImageBrush = new SolidColorBrush(Color.Parse("#66C8FF"));
+            private static readonly IBrush MountainLightBrush = new SolidColorBrush(Color.Parse("#6DBE57"));
+            private static readonly IBrush MountainDarkBrush = new SolidColorBrush(Color.Parse("#4E9C3A"));
+            private static readonly IBrush SunBrush = new SolidColorBrush(Color.Parse("#FFD54A"));
+            private static readonly IBrush AxisRedBrush = new SolidColorBrush(Color.Parse("#FF4A4A"));
+            private static readonly IBrush AxisGreenBrush = new SolidColorBrush(Color.Parse("#4CFF7A"));
+            private static readonly IBrush AxisBlueBrush = new SolidColorBrush(Color.Parse("#4D86FF"));
+            private static readonly IBrush ShadowBrush = new SolidColorBrush(Color.Parse("#888888"));
+            private static readonly IBrush ShadowGroundBrush = new SolidColorBrush(Color.Parse("#114411"));
+
+            private static readonly Pen OutlinePen = new Pen(WhiteBrush, 2);
+
+            public ResourceGlyphIcon()
+            {
+                Width = 50;
+                Height = 50;
+                HorizontalAlignment = HorizontalAlignment.Center;
+                VerticalAlignment = VerticalAlignment.Center;
+                IsHitTestVisible = false;
+            }
+
+            public override void Render(DrawingContext context)
+            {
+                base.Render(context);
+
+                Rect bounds = new Rect(Bounds.Size);
+                if (bounds.Width <= 0 || bounds.Height <= 0)
+                    return;
+
+                switch (Kind)
+                {
+                    case ResourceIconKind.Folder:
+                        DrawFolder(context, bounds);
+                        break;
+
+                    case ResourceIconKind.LuaFile:
+                        DrawFileBase(context, bounds, LuaBrush, true);
+                        DrawLuaBadge(context, bounds);
+                        DrawCenteredLabel(context, bounds, "Lua", 14, FontWeight.Bold);
+                        break;
+
+                    case ResourceIconKind.JsonFile:
+                        DrawFileBase(context, bounds, JsonBrush, true);
+                        DrawCenteredLabel(context, bounds, "Json", 14, FontWeight.Bold);
+                        break;
+
+                    case ResourceIconKind.SceneJsonFile:
+                        DrawFileBase(context, bounds, SceneBrush, true);
+                        DrawSceneGizmo(context, bounds);
+                        break;
+
+                    case ResourceIconKind.MaterialJsonFile:
+                        DrawFileBase(context, bounds, MaterialBrush, true);
+                        DrawMaterialSphere(context, bounds);
+                        break;
+
+                    case ResourceIconKind.ImageFile:
+                        DrawImageFile(context, bounds);
+                        break;
+
+                    case ResourceIconKind.FragFile:
+                        DrawFileBase(context, bounds, RainbowBrush, true);
+                        DrawCenteredLabel(context, bounds, "F", 18, FontWeight.Bold);
+                        break;
+
+                    case ResourceIconKind.VertFile:
+                        DrawFileBase(context, bounds, RainbowBrush, true);
+                        DrawCenteredLabel(context, bounds, "V", 18, FontWeight.Bold);
+                        break;
+
+                    default:
+                        DrawFileBase(context, bounds, null, true);
+                        break;
+                }
+            }
+
+            private static void DrawFolder(DrawingContext context, Rect bounds)
+            {
+                double boxSize = Math.Min(bounds.Width, bounds.Height);
+                double boxX = bounds.X + (bounds.Width - boxSize) / 2;
+                double boxY = bounds.Y + (bounds.Height - boxSize) / 2;
+
+                double bodyWidth = boxSize * 0.82;
+                double bodyHeight = bodyWidth * 3.0 / 4.0;
+                double tabHeight = bodyHeight * 0.24;
+                double totalHeight = bodyHeight + tabHeight;
+                double x = boxX + (boxSize - bodyWidth) / 2;
+                double y = boxY + (boxSize - totalHeight) / 2;
+                double bodyY = y + tabHeight;
+
+                double radius = Math.Min(bodyWidth, bodyHeight) * 0.10;
+                double tabWidth = bodyWidth * 0.34;
+
+                Rect bodyRect = new Rect(x, bodyY, bodyWidth, bodyHeight);
+                context.DrawRectangle(null, OutlinePen, new RoundedRect(bodyRect, radius, radius));
+
+                StreamGeometry tabGeometry = new StreamGeometry();
+                using (StreamGeometryContext gc = tabGeometry.Open())
+                {
+                    gc.BeginFigure(new Point(x, bodyY + radius), false);
+                    gc.LineTo(new Point(x, y + radius));
+                    gc.ArcTo(
+                        new Point(x + radius, y),
+                        new Size(radius, radius),
+                        0,
+                        false,
+                        SweepDirection.Clockwise);
+                    gc.LineTo(new Point(x + tabWidth - radius, y));
+                    gc.ArcTo(
+                        new Point(x + tabWidth, y + radius),
+                        new Size(radius, radius),
+                        0,
+                        false,
+                        SweepDirection.Clockwise);
+                    gc.LineTo(new Point(x + tabWidth, bodyY));
+                    gc.EndFigure(false);
+                }
+
+                context.DrawGeometry(null, OutlinePen, tabGeometry);
+            }
+
+            private static void DrawFileBase(DrawingContext context, Rect bounds, IBrush? fillBrush, bool drawFold)
+            {
+                double boxSize = Math.Min(bounds.Width, bounds.Height);
+                double boxX = bounds.X + (bounds.Width - boxSize) / 2;
+                double boxY = bounds.Y + (bounds.Height - boxSize) / 2;
+
+                double fileWidth = boxSize * 0.72;
+                double fileHeight = fileWidth * 4.0 / 3.0;
+                double x = boxX + (boxSize - fileWidth) / 2;
+                double y = boxY + (boxSize - fileHeight) / 2;
+
+                double radius = Math.Min(fileWidth, fileHeight) * 0.10;
+                double foldSize = fileWidth * 0.32;
+
+                StreamGeometry bodyGeometry = new StreamGeometry();
+                using (StreamGeometryContext gc = bodyGeometry.Open())
+                {
+                    gc.BeginFigure(new Point(x + radius, y), true);
+                    gc.LineTo(new Point(x + fileWidth - foldSize, y));
+                    gc.LineTo(new Point(x + fileWidth, y + foldSize));
+                    gc.LineTo(new Point(x + fileWidth, y + fileHeight - radius));
+                    gc.ArcTo(
+                        new Point(x + fileWidth - radius, y + fileHeight),
+                        new Size(radius, radius),
+                        0,
+                        false,
+                        SweepDirection.Clockwise);
+                    gc.LineTo(new Point(x + radius, y + fileHeight));
+                    gc.ArcTo(
+                        new Point(x, y + fileHeight - radius),
+                        new Size(radius, radius),
+                        0,
+                        false,
+                        SweepDirection.Clockwise);
+                    gc.LineTo(new Point(x, y + radius));
+                    gc.ArcTo(
+                        new Point(x + radius, y),
+                        new Size(radius, radius),
+                        0,
+                        false,
+                        SweepDirection.Clockwise);
+                    gc.EndFigure(true);
+                }
+
+                if (fillBrush != null)
+                    context.DrawGeometry(fillBrush, null, bodyGeometry);
+
+                context.DrawGeometry(null, OutlinePen, bodyGeometry);
+
+                if (!drawFold)
+                    return;
+
+                StreamGeometry foldGeometry = new StreamGeometry();
+                using (StreamGeometryContext gc = foldGeometry.Open())
+                {
+                    double r = radius;
+                    Point p0 = new Point(x + fileWidth - foldSize, y);
+                    Point p1 = new Point(x + fileWidth, y + foldSize);
+                    Point p2 = new Point(x + fileWidth - foldSize, y + foldSize);
+
+                    Vector v21 = p1 - p2;
+                    Vector v20 = p0 - p2;
+                    double len21 = Math.Sqrt(v21.X * v21.X + v21.Y * v21.Y);
+                    double len20 = Math.Sqrt(v20.X * v20.X + v20.Y * v20.Y);
+                    double t21 = Math.Min(r / len21, 0.5);
+                    double t20 = Math.Min(r / len20, 0.5);
+                    Point p2b = p2 + v21 * t21;
+                    Point p2a = p2 + v20 * t20;
+
+                    gc.BeginFigure(p0, false);
+                    gc.LineTo(p2a);
+                    gc.ArcTo(p2b, new Size(r, r), 0, false, SweepDirection.CounterClockwise);
+                    gc.LineTo(p1);
+                    gc.EndFigure(false);
+                }
+
+                context.DrawGeometry(null, OutlinePen, foldGeometry);
+            }
+
+            private static void DrawLuaBadge(DrawingContext context, Rect bounds)
+            {
+                double height = bounds.Height * 0.82;
+                double width = height * 0.75;
+                double x = bounds.X + (bounds.Width - width) / 2;
+                double y = bounds.Y + (bounds.Height - height) / 2;
+                double radius = Math.Min(width, height) * 0.11;
+
+                Point center = new Point(x + width * 0.78, y + height * 0.36);
+                context.DrawEllipse(WhiteBrush, null, center, radius, radius);
+            }
+
+            private static void DrawImageFile(DrawingContext context, Rect bounds)
+            {
+                double size = bounds.Width * 0.78;
+                double x = bounds.X + (bounds.Width - size) / 2;
+                double y = bounds.Y + (bounds.Height - size) / 2;
+
+                Rect rect = new Rect(x, y, size, size);
+
+                context.DrawRectangle(ImageBrush, null, new RoundedRect(rect, 4, 4));
+                context.DrawRectangle(null, OutlinePen, new RoundedRect(rect, 4, 4));
+
+                StreamGeometry backMountain = new StreamGeometry();
+                using (StreamGeometryContext gc = backMountain.Open())
+                {
+                    gc.BeginFigure(new Point(x + size * 0.14, y + size * 0.78), true);
+                    gc.LineTo(new Point(x + size * 0.38, y + size * 0.48));
+                    gc.LineTo(new Point(x + size * 0.56, y + size * 0.78));
+                    gc.EndFigure(true);
+                }
+                context.DrawGeometry(MountainDarkBrush, null, backMountain);
+
+                StreamGeometry frontMountain = new StreamGeometry();
+                using (StreamGeometryContext gc = frontMountain.Open())
+                {
+                    gc.BeginFigure(new Point(x + size * 0.34, y + size * 0.78), true);
+                    gc.LineTo(new Point(x + size * 0.62, y + size * 0.36));
+                    gc.LineTo(new Point(x + size * 0.86, y + size * 0.78));
+                    gc.EndFigure(true);
+                }
+                context.DrawGeometry(MountainLightBrush, null, frontMountain);
+
+                Point sunCenter = new Point(x + size * 0.75, y + size * 0.24);
+                double sunRadius = size * 0.09;
+                context.DrawEllipse(SunBrush, null, sunCenter, sunRadius, sunRadius);
+            }
+
+            private static void DrawSceneGizmo(DrawingContext context, Rect bounds)
+            {
+                double size = bounds.Width * 1.8;
+                double height = bounds.Height * 0.82;
+                double width = height * 0.75;
+                double x = bounds.X + (bounds.Width - width) / 2;
+                double y = bounds.Y + (bounds.Height - height) / 2;
+
+                Point center = new Point(x + width * 0.50, y + height * 0.58);
+
+                context.DrawLine(new Pen(AxisRedBrush, 2), center, new Point(center.X - size * 0.1559, center.Y + size * 0.09));
+                context.DrawLine(new Pen(AxisGreenBrush, 2), center, new Point(center.X, center.Y - size * 0.18));
+                context.DrawLine(new Pen(AxisBlueBrush, 2), center, new Point(center.X + size * 0.1559, center.Y + size * 0.09));
+
+                context.DrawEllipse(WhiteBrush, null, center, 4, 4);
+            }
+
+            private static void DrawMaterialSphere(DrawingContext context, Rect bounds)
+            {
+                double radius = bounds.Width * 0.2;
+
+                Point center = new Point(bounds.Center.X, bounds.Center.Y + 1.0);
+
+                double shadowWidth = radius;
+                double shadowHeight = radius * 0.3;
+                Point shadowCenter = new Point(center.X + radius * 0.5, center.Y + radius);
+
+                using (context.PushOpacity(0.6))
+                {
+                    context.DrawEllipse(
+                        ShadowGroundBrush,
+                        null,
+                        shadowCenter,
+                        shadowWidth,
+                        shadowHeight);
+                }
+
+                context.DrawEllipse(WhiteBrush, null, center, radius, radius);
+
+                double d = radius / Math.Sqrt(2.0);
+
+                Point tipTopRight = new Point(center.X + d + 0.01, center.Y - d - 0.01);
+                Point tipBottomLeft = new Point(center.X - d - 0.01, center.Y + d + 0.01);
+
+                StreamGeometry crescent = new StreamGeometry();
+                using (StreamGeometryContext gc = crescent.Open())
+                {
+                    gc.BeginFigure(tipTopRight, true);
+
+                    gc.ArcTo(
+                        tipBottomLeft,
+                        new Size(radius, radius),
+                        0,
+                        false,
+                        SweepDirection.Clockwise);
+
+                    gc.ArcTo(
+                        tipTopRight,
+                        new Size(radius * 1.25, radius * 1.25),
+                        0,
+                        false,
+                        SweepDirection.CounterClockwise);
+
+                    gc.EndFigure(true);
+                }
+
+                context.DrawGeometry(ShadowBrush, null, crescent);
+            }
+
+            private static void DrawCenteredLabel(
+                DrawingContext context,
+                Rect bounds,
+                string text,
+                double fontSize,
+                FontWeight fontWeight)
+            {
+                FormattedText formattedText = new FormattedText(
+                    text,
+                    CultureInfo.InvariantCulture,
+                    FlowDirection.LeftToRight,
+                    new Typeface(FontFamily.Default, FontStyle.Normal, fontWeight),
+                    fontSize,
+                    Brushes.White);
+
+                Point point = new Point(
+                    bounds.Center.X - formattedText.Width / 2,
+                    bounds.Center.Y - formattedText.Height / 2 + 6);
+
+                context.DrawText(formattedText, point);
             }
         }
 
@@ -3055,6 +3462,7 @@ namespace LimitlessSquareEngine.Editor
         private Control CreateResourceIconItem(string path, bool isDirectory)
         {
             string name = Path.GetFileName(path);
+            ResourceIconKind iconKind = ResolveResourceIconKind(path, isDirectory);
 
             Border item = new Border
             {
@@ -3071,12 +3479,13 @@ namespace LimitlessSquareEngine.Editor
                     HorizontalAlignment = HorizontalAlignment.Center,
                     Children =
                     {
-                        new TextBlock
+                        new ResourceGlyphIcon
                         {
-                            Text = isDirectory ? "📁" : "📄",
-                            FontSize = 50,
-                            HorizontalAlignment = HorizontalAlignment.Center,
-                            TextAlignment = TextAlignment.Center
+                            Kind = iconKind,
+                            Width = 52,
+                            Height = 52,
+                            Margin = new Thickness(0, 0, 0, 2),
+                            HorizontalAlignment = HorizontalAlignment.Center
                         },
                         new TextBlock
                         {
@@ -3421,6 +3830,77 @@ namespace LimitlessSquareEngine.Editor
         private string AnalyzeFileType(string filePath)
         {
             return Path.GetExtension(filePath);
+        }
+
+        private ResourceIconKind ResolveResourceIconKind(string path, bool isDirectory)
+        {
+            if (isDirectory)
+                return ResourceIconKind.Folder;
+
+            string extension = Path.GetExtension(path).Trim().ToLowerInvariant();
+
+            switch (extension)
+            {
+                case ".lua":
+                    return ResourceIconKind.LuaFile;
+
+                case ".frag":
+                    return ResourceIconKind.FragFile;
+
+                case ".vert":
+                    return ResourceIconKind.VertFile;
+
+                case ".png":
+                case ".jpg":
+                case ".jpeg":
+                case ".bmp":
+                case ".gif":
+                case ".webp":
+                case ".tga":
+                    return ResourceIconKind.ImageFile;
+
+                case ".json":
+                    return ResolveJsonResourceIconKind(path);
+
+                default:
+                    return ResourceIconKind.GenericFile;
+            }
+        }
+
+        private ResourceIconKind ResolveJsonResourceIconKind(string path)
+        {
+            try
+            {
+                string json = File.ReadAllText(path);
+                using JsonDocument doc = JsonDocument.Parse(json);
+                JsonElement root = doc.RootElement;
+
+                if (root.ValueKind != JsonValueKind.Object)
+                    return ResourceIconKind.JsonFile;
+
+                bool hasSceneId =
+                    root.TryGetProperty("sceneId", out JsonElement sceneIdElement) &&
+                    sceneIdElement.ValueKind == JsonValueKind.String &&
+                    !string.IsNullOrWhiteSpace(sceneIdElement.GetString());
+
+                bool hasObjects =
+                    root.TryGetProperty("objects", out JsonElement objectsElement) &&
+                    objectsElement.ValueKind == JsonValueKind.Array;
+
+                if (hasSceneId && hasObjects)
+                    return ResourceIconKind.SceneJsonFile;
+
+                if (root.TryGetProperty("assetType", out JsonElement assetTypeElement) &&
+                    assetTypeElement.ValueKind == JsonValueKind.String &&
+                    string.Equals(assetTypeElement.GetString(), "Material", StringComparison.OrdinalIgnoreCase))
+                    return ResourceIconKind.MaterialJsonFile;
+
+                return ResourceIconKind.JsonFile;
+            }
+            catch
+            {
+                return ResourceIconKind.JsonFile;
+            }
         }
 
         private bool TryHandleSpecialFileOpen(string filePath, string analyzedFileType)
