@@ -7,6 +7,7 @@ using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Platform.Storage;
 using Avalonia.Threading;
+using Avalonia.VisualTree;
 using LimitlessSquareEngine.Engine;
 using System;
 using System.Collections.Generic;
@@ -63,6 +64,16 @@ namespace LimitlessSquareEngine.Editor
         private SceneObject? _selectedSceneObject;
         private bool _isUpdatingSceneInspector;
         private bool _isProgrammaticSceneTreeSelection;
+        private TreeView? _sceneTreeView;
+        private SceneTreeDragOverlay? _sceneTreeDragOverlay;
+        private SceneObject? _sceneTreeDragSourceObject;
+        private TextBox? _sceneTreeSearchTextBox;
+        private Button? _sceneTreeAddButton;
+        private Button? _sceneTreeDeleteButton;
+
+        private Point? _sceneTreeDragStartPoint;
+        private IPointer? _sceneTreeCapturedPointer;
+        private bool _isSceneTreeDragging;
         private TextBox? _activeInspectorTextBox;
         private string? _currentPreviewCameraId;
         private string? _previewCameraEditorId;
@@ -225,6 +236,52 @@ namespace LimitlessSquareEngine.Editor
                 Path = path;
                 IsDirectory = isDirectory;
             }
+        }
+
+        private sealed class SceneTreeDragOverlay : Control
+        {
+            private Rect? _highlightRect;
+
+            public SceneTreeDragOverlay()
+            {
+                IsHitTestVisible = false;
+            }
+
+            public void ShowHighlight(Rect rect)
+            {
+                _highlightRect = rect;
+                InvalidateVisual();
+            }
+
+            public void HideHighlight()
+            {
+                if (_highlightRect == null)
+                    return;
+
+                _highlightRect = null;
+                InvalidateVisual();
+            }
+
+            public override void Render(DrawingContext context)
+            {
+                base.Render(context);
+
+                if (_highlightRect == null)
+                    return;
+
+                SolidColorBrush fillBrush = new SolidColorBrush(Color.FromArgb(72, 255, 255, 255));
+                SolidColorBrush borderBrush = new SolidColorBrush(Color.FromArgb(144, 255, 255, 255));
+                Rect rect = _highlightRect.Value;
+
+                context.DrawRectangle(fillBrush, new Pen(borderBrush, 1), rect, 3, 3);
+            }
+        }
+
+        private enum SceneTreeDropPlacement
+        {
+            Before,
+            Child,
+            After
         }
 
         private enum ClipboardCommand
@@ -3925,7 +3982,7 @@ namespace LimitlessSquareEngine.Editor
                 _currentTreeCopyPath = openResult.TreeCopyPath;
                 _currentPreviewScenePath = openResult.PreviewScenePath;
                 _currentTreeScene = openResult.TreeScene;
-                _selectedSceneObject = null;
+                ClearSelectedSceneObjectState();
                 _sceneUndoStack.Clear();
                 _sceneRedoStack.Clear();
                 _isApplyingSceneHistory = false;
@@ -4187,10 +4244,10 @@ namespace LimitlessSquareEngine.Editor
 
         private bool TrySelectSceneObjectInTree(SceneObject target)
         {
-            if (LeftDockSlot.Content is not TreeView treeView)
+            if (_sceneTreeView == null)
                 return false;
 
-            if (treeView.ItemsSource is not System.Collections.IEnumerable items)
+            if (_sceneTreeView.ItemsSource is not System.Collections.IEnumerable items)
                 return false;
 
             ClearSceneTreeSelection(items);
@@ -4209,6 +4266,14 @@ namespace LimitlessSquareEngine.Editor
                 if (item.ItemsSource is System.Collections.IEnumerable childItems)
                     ClearSceneTreeSelection(childItems);
             }
+        }
+
+        private void ClearSelectedSceneObjectState()
+        {
+            _selectedSceneObject = null;
+
+            if (_sceneTreeDeleteButton != null)
+                _sceneTreeDeleteButton.IsEnabled = false;
         }
 
         private bool TrySelectSceneObjectInTree(System.Collections.IEnumerable items, SceneObject target)
@@ -4479,7 +4544,7 @@ namespace LimitlessSquareEngine.Editor
                 RefreshCurrentPreviewCameraId();
                 SaveSceneData(_currentPreviewScenePath, _currentPreviewScene);
 
-                _selectedSceneObject = null;
+                ClearSelectedSceneObjectState();
                 LeftDockSlot.Content = BuildSceneTreeControl(_currentTreeScene);
                 RightDockSlot.Content = CreatePlaceholder("未选中文件或节点");
 
@@ -4531,10 +4596,140 @@ namespace LimitlessSquareEngine.Editor
                 ItemsSource = roots.Select(root => CreateSceneTreeItem(root, childrenMap)).Cast<object>().ToList()
             };
 
+            SceneTreeDragOverlay overlay = new SceneTreeDragOverlay();
+
+            Grid treeContainer = new Grid();
+            treeContainer.Children.Add(treeView);
+            treeContainer.Children.Add(overlay);
+
+            _sceneTreeView = treeView;
+            _sceneTreeDragOverlay = overlay;
+
             treeView.Classes.Add("scene-tree");
             treeView.SelectionChanged += OnSceneTreeSelectionChanged;
+            treeView.AddHandler(InputElement.PointerPressedEvent, OnSceneTreePointerPressed, RoutingStrategies.Tunnel, true);
+            treeView.AddHandler(InputElement.PointerMovedEvent, OnSceneTreePointerMoved, RoutingStrategies.Tunnel, true);
+            treeView.AddHandler(InputElement.PointerReleasedEvent, OnSceneTreePointerReleased, RoutingStrategies.Tunnel, true);
+            treeView.AddHandler(InputElement.PointerCaptureLostEvent, OnSceneTreePointerCaptureLost, RoutingStrategies.Tunnel, true);
 
-            return treeView;
+            TextBox searchBox = new TextBox
+            {
+                Watermark = "搜索节点",
+                Height = 28,
+                MinHeight = 28,
+                Padding = new Thickness(8, 1, 8, 1),
+                Background = new SolidColorBrush(Color.Parse("#1A1A1A")),
+                BorderBrush = new SolidColorBrush(Color.Parse("#555555")),
+                Foreground = Brushes.White,
+                HorizontalAlignment = HorizontalAlignment.Stretch,
+                VerticalContentAlignment = VerticalAlignment.Center
+            };
+
+            Button addButton = new Button
+            {
+                Content = new Border
+                {
+                    HorizontalAlignment = HorizontalAlignment.Stretch,
+                    VerticalAlignment = VerticalAlignment.Stretch,
+                    Child = new TextBlock
+                    {
+                        Text = "+",
+                        FontSize = 20,
+                        FontWeight = FontWeight.Bold,
+                        HorizontalAlignment = HorizontalAlignment.Center,
+                        VerticalAlignment = VerticalAlignment.Center,
+                        TextAlignment = TextAlignment.Center,
+                        Margin = new Thickness(0, -4, 0, 0)
+                    }
+                },
+                Width = 28,
+                Height = 28,
+                MinWidth = 28,
+                MinHeight = 28,
+                Padding = new Thickness(0),
+                HorizontalContentAlignment = HorizontalAlignment.Center,
+                VerticalContentAlignment = VerticalAlignment.Center,
+                Background = new SolidColorBrush(Color.Parse("#2A2A2A")),
+                BorderBrush = new SolidColorBrush(Color.Parse("#555555")),
+                BorderThickness = new Thickness(1),
+                CornerRadius = new CornerRadius(3)
+            };
+
+            Button deleteButton = new Button
+            {
+                Content = new Border
+                {
+                    HorizontalAlignment = HorizontalAlignment.Stretch,
+                    VerticalAlignment = VerticalAlignment.Stretch,
+                    Child = new TextBlock
+                    {
+                        Text = "×",
+                        FontSize = 20,
+                        FontWeight = FontWeight.Bold,
+                        HorizontalAlignment = HorizontalAlignment.Center,
+                        VerticalAlignment = VerticalAlignment.Center,
+                        TextAlignment = TextAlignment.Center,
+                        Margin = new Thickness(0, -4, 0, 0)
+                    }
+                },
+                Width = 28,
+                Height = 28,
+                MinWidth = 28,
+                MinHeight = 28,
+                Padding = new Thickness(0),
+                HorizontalContentAlignment = HorizontalAlignment.Center,
+                VerticalContentAlignment = VerticalAlignment.Center,
+                Background = new SolidColorBrush(Color.Parse("#2A2A2A")),
+                BorderBrush = new SolidColorBrush(Color.Parse("#555555")),
+                BorderThickness = new Thickness(1),
+                CornerRadius = new CornerRadius(3),
+                IsEnabled = _selectedSceneObject != null
+            };
+
+            _sceneTreeSearchTextBox = searchBox;
+            _sceneTreeAddButton = addButton;
+            _sceneTreeDeleteButton = deleteButton;
+
+            searchBox.KeyDown += OnSceneTreeSearchBoxKeyDown;
+            addButton.Click += OnSceneTreeAddButtonClick;
+            deleteButton.Click += OnSceneTreeDeleteButtonClick;
+
+            Grid bottomBar = new Grid
+            {
+                ColumnDefinitions = new ColumnDefinitions("*,6,Auto,6,Auto"),
+                Margin = new Thickness(8),
+                VerticalAlignment = VerticalAlignment.Center
+            };
+
+            Grid.SetColumn(searchBox, 0);
+            Grid.SetColumn(addButton, 2);
+            Grid.SetColumn(deleteButton, 4);
+
+            bottomBar.Children.Add(searchBox);
+            bottomBar.Children.Add(addButton);
+            bottomBar.Children.Add(deleteButton);
+
+            Border bottomBarHost = new Border
+            {
+                Height = 44,
+                MinHeight = 44,
+                Background = new SolidColorBrush(Color.Parse("#181818")),
+                BorderBrush = new SolidColorBrush(Color.Parse("#333333")),
+                BorderThickness = new Thickness(0, 1, 0, 0),
+                Child = bottomBar
+            };
+
+            Grid root = new Grid();
+            root.RowDefinitions.Add(new RowDefinition(1, GridUnitType.Star));
+            root.RowDefinitions.Add(new RowDefinition(44, GridUnitType.Pixel));
+
+            Grid.SetRow(treeContainer, 0);
+            Grid.SetRow(bottomBarHost, 1);
+
+            root.Children.Add(treeContainer);
+            root.Children.Add(bottomBarHost);
+
+            return root;
         }
 
         private TreeViewItem CreateSceneTreeItem(
@@ -4561,6 +4756,683 @@ namespace LimitlessSquareEngine.Editor
             return item;
         }
 
+        private void OnSceneTreeSearchBoxKeyDown(object? sender, KeyEventArgs e)
+        {
+            if (e.Key != Key.Enter)
+                return;
+
+            ExecuteSceneTreeSearch();
+            e.Handled = true;
+        }
+
+        private void ExecuteSceneTreeSearch()
+        {
+            if (_currentTreeScene == null || _sceneTreeSearchTextBox == null)
+                return;
+
+            string raw = (_sceneTreeSearchTextBox.Text ?? string.Empty).Trim();
+            if (string.IsNullOrWhiteSpace(raw))
+                return;
+
+            SceneObject? matched;
+
+            if (raw.Length >= 2 && raw[0] == '[' && raw[^1] == ']')
+            {
+                string id = raw.Substring(1, raw.Length - 2).Trim();
+                if (string.IsNullOrWhiteSpace(id))
+                    return;
+
+                matched = _currentTreeScene.Objects.FirstOrDefault(
+                    o => string.Equals(o.Id, id, StringComparison.Ordinal));
+            }
+            else
+            {
+                matched = _currentTreeScene.Objects.FirstOrDefault(
+                    o => string.Equals(o.Name ?? string.Empty, raw, StringComparison.Ordinal));
+            }
+
+            if (matched == null)
+                return;
+
+            _selectedSceneObject = matched;
+            TrySelectSceneObjectInTree(matched);
+            ShowSceneObjectInspector(matched);
+
+            if (_sceneTreeDeleteButton != null)
+                _sceneTreeDeleteButton.IsEnabled = true;
+        }
+
+        private void OnSceneTreeAddButtonClick(object? sender, RoutedEventArgs e)
+        {
+            AddSceneTreeObject();
+        }
+
+        private void AddSceneTreeObject()
+        {
+            if (_currentTreeScene == null)
+                return;
+
+            SceneObject newObject = CreateNewSceneTreeObject();
+
+            BeginSceneParameterChange();
+
+            if (_selectedSceneObject == null)
+            {
+                newObject.Transform.ParentId = null;
+                _currentTreeScene.Objects.Add(newObject);
+            }
+            else
+            {
+                string? parentId = _selectedSceneObject.Transform?.ParentId;
+                newObject.Transform.ParentId = string.IsNullOrWhiteSpace(parentId) ? null : parentId;
+
+                int selectedIndex = _currentTreeScene.Objects.IndexOf(_selectedSceneObject);
+                int insertIndex = selectedIndex < 0
+                    ? _currentTreeScene.Objects.Count
+                    : selectedIndex + GetSceneSubtreeSpan(_selectedSceneObject);
+
+                if (insertIndex < 0)
+                    insertIndex = 0;
+
+                if (insertIndex > _currentTreeScene.Objects.Count)
+                    insertIndex = _currentTreeScene.Objects.Count;
+
+                _currentTreeScene.Objects.Insert(insertIndex, newObject);
+            }
+
+            PersistSceneObjectChanges(newObject, true);
+        }
+
+        private SceneObject CreateNewSceneTreeObject()
+        {
+            return new SceneObject
+            {
+                Id = GenerateNewSceneTreeObjectId(),
+                Name = "New Object",
+                Tags = new List<string>(),
+                Active = true,
+                Transform = new SceneTransform
+                {
+                    ParentId = null,
+                    LocalPosition = Double3.Zero,
+                    LocalRotation = Double3.Zero,
+                    LocalScale = Double3.One
+                },
+                Type = "Object",
+                Controller = null,
+                Data = "",
+                Mesh = null,
+                Visible = true,
+                RenderTag = "MainCamera",
+                Physics = null,
+                Materials = null
+            };
+        }
+
+        private string GenerateNewSceneTreeObjectId()
+        {
+            if (_currentTreeScene == null)
+                return "object_0";
+
+            int index = 0;
+
+            while (true)
+            {
+                string id = "object_" + index.ToString(CultureInfo.InvariantCulture);
+
+                bool exists = _currentTreeScene.Objects.Any(
+                    o => string.Equals(o.Id, id, StringComparison.Ordinal));
+
+                if (!exists)
+                    return id;
+
+                index++;
+            }
+        }
+
+        private async void OnSceneTreeDeleteButtonClick(object? sender, RoutedEventArgs e)
+        {
+            await DeleteSelectedSceneTreeObjectAsync();
+        }
+
+        private async Task DeleteSelectedSceneTreeObjectAsync()
+        {
+            if (_currentTreeScene == null || _selectedSceneObject == null)
+                return;
+
+            SceneObject target = _selectedSceneObject;
+
+            Window dialog = new Window
+            {
+                Title = "删除警告",
+                Width = 360,
+                Height = 120,
+                CanResize = false,
+                WindowStartupLocation = WindowStartupLocation.CenterOwner,
+                SystemDecorations = SystemDecorations.Full,
+                Background = new SolidColorBrush(Color.Parse("#111111"))
+            };
+
+            TextBlock nameLine = new TextBlock
+            {
+                Text = $"{target.Name}[id: {target.Id}]",
+                Foreground = Brushes.White,
+                FontWeight = FontWeight.Bold,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                TextAlignment = TextAlignment.Center,
+                Margin = new Thickness(0, 0, 0, 6),
+                TextWrapping = TextWrapping.Wrap
+            };
+
+            TextBlock questionLine = new TextBlock
+            {
+                Text = "是否确认删除？",
+                Foreground = Brushes.White,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                TextAlignment = TextAlignment.Center,
+                Margin = new Thickness(0, 0, 0, 18),
+                TextWrapping = TextWrapping.Wrap
+            };
+
+            Button confirmButton = new Button
+            {
+                Content = "确定",
+                Width = 88,
+                Height = 32,
+                MinWidth = 88,
+                MinHeight = 32,
+                Padding = new Thickness(0, 0, 0, 1),
+                HorizontalContentAlignment = HorizontalAlignment.Center,
+                VerticalContentAlignment = VerticalAlignment.Center
+            };
+
+            Button cancelButton = new Button
+            {
+                Content = "取消",
+                Width = 88,
+                Height = 32,
+                MinWidth = 88,
+                MinHeight = 32,
+                Padding = new Thickness(0, 0, 0, 1),
+                HorizontalContentAlignment = HorizontalAlignment.Center,
+                VerticalContentAlignment = VerticalAlignment.Center
+            };
+
+            confirmButton.Click += (_, _) => dialog.Close(true);
+            cancelButton.Click += (_, _) => dialog.Close(false);
+
+            StackPanel root = new StackPanel
+            {
+                Margin = new Thickness(16),
+                Spacing = 0,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+
+            Grid buttons = new Grid
+            {
+                ColumnDefinitions = new ColumnDefinitions("Auto,16,Auto"),
+                HorizontalAlignment = HorizontalAlignment.Center
+            };
+
+            Grid.SetColumn(confirmButton, 0);
+            Grid.SetColumn(cancelButton, 2);
+
+            buttons.Children.Add(confirmButton);
+            buttons.Children.Add(cancelButton);
+
+            root.Children.Add(nameLine);
+            root.Children.Add(questionLine);
+            root.Children.Add(buttons);
+
+            dialog.Content = root;
+
+            bool? confirmed = await dialog.ShowDialog<bool?>(this);
+
+            if (confirmed != true)
+                return;
+
+            BeginSceneParameterChange();
+
+            string deletedId = target.Id;
+            List<SceneObject> toRemove = new List<SceneObject> { target };
+            Queue<string> queue = new Queue<string>();
+            queue.Enqueue(deletedId);
+
+            while (queue.Count > 0)
+            {
+                string currentId = queue.Dequeue();
+
+                List<SceneObject> children = _currentTreeScene.Objects
+                    .Where(o => string.Equals(o.Transform?.ParentId, currentId, StringComparison.Ordinal))
+                    .ToList();
+
+                foreach (SceneObject child in children)
+                {
+                    if (toRemove.Contains(child))
+                        continue;
+
+                    toRemove.Add(child);
+                    queue.Enqueue(child.Id);
+                }
+            }
+
+            foreach (SceneObject obj in toRemove)
+                _currentTreeScene.Objects.Remove(obj);
+
+            _selectedSceneObject = null;
+            RightDockSlot.Content = CreatePlaceholder("未选中文件或节点");
+
+            if (_sceneTreeDeleteButton != null)
+                _sceneTreeDeleteButton.IsEnabled = false;
+
+            PersistSceneObjectChanges(target, true);
+        }
+
+        private void OnSceneTreePointerPressed(object? sender, PointerPressedEventArgs e)
+        {
+            if (_sceneTreeView == null)
+                return;
+
+            PointerPoint point = e.GetCurrentPoint(_sceneTreeView);
+            if (point.Properties.PointerUpdateKind != PointerUpdateKind.LeftButtonPressed)
+                return;
+
+            if (IsSceneTreeExpanderSource(e.Source))
+            {
+                ClearSceneTreeDragState();
+                return;
+            }
+
+            TreeViewItem? item = FindSceneTreeItemFromSource(e.Source);
+
+            if (item == null)
+            {
+                ClearSceneTreeDragState();
+                return;
+            }
+
+            if (item.Tag is not SceneObject obj)
+            {
+                ClearSceneTreeDragState();
+                return;
+            }
+
+            _sceneTreeDragSourceObject = obj;
+            _sceneTreeDragStartPoint = e.GetPosition(_sceneTreeView);
+            _isSceneTreeDragging = false;
+        }
+
+        private TreeViewItem? FindSceneTreeItemFromSource(object? source)
+        {
+            Visual? visual = source as Visual;
+
+            while (visual != null)
+            {
+                if (visual is TreeViewItem item)
+                    return item;
+
+                visual = visual.GetVisualParent();
+            }
+
+            return null;
+        }
+
+        private void OnSceneTreePointerMoved(object? sender, PointerEventArgs e)
+        {
+            if (_sceneTreeView == null)
+                return;
+
+            if (_sceneTreeDragSourceObject == null || _sceneTreeDragStartPoint == null)
+                return;
+
+            PointerPoint point = e.GetCurrentPoint(_sceneTreeView);
+            if (!point.Properties.IsLeftButtonPressed)
+            {
+                ClearSceneTreeDragState();
+                return;
+            }
+
+            Point current = e.GetPosition(_sceneTreeView);
+            Vector delta = current - _sceneTreeDragStartPoint.Value;
+
+            if (!_isSceneTreeDragging)
+            {
+                if (Math.Abs(delta.X) < 4 && Math.Abs(delta.Y) < 4)
+                    return;
+
+                _isSceneTreeDragging = true;
+                _sceneTreeCapturedPointer = e.Pointer;
+                _sceneTreeCapturedPointer.Capture(_sceneTreeView);
+            }
+
+            UpdateSceneTreeDragHighlight(current);
+        }
+
+        private void OnSceneTreePointerReleased(object? sender, PointerReleasedEventArgs e)
+        {
+            if (_sceneTreeView == null)
+                return;
+
+            if (_sceneTreeDragSourceObject == null)
+            {
+                ClearSceneTreeDragState();
+                return;
+            }
+
+            PointerPoint point = e.GetCurrentPoint(_sceneTreeView);
+            if (point.Properties.PointerUpdateKind != PointerUpdateKind.LeftButtonReleased)
+            {
+                ClearSceneTreeDragState();
+                return;
+            }
+
+            if (!_isSceneTreeDragging)
+            {
+                ClearSceneTreeDragState();
+                return;
+            }
+
+            Point position = e.GetPosition(_sceneTreeView);
+
+            TreeViewItem? targetItem = FindSceneTreeItemFromSource(e.Source);
+
+            if (targetItem == null && !TryGetSceneTreeItemAtPoint(_sceneTreeView, position, out targetItem))
+            {
+                ClearSceneTreeDragState();
+                e.Handled = true;
+                return;
+            }
+
+            if (targetItem.Tag is not SceneObject targetObject)
+            {
+                ClearSceneTreeDragState();
+                e.Handled = true;
+                return;
+            }
+
+            Point? origin = targetItem.TranslatePoint(new Point(0, 0), _sceneTreeView);
+            if (origin == null)
+            {
+                ClearSceneTreeDragState();
+                e.Handled = true;
+                return;
+            }
+
+            Point pointInItem = new Point(
+                position.X - origin.Value.X,
+                position.Y - origin.Value.Y);
+
+            SceneTreeDropPlacement placement = ResolveSceneTreeDropPlacement(targetItem, pointInItem);
+            TryMoveSceneTreeObject(_sceneTreeDragSourceObject, targetObject, placement);
+
+            ClearSceneTreeDragState();
+            e.Handled = true;
+        }
+
+        private void OnSceneTreePointerCaptureLost(object? sender, PointerCaptureLostEventArgs e)
+        {
+            ClearSceneTreeDragState();
+        }
+
+        private void ClearSceneTreeDragState()
+        {
+            if (_sceneTreeCapturedPointer != null)
+            {
+                _sceneTreeCapturedPointer.Capture(null);
+                _sceneTreeCapturedPointer = null;
+            }
+
+            _sceneTreeDragOverlay?.HideHighlight();
+            _sceneTreeDragSourceObject = null;
+            _sceneTreeDragStartPoint = null;
+            _isSceneTreeDragging = false;
+        }
+
+        private bool IsSceneTreeExpanderSource(object? source)
+        {
+            Visual? visual = source as Visual;
+
+            while (visual != null)
+            {
+                if (visual is ToggleButton)
+                    return true;
+
+                visual = visual.GetVisualParent();
+            }
+
+            return false;
+        }
+
+        private void UpdateSceneTreeDragHighlight(Point point)
+        {
+            if (_sceneTreeView == null || _sceneTreeDragOverlay == null)
+                return;
+
+            if (!TryGetSceneTreeItemAtPoint(_sceneTreeView, point, out TreeViewItem item))
+            {
+                _sceneTreeDragOverlay.HideHighlight();
+                return;
+            }
+
+            Point? origin = item.TranslatePoint(new Point(0, 0), _sceneTreeView);
+            if (origin == null)
+            {
+                _sceneTreeDragOverlay.HideHighlight();
+                return;
+            }
+
+            Rect itemRect = new Rect(origin.Value, item.Bounds.Size);
+            Point pointInItem = new Point(
+                point.X - origin.Value.X,
+                point.Y - origin.Value.Y);
+
+            SceneTreeDropPlacement placement = ResolveSceneTreeDropPlacement(item, pointInItem);
+            Rect highlightRect = GetSceneTreeHighlightRect(itemRect, placement);
+
+            _sceneTreeDragOverlay.ShowHighlight(highlightRect);
+        }
+
+        private Rect GetSceneTreeHighlightRect(Rect itemRect, SceneTreeDropPlacement placement)
+        {
+            if (placement == SceneTreeDropPlacement.Child)
+                return itemRect;
+
+            double thickness = Math.Min(6.0, Math.Max(4.0, itemRect.Height * 0.25));
+
+            if (placement == SceneTreeDropPlacement.Before)
+                return new Rect(itemRect.X, itemRect.Y, itemRect.Width, thickness);
+
+            return new Rect(itemRect.X, itemRect.Bottom - thickness, itemRect.Width, thickness);
+        }
+
+        private bool TryGetSceneTreeItemRect(TreeViewItem item, out Rect rect)
+        {
+            rect = default;
+
+            if (_sceneTreeView == null)
+                return false;
+
+            Point? origin = item.TranslatePoint(new Point(0, 0), _sceneTreeView);
+            if (origin == null)
+                return false;
+
+            rect = new Rect(origin.Value, item.Bounds.Size);
+            return true;
+        }
+
+        private bool TryGetSceneTreeItemAtPoint(TreeView treeView, Point point, out TreeViewItem item)
+        {
+            if (treeView.ItemsSource is System.Collections.IEnumerable items &&
+                TryGetSceneTreeItemAtPoint(treeView, items, point, out item))
+                return true;
+
+            item = null!;
+            return false;
+        }
+
+        private bool TryGetSceneTreeItemAtPoint(TreeView treeView, System.Collections.IEnumerable items, Point point, out TreeViewItem item)
+        {
+            foreach (object? itemObject in items)
+            {
+                if (itemObject is not TreeViewItem treeViewItem)
+                    continue;
+
+                if (treeViewItem.IsExpanded &&
+                    treeViewItem.ItemsSource is System.Collections.IEnumerable childItems &&
+                    TryGetSceneTreeItemAtPoint(treeView, childItems, point, out item))
+                    return true;
+
+                if (TryGetSceneTreeItemRect(treeViewItem, out Rect rect) && rect.Contains(point))
+                {
+                    item = treeViewItem;
+                    return true;
+                }
+            }
+
+            item = null!;
+            return false;
+        }
+
+        private SceneTreeDropPlacement ResolveSceneTreeDropPlacement(TreeViewItem item, Point pointInItem)
+        {
+            double height = Math.Max(item.Bounds.Height, InspectorTextBoxHeight);
+            double gapHeight = Math.Min(6.0, height * 0.25);
+            double y = pointInItem.Y;
+
+            if (y <= gapHeight)
+                return SceneTreeDropPlacement.Before;
+
+            if (y >= height - gapHeight)
+                return SceneTreeDropPlacement.After;
+
+            return SceneTreeDropPlacement.Child;
+        }
+
+        private bool TryMoveSceneTreeObject(SceneObject source, SceneObject target, SceneTreeDropPlacement placement)
+        {
+            if (_currentTreeScene == null)
+                return false;
+
+            if (ReferenceEquals(source, target))
+                return false;
+
+            source.Transform ??= CloneTransform(null);
+
+            int sourceIndex = _currentTreeScene.Objects.IndexOf(source);
+            int targetIndex = _currentTreeScene.Objects.IndexOf(target);
+
+            if (sourceIndex < 0 || targetIndex < 0)
+                return false;
+
+            BeginSceneParameterChange();
+
+            if (placement == SceneTreeDropPlacement.Child)
+            {
+                if (string.IsNullOrWhiteSpace(target.Id))
+                    return false;
+
+                if (WouldCreateParentCycle(source, target.Id))
+                    return false;
+
+                _currentTreeScene.Objects.RemoveAt(sourceIndex);
+
+                if (sourceIndex < targetIndex)
+                    targetIndex--;
+
+                source.Transform.ParentId = target.Id;
+
+                int insertIndex = targetIndex + GetSceneSubtreeSpan(target);
+
+                if (insertIndex < 0)
+                    insertIndex = 0;
+
+                if (insertIndex > _currentTreeScene.Objects.Count)
+                    insertIndex = _currentTreeScene.Objects.Count;
+
+                _currentTreeScene.Objects.Insert(insertIndex, source);
+
+                return PersistSceneObjectChanges(source, true);
+            }
+
+            string? newParentId = target.Transform?.ParentId;
+
+            if (!string.IsNullOrWhiteSpace(newParentId))
+            {
+                SceneObject? parent = _currentTreeScene.Objects.FirstOrDefault(
+                    o => string.Equals(o.Id, newParentId, StringComparison.Ordinal));
+
+                if (parent == null)
+                    newParentId = null;
+            }
+
+            if (!string.IsNullOrWhiteSpace(newParentId) && WouldCreateParentCycle(source, newParentId))
+                return false;
+
+            int targetSpan = GetSceneSubtreeSpan(target);
+
+            _currentTreeScene.Objects.RemoveAt(sourceIndex);
+
+            if (sourceIndex < targetIndex)
+                targetIndex--;
+
+            source.Transform.ParentId = newParentId;
+
+            int siblingInsertIndex = placement == SceneTreeDropPlacement.Before
+                ? targetIndex
+                : targetIndex + targetSpan;
+
+            if (siblingInsertIndex < 0)
+                siblingInsertIndex = 0;
+
+            if (siblingInsertIndex > _currentTreeScene.Objects.Count)
+                siblingInsertIndex = _currentTreeScene.Objects.Count;
+
+            _currentTreeScene.Objects.Insert(siblingInsertIndex, source);
+
+            return PersistSceneObjectChanges(source, true);
+        }
+
+        private int GetSceneSubtreeSpan(SceneObject root)
+        {
+            if (_currentTreeScene == null)
+                return 0;
+
+            int rootIndex = _currentTreeScene.Objects.IndexOf(root);
+            if (rootIndex < 0)
+                return 0;
+
+            string rootId = root.Id;
+            int span = 1;
+
+            for (int i = rootIndex + 1; i < _currentTreeScene.Objects.Count; i++)
+            {
+                SceneObject current = _currentTreeScene.Objects[i];
+                string? parentId = current.Transform?.ParentId;
+                bool isDescendant = false;
+
+                while (!string.IsNullOrWhiteSpace(parentId))
+                {
+                    if (string.Equals(parentId, rootId, StringComparison.Ordinal))
+                    {
+                        isDescendant = true;
+                        break;
+                    }
+
+                    SceneObject? parent = _currentTreeScene.Objects.FirstOrDefault(
+                        o => string.Equals(o.Id, parentId, StringComparison.Ordinal));
+
+                    parentId = parent?.Transform?.ParentId;
+                }
+
+                if (!isDescendant)
+                    break;
+
+                span++;
+            }
+
+            return span;
+        }
+
         private void OnSceneTreeSelectionChanged(object? sender, SelectionChangedEventArgs e)
         {
             if (_isProgrammaticSceneTreeSelection)
@@ -4579,6 +5451,9 @@ namespace LimitlessSquareEngine.Editor
 
                 _selectedSceneObject = obj;
                 ShowSceneObjectInspector(obj);
+
+                if (_sceneTreeDeleteButton != null)
+                    _sceneTreeDeleteButton.IsEnabled = true;
             }
             catch (Exception ex)
             {
