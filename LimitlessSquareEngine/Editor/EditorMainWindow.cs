@@ -142,6 +142,21 @@ namespace LimitlessSquareEngine.Editor
             public SceneData PreviewScene { get; init; } = new SceneData();
         }
 
+        private sealed class CreateProjectDialogResult
+        {
+            public bool Confirmed { get; init; }
+            public string ProjectName { get; init; } = "";
+            public string RootDirectoryPath { get; init; } = "";
+            public string TemplateName { get; init; } = "基础模板";
+            public bool CreatedSuccessfully { get; init; }
+        }
+
+        private sealed class CreateProjectValidationResult
+        {
+            public bool IsValid { get; init; }
+            public string Message { get; init; } = "";
+        }
+
         public EditorMainWindow()
         {
             Title = "Limitless Square Editor";
@@ -3222,6 +3237,7 @@ namespace LimitlessSquareEngine.Editor
             _saveSceneMenuItem = new MenuItem { Header = "保存", IsEnabled = false };
             MenuItem exitItem = new MenuItem { Header = "退出" };
 
+            newItem.Click += async (_, _) => await ShowCreateProjectDialogAsync();
             openItem.Click += async (_, _) => await OpenProjectFolderAsync();
             _saveSceneMenuItem.Click += (_, _) => TrySaveCurrentSceneToOriginalFile();
             exitItem.Click += (_, _) => Close();
@@ -3291,6 +3307,499 @@ namespace LimitlessSquareEngine.Editor
                 new MenuItem { Header = "关于Limitless Square" },
                 new MenuItem { Header = "GitHub" }
             };
+        }
+
+        private async Task ShowCreateProjectDialogAsync()
+        {
+            await ShowCreateProjectDialogCoreAsync();
+        }
+
+        private async Task<CreateProjectDialogResult?> ShowCreateProjectDialogCoreAsync()
+        {
+            string defaultRootDirectoryPath = Path.GetFullPath(
+                Path.Combine(AppContext.BaseDirectory, "."));
+
+            bool allowClose = false;
+            bool isBusy = false;
+
+            Window dialog = new Window
+            {
+                Title = "新建工程",
+                Width = 520,
+                Height = 300,
+                CanResize = false,
+                CanMinimize = false,
+                WindowStartupLocation = WindowStartupLocation.CenterOwner,
+                SystemDecorations = SystemDecorations.Full,
+                ShowInTaskbar = false,
+                Background = new SolidColorBrush(Color.Parse("#111111"))
+            };
+
+            TextBlock projectNameLabel = new TextBlock
+            {
+                Text = "工程名称",
+                Foreground = Brushes.White,
+                HorizontalAlignment = HorizontalAlignment.Left,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+
+            TextBox projectNameTextBox = new TextBox
+            {
+                Text = "",
+                HorizontalAlignment = HorizontalAlignment.Stretch,
+                VerticalAlignment = VerticalAlignment.Center,
+                TextAlignment = TextAlignment.Left,
+                VerticalContentAlignment = VerticalAlignment.Center,
+                Background = new SolidColorBrush(Color.Parse("#1A1A1A")),
+                BorderBrush = new SolidColorBrush(Color.Parse("#555555")),
+                Foreground = Brushes.White,
+                Height = 30,
+                MinHeight = 30,
+                Padding = new Thickness(8, 1, 8, 1)
+            };
+
+            TextBlock rootDirectoryLabel = new TextBlock
+            {
+                Text = "根目录所在文件夹",
+                Foreground = Brushes.White,
+                HorizontalAlignment = HorizontalAlignment.Left,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+
+            TextBox rootDirectoryTextBox = new TextBox
+            {
+                Text = defaultRootDirectoryPath,
+                HorizontalAlignment = HorizontalAlignment.Stretch,
+                VerticalAlignment = VerticalAlignment.Center,
+                TextAlignment = TextAlignment.Left,
+                VerticalContentAlignment = VerticalAlignment.Center,
+                Background = new SolidColorBrush(Color.Parse("#1A1A1A")),
+                BorderBrush = new SolidColorBrush(Color.Parse("#555555")),
+                Foreground = Brushes.White,
+                Height = 30,
+                MinHeight = 30,
+                Padding = new Thickness(8, 1, 8, 1)
+            };
+
+            Button selectFolderButton = new Button
+            {
+                Content = "选择文件夹",
+                Width = 110,
+                Height = 30,
+                MinWidth = 110,
+                MinHeight = 30,
+                Padding = new Thickness(0),
+                HorizontalAlignment = HorizontalAlignment.Right,
+                VerticalAlignment = VerticalAlignment.Center,
+                HorizontalContentAlignment = HorizontalAlignment.Center,
+                VerticalContentAlignment = VerticalAlignment.Center
+            };
+
+            TextBlock templateLabel = new TextBlock
+            {
+                Text = "工程模板",
+                Foreground = Brushes.White,
+                HorizontalAlignment = HorizontalAlignment.Left,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+
+            ComboBox templateComboBox = new ComboBox
+            {
+                ItemsSource = new object[]
+                {
+                    "空白",
+                    "基础模板"
+                },
+                SelectedIndex = 1,
+                HorizontalAlignment = HorizontalAlignment.Stretch,
+                VerticalAlignment = VerticalAlignment.Center,
+                Height = 30,
+                MinHeight = 30
+            };
+
+            TextBlock templateDescriptionTextBlock = new TextBlock
+            {
+                Text = "创建一个包含基础资源和最简单功能实现的工程",
+                Foreground = new SolidColorBrush(Color.Parse("#CCCCCC")),
+                TextWrapping = TextWrapping.Wrap,
+                HorizontalAlignment = HorizontalAlignment.Stretch,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+
+            Button cancelButton = new Button
+            {
+                Content = "取消",
+                Width = 88,
+                Height = 30,
+                MinWidth = 88,
+                MinHeight = 30,
+                Padding = new Thickness(0),
+                HorizontalContentAlignment = HorizontalAlignment.Center,
+                VerticalContentAlignment = VerticalAlignment.Center
+            };
+
+            Button createButton = new Button
+            {
+                Content = "创建",
+                Width = 88,
+                Height = 30,
+                MinWidth = 88,
+                MinHeight = 30,
+                Padding = new Thickness(0),
+                HorizontalContentAlignment = HorizontalAlignment.Center,
+                VerticalContentAlignment = VerticalAlignment.Center
+            };
+
+            void UpdateBusyState(bool busy)
+            {
+                isBusy = busy;
+                projectNameTextBox.IsEnabled = !busy;
+                rootDirectoryTextBox.IsEnabled = !busy;
+                templateComboBox.IsEnabled = !busy;
+                selectFolderButton.IsEnabled = !busy;
+                cancelButton.IsEnabled = !busy;
+                createButton.IsEnabled = !busy;
+            }
+
+            templateComboBox.SelectionChanged += (_, _) =>
+            {
+                string selectedTemplate = templateComboBox.SelectedItem as string ?? "基础模板";
+
+                if (string.Equals(selectedTemplate, "空白", StringComparison.Ordinal))
+                    templateDescriptionTextBlock.Text = "创建完全空白的工程，除了必要文件夹什么都没有";
+                else
+                    templateDescriptionTextBlock.Text = "创建一个包含基础资源和最简单功能实现的工程";
+            };
+
+            selectFolderButton.Click += async (_, _) =>
+            {
+                if (isBusy)
+                    return;
+
+                if (!dialog.StorageProvider.CanPickFolder)
+                    return;
+
+                IReadOnlyList<IStorageFolder> folders = await dialog.StorageProvider.OpenFolderPickerAsync(
+                    new FolderPickerOpenOptions
+                    {
+                        Title = "选择根目录所在文件夹",
+                        AllowMultiple = false
+                    });
+
+                if (folders.Count == 0)
+                    return;
+
+                string? selectedPath = folders[0].TryGetLocalPath();
+                if (string.IsNullOrWhiteSpace(selectedPath))
+                    return;
+
+                rootDirectoryTextBox.Text = selectedPath;
+            };
+
+            cancelButton.Click += (_, _) =>
+            {
+                if (isBusy)
+                    return;
+
+                dialog.Close(new CreateProjectDialogResult
+                {
+                    Confirmed = false,
+                    CreatedSuccessfully = false
+                });
+            };
+
+            createButton.Click += async (_, _) =>
+            {
+                if (isBusy)
+                    return;
+
+                UpdateBusyState(true);
+
+                CreateProjectValidationResult validation = ValidateCreateProjectInput(
+                    projectNameTextBox.Text,
+                    rootDirectoryTextBox.Text);
+
+                if (!validation.IsValid)
+                {
+                    await ShowSimpleWarningDialogAsync("警告", validation.Message);
+                    UpdateBusyState(false);
+                    return;
+                }
+
+                try
+                {
+                    string rootDirectoryPath = Path.GetFullPath(rootDirectoryTextBox.Text ?? "");
+                    string projectName = (projectNameTextBox.Text ?? "").Trim();
+                    string templateName = templateComboBox.SelectedItem as string ?? "基础模板";
+                    string projectDirectoryPath = Path.Combine(rootDirectoryPath, projectName);
+                    string assetsDirectoryPath = Path.Combine(projectDirectoryPath, "Assets");
+
+                    if (Directory.Exists(projectDirectoryPath) || File.Exists(projectDirectoryPath))
+                    {
+                        await ShowSimpleWarningDialogAsync("警告", "同名工程已存在");
+                        UpdateBusyState(false);
+                        return;
+                    }
+
+                    Directory.CreateDirectory(projectDirectoryPath);
+                    Directory.CreateDirectory(assetsDirectoryPath);
+
+                    if (string.Equals(templateName, "基础模板", StringComparison.Ordinal))
+                    {
+                        Directory.CreateDirectory(Path.Combine(assetsDirectoryPath, "Materials"));
+                        Directory.CreateDirectory(Path.Combine(assetsDirectoryPath, "Scenes"));
+                        Directory.CreateDirectory(Path.Combine(assetsDirectoryPath, "Scripts"));
+                        Directory.CreateDirectory(Path.Combine(assetsDirectoryPath, "Shaders"));
+                        Directory.CreateDirectory(Path.Combine(assetsDirectoryPath, "Textures"));
+                        Directory.CreateDirectory(Path.Combine(assetsDirectoryPath, "Models"));
+                        Directory.CreateDirectory(Path.Combine(assetsDirectoryPath, "Canvas"));
+                    }
+
+                    TryOpenFolderWithSystem(projectDirectoryPath);
+                    ShowProjectFolderTree(projectDirectoryPath);
+
+                    allowClose = true;
+                    dialog.Close(new CreateProjectDialogResult
+                    {
+                        Confirmed = true,
+                        ProjectName = projectName,
+                        RootDirectoryPath = rootDirectoryPath,
+                        TemplateName = templateName,
+                        CreatedSuccessfully = true
+                    });
+                }
+                catch (Exception ex)
+                {
+                    await ShowSimpleWarningDialogAsync("警告", ex.Message);
+                    UpdateBusyState(false);
+                }
+            };
+
+            Grid rootDirectoryRow = new Grid
+            {
+                ColumnDefinitions = new ColumnDefinitions("*,8,Auto"),
+                HorizontalAlignment = HorizontalAlignment.Stretch
+            };
+
+            Grid.SetColumn(rootDirectoryTextBox, 0);
+            Grid.SetColumn(selectFolderButton, 2);
+
+            rootDirectoryRow.Children.Add(rootDirectoryTextBox);
+            rootDirectoryRow.Children.Add(selectFolderButton);
+
+            StackPanel buttonPanel = new StackPanel
+            {
+                Orientation = Orientation.Horizontal,
+                Spacing = 12,
+                HorizontalAlignment = HorizontalAlignment.Right,
+                Children =
+                {
+                    cancelButton,
+                    createButton
+                }
+            };
+
+            StackPanel contentPanel = new StackPanel
+            {
+                Margin = new Thickness(20),
+                Spacing = 10,
+                Children =
+                {
+                    projectNameLabel,
+                    projectNameTextBox,
+                    rootDirectoryLabel,
+                    rootDirectoryRow,
+                    templateLabel,
+                    templateComboBox,
+                    templateDescriptionTextBlock,
+                    buttonPanel
+                }
+            };
+
+            dialog.Content = contentPanel;
+
+            return await dialog.ShowDialog<CreateProjectDialogResult?>(this);
+        }
+
+        private CreateProjectValidationResult ValidateCreateProjectInput(
+            string? projectName,
+            string? rootDirectoryPath)
+        {
+            string normalizedProjectName = (projectName ?? string.Empty).Trim();
+            string normalizedRootDirectoryPath = (rootDirectoryPath ?? string.Empty).Trim();
+
+            if (string.IsNullOrWhiteSpace(normalizedProjectName))
+            {
+                return new CreateProjectValidationResult
+                {
+                    IsValid = false,
+                    Message = "工程名称不能为空"
+                };
+            }
+
+            char[] invalidNameChars = Path.GetInvalidFileNameChars();
+            if (normalizedProjectName.IndexOfAny(invalidNameChars) >= 0)
+            {
+                return new CreateProjectValidationResult
+                {
+                    IsValid = false,
+                    Message = "工程名称包含非法字符"
+                };
+            }
+
+            if (normalizedProjectName == "." || normalizedProjectName == "..")
+            {
+                return new CreateProjectValidationResult
+                {
+                    IsValid = false,
+                    Message = "工程名称不合法"
+                };
+            }
+
+            if (string.IsNullOrWhiteSpace(normalizedRootDirectoryPath))
+            {
+                return new CreateProjectValidationResult
+                {
+                    IsValid = false,
+                    Message = "根目录所在文件夹不能为空"
+                };
+            }
+
+            string fullRootDirectoryPath;
+            try
+            {
+                fullRootDirectoryPath = Path.GetFullPath(normalizedRootDirectoryPath);
+            }
+            catch
+            {
+                return new CreateProjectValidationResult
+                {
+                    IsValid = false,
+                    Message = "根目录所在文件夹路径不合法"
+                };
+            }
+
+            if (!Directory.Exists(fullRootDirectoryPath))
+            {
+                return new CreateProjectValidationResult
+                {
+                    IsValid = false,
+                    Message = "根目录所在文件夹不存在"
+                };
+            }
+
+            return new CreateProjectValidationResult
+            {
+                IsValid = true,
+                Message = ""
+            };
+        }
+
+        private async Task ShowSimpleWarningDialogAsync(string title, string message)
+        {
+            bool allowClose = false;
+
+            Window dialog = new Window
+            {
+                Title = title,
+                Width = 360,
+                Height = 120,
+                CanResize = false,
+                CanMinimize = false,
+                WindowStartupLocation = WindowStartupLocation.CenterOwner,
+                SystemDecorations = SystemDecorations.Full,
+                ShowInTaskbar = false,
+                Background = new SolidColorBrush(Color.Parse("#111111"))
+            };
+
+            TextBlock messageText = new TextBlock
+            {
+                Text = message,
+                Foreground = Brushes.White,
+                FontWeight = FontWeight.Bold,
+                TextWrapping = TextWrapping.Wrap,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center,
+                TextAlignment = TextAlignment.Center,
+                Margin = new Thickness(0, 0, 0, 18)
+            };
+
+            Button okButton = new Button
+            {
+                Content = "确定",
+                Width = 88,
+                Height = 32,
+                MinWidth = 88,
+                MinHeight = 32,
+                Padding = new Thickness(0),
+                HorizontalAlignment = HorizontalAlignment.Center,
+                HorizontalContentAlignment = HorizontalAlignment.Center,
+                VerticalContentAlignment = VerticalAlignment.Center
+            };
+
+            okButton.Click += (_, _) =>
+            {
+                dialog.Close();
+            };
+
+            Grid panel = new Grid
+            {
+                Margin = new Thickness(16),
+                RowDefinitions = new RowDefinitions("*,Auto")
+            };
+
+            Grid.SetRow(messageText, 0);
+            Grid.SetRow(okButton, 1);
+
+            panel.Children.Add(messageText);
+            panel.Children.Add(okButton);
+
+            dialog.Content = panel;
+
+            await dialog.ShowDialog(this);
+        }
+
+        private void TryOpenFolderWithSystem(string folderPath)
+        {
+            try
+            {
+                string fullPath = Path.GetFullPath(folderPath);
+
+                if (OperatingSystem.IsWindows())
+                {
+                    Process.Start(new ProcessStartInfo
+                    {
+                        FileName = "explorer.exe",
+                        Arguments = "\"" + fullPath + "\"",
+                        UseShellExecute = true
+                    });
+                    return;
+                }
+
+                if (OperatingSystem.IsMacOS())
+                {
+                    Process.Start(new ProcessStartInfo
+                    {
+                        FileName = "open",
+                        Arguments = "\"" + fullPath + "\"",
+                        UseShellExecute = false
+                    });
+                    return;
+                }
+
+                if (OperatingSystem.IsLinux())
+                {
+                    Process.Start(new ProcessStartInfo
+                    {
+                        FileName = "xdg-open",
+                        Arguments = "\"" + fullPath + "\"",
+                        UseShellExecute = false
+                    });
+                }
+            }
+            catch
+            {
+            }
         }
 
         private async Task OpenProjectFolderAsync()
@@ -4908,8 +5417,10 @@ namespace LimitlessSquareEngine.Editor
                 Width = 360,
                 Height = 120,
                 CanResize = false,
+                CanMinimize = false,
                 WindowStartupLocation = WindowStartupLocation.CenterOwner,
                 SystemDecorations = SystemDecorations.Full,
+                ShowInTaskbar = false,
                 Background = new SolidColorBrush(Color.Parse("#111111"))
             };
 
