@@ -40,6 +40,11 @@ namespace LimitlessSquareEngine.Editor
         public ContentControl BottomDockSlot { get; } = new ContentControl();
         public ContentControl ProjectFilesSlot { get; } = new ContentControl();
         private ResourceItemState? _selectedResourceItemState;
+        private Border? _resourceExplorerRootBorder;
+        private WrapPanel? _resourceExplorerPanel;
+        private DateTime _lastResourceNameClickUtc = DateTime.MinValue;
+        private string? _lastResourceNameClickPath;
+        private TextBox? _activeResourceRenameTextBox;
         private string? _projectRootPath;
         private string? _currentResourceDirectoryPath;
         private string? _projectAssetRootPath;
@@ -235,6 +240,7 @@ namespace LimitlessSquareEngine.Editor
             Content = BuildLayout();
 
             AddHandler(InputElement.KeyDownEvent, OnWindowClipboardKeyDown, RoutingStrategies.Tunnel, true);
+            AddHandler(InputElement.KeyDownEvent, OnWindowResourceExplorerKeyDown, RoutingStrategies.Tunnel, true);
         }
 
         private sealed class ResourceItemState
@@ -244,12 +250,16 @@ namespace LimitlessSquareEngine.Editor
             public bool IsDirectory { get; }
             public bool IsPointerOver { get; set; }
             public bool IsPressed { get; set; }
+            public TextBlock NameTextBlock { get; }
+            public TextBox NameTextBox { get; }
 
-            public ResourceItemState(Border item, string path, bool isDirectory)
+            public ResourceItemState(Border item, string path, bool isDirectory, TextBlock nameTextBlock, TextBox nameTextBox)
             {
                 Item = item;
                 Path = path;
                 IsDirectory = isDirectory;
+                NameTextBlock = nameTextBlock;
+                NameTextBox = nameTextBox;
             }
         }
 
@@ -1453,6 +1463,13 @@ namespace LimitlessSquareEngine.Editor
                 set => SetValue(KindProperty, value);
             }
 
+            private const double ResourceGlyphReferenceSize = 52.0;
+
+            private static double ScaleFromBoundsY(Rect bounds, double absoluteAt52)
+            {
+                return bounds.Height * (absoluteAt52 / ResourceGlyphReferenceSize);
+            }
+
             private static readonly IBrush WhiteBrush = Brushes.White;
             private static readonly IBrush LuaBrush = new SolidColorBrush(Color.Parse("#103A8A"));
             private static readonly IBrush JsonBrush = new SolidColorBrush(Color.Parse("#7A1F1F"));
@@ -1486,11 +1503,11 @@ namespace LimitlessSquareEngine.Editor
             private static readonly IBrush MountainLightBrush = new SolidColorBrush(Color.Parse("#6DBE57"));
             private static readonly IBrush MountainDarkBrush = new SolidColorBrush(Color.Parse("#4E9C3A"));
             private static readonly IBrush SunBrush = new SolidColorBrush(Color.Parse("#FFD54A"));
-            private static readonly IBrush AxisRedBrush = new SolidColorBrush(Color.Parse("#FF4A4A"));
-            private static readonly IBrush AxisGreenBrush = new SolidColorBrush(Color.Parse("#4CFF7A"));
-            private static readonly IBrush AxisBlueBrush = new SolidColorBrush(Color.Parse("#4D86FF"));
+            private static readonly IBrush AxisRedBrush = new SolidColorBrush(Color.Parse("#FF8888"));
+            private static readonly IBrush AxisGreenBrush = new SolidColorBrush(Color.Parse("#88FF88"));
+            private static readonly IBrush AxisBlueBrush = new SolidColorBrush(Color.Parse("#8888FF"));
             private static readonly IBrush ShadowBrush = new SolidColorBrush(Color.Parse("#888888"));
-            private static readonly IBrush ShadowGroundBrush = new SolidColorBrush(Color.Parse("#114411"));
+            private static readonly IBrush ShadowGroundBrush = new SolidColorBrush(Color.Parse("#113311"));
 
             private static readonly Pen OutlinePen = new Pen(WhiteBrush, 2);
 
@@ -1520,12 +1537,12 @@ namespace LimitlessSquareEngine.Editor
                     case ResourceIconKind.LuaFile:
                         DrawFileBase(context, bounds, LuaBrush, true);
                         DrawLuaBadge(context, bounds);
-                        DrawCenteredLabel(context, bounds, "Lua", 14, FontWeight.Bold);
+                        DrawCenteredLabel(context, bounds, "Lua", ScaleFromBoundsY(bounds, 14.0), FontWeight.Bold);
                         break;
 
                     case ResourceIconKind.JsonFile:
                         DrawFileBase(context, bounds, JsonBrush, true);
-                        DrawCenteredLabel(context, bounds, "Json", 14, FontWeight.Bold);
+                        DrawCenteredLabel(context, bounds, "Json", ScaleFromBoundsY(bounds, 14.0), FontWeight.Bold);
                         break;
 
                     case ResourceIconKind.SceneJsonFile:
@@ -1544,12 +1561,12 @@ namespace LimitlessSquareEngine.Editor
 
                     case ResourceIconKind.FragFile:
                         DrawFileBase(context, bounds, RainbowBrush, true);
-                        DrawCenteredLabel(context, bounds, "F", 18, FontWeight.Bold);
+                        DrawCenteredLabel(context, bounds, "F", ScaleFromBoundsY(bounds, 18.0), FontWeight.Bold);
                         break;
 
                     case ResourceIconKind.VertFile:
                         DrawFileBase(context, bounds, RainbowBrush, true);
-                        DrawCenteredLabel(context, bounds, "V", 18, FontWeight.Bold);
+                        DrawCenteredLabel(context, bounds, "V", ScaleFromBoundsY(bounds, 18.0), FontWeight.Bold);
                         break;
 
                     default:
@@ -1702,8 +1719,9 @@ namespace LimitlessSquareEngine.Editor
 
                 Rect rect = new Rect(x, y, size, size);
 
-                context.DrawRectangle(ImageBrush, null, new RoundedRect(rect, 4, 4));
-                context.DrawRectangle(null, OutlinePen, new RoundedRect(rect, 4, 4));
+                double cornerRadius = bounds.Width * (4.0 / 52.0);
+                context.DrawRectangle(ImageBrush, null, new RoundedRect(rect, cornerRadius, cornerRadius));
+                context.DrawRectangle(null, OutlinePen, new RoundedRect(rect, cornerRadius, cornerRadius));
 
                 StreamGeometry backMountain = new StreamGeometry();
                 using (StreamGeometryContext gc = backMountain.Open())
@@ -1740,18 +1758,22 @@ namespace LimitlessSquareEngine.Editor
 
                 Point center = new Point(x + width * 0.50, y + height * 0.58);
 
-                context.DrawLine(new Pen(AxisRedBrush, 2), center, new Point(center.X - size * 0.1559, center.Y + size * 0.09));
-                context.DrawLine(new Pen(AxisGreenBrush, 2), center, new Point(center.X, center.Y - size * 0.18));
-                context.DrawLine(new Pen(AxisBlueBrush, 2), center, new Point(center.X + size * 0.1559, center.Y + size * 0.09));
+                double axisThickness = bounds.Width * (2.0 / 52.0);
 
-                context.DrawEllipse(WhiteBrush, null, center, 4, 4);
+                context.DrawLine(new Pen(AxisRedBrush, axisThickness), center, new Point(center.X - size * 0.1559, center.Y + size * 0.09));
+                context.DrawLine(new Pen(AxisGreenBrush, axisThickness), center, new Point(center.X, center.Y - size * 0.18));
+                context.DrawLine(new Pen(AxisBlueBrush, axisThickness), center, new Point(center.X + size * 0.1559, center.Y + size * 0.09));
+
+                double centerRadius = bounds.Width * (4.0 / 52.0);
+                context.DrawEllipse(WhiteBrush, null, center, centerRadius, centerRadius);
             }
 
             private static void DrawMaterialSphere(DrawingContext context, Rect bounds)
             {
                 double radius = bounds.Width * 0.2;
 
-                Point center = new Point(bounds.Center.X, bounds.Center.Y + 1.0);
+                double centerYOffset = bounds.Height * (1.0 / 52.0);
+                Point center = new Point(bounds.Center.X, bounds.Center.Y + centerYOffset);
 
                 double shadowWidth = radius;
                 double shadowHeight = radius * 0.3;
@@ -1771,8 +1793,9 @@ namespace LimitlessSquareEngine.Editor
 
                 double d = radius / Math.Sqrt(2.0);
 
-                Point tipTopRight = new Point(center.X + d + 0.01, center.Y - d - 0.01);
-                Point tipBottomLeft = new Point(center.X - d - 0.01, center.Y + d + 0.01);
+                double epsilon = bounds.Width * (0.01 / 52.0);
+                Point tipTopRight = new Point(center.X + d + epsilon, center.Y - d - epsilon);
+                Point tipBottomLeft = new Point(center.X - d - epsilon, center.Y + d + epsilon);
 
                 StreamGeometry crescent = new StreamGeometry();
                 using (StreamGeometryContext gc = crescent.Open())
@@ -1814,9 +1837,11 @@ namespace LimitlessSquareEngine.Editor
                     fontSize,
                     Brushes.White);
 
+                double textYOffset = bounds.Height * (6.0 / 52.0);
+
                 Point point = new Point(
                     bounds.Center.X - formattedText.Width / 2,
-                    bounds.Center.Y - formattedText.Height / 2 + 6);
+                    bounds.Center.Y - formattedText.Height / 2 + textYOffset);
 
                 context.DrawText(formattedText, point);
             }
@@ -2644,6 +2669,24 @@ namespace LimitlessSquareEngine.Editor
                 Debug.WriteLine(ex.ToString());
                 Debug.WriteLine(ex.GetBaseException().ToString());
             }
+        }
+
+        private async void OnWindowResourceExplorerKeyDown(object? sender, KeyEventArgs e)
+        {
+            if (e.Key != Key.Delete)
+                return;
+
+            if (_selectedResourceItemState == null)
+                return;
+
+            if (GetFocusedTextBox() != null)
+                return;
+
+            if (_activeResourceRenameTextBox != null && _activeResourceRenameTextBox.IsVisible)
+                return;
+
+            await DeleteSelectedResourceItemAsync();
+            e.Handled = true;
         }
 
         private bool HasPrimaryCommandModifier(KeyModifiers modifiers)
@@ -4000,17 +4043,45 @@ namespace LimitlessSquareEngine.Editor
                 Margin = new Thickness(12)
             };
 
+            _resourceExplorerPanel = panel;
+
             foreach (string childDirectory in directories)
                 panel.Children.Add(CreateResourceIconItem(childDirectory, true));
 
             foreach (string childFile in files)
                 panel.Children.Add(CreateResourceIconItem(childFile, false));
 
+            Border blankArea = new Border
+            {
+                Background = Brushes.Transparent,
+                HorizontalAlignment = HorizontalAlignment.Stretch,
+                VerticalAlignment = VerticalAlignment.Stretch,
+                Child = panel
+            };
+
+            blankArea.PointerPressed += (_, e) =>
+            {
+                if (e.Source == blankArea || e.Source == panel)
+                    ClearSelectedResourceItem();
+            };
+
+            blankArea.ContextMenu = CreateResourceExplorerBlankContextMenu();
+
             Control content;
 
             if (panel.Children.Count == 0)
             {
-                content = CreatePlaceholder("该目录为空");
+                Border emptyArea = new Border
+                {
+                    Background = Brushes.Transparent,
+                    HorizontalAlignment = HorizontalAlignment.Stretch,
+                    VerticalAlignment = VerticalAlignment.Stretch,
+                    Child = CreatePlaceholder("该目录为空")
+                };
+
+                emptyArea.PointerPressed += (_, _) => ClearSelectedResourceItem();
+                emptyArea.ContextMenu = CreateResourceExplorerBlankContextMenu();
+                content = emptyArea;
             }
             else
             {
@@ -4018,7 +4089,7 @@ namespace LimitlessSquareEngine.Editor
                 {
                     HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
                     VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
-                    Content = panel
+                    Content = blankArea
                 };
             }
 
@@ -4029,6 +4100,33 @@ namespace LimitlessSquareEngine.Editor
         {
             string name = Path.GetFileName(path);
             ResourceIconKind iconKind = ResolveResourceIconKind(path, isDirectory);
+
+            TextBlock nameTextBlock = new TextBlock
+            {
+                Text = name,
+                Foreground = new SolidColorBrush(Color.Parse("#DDDDDD")),
+                TextAlignment = TextAlignment.Center,
+                TextWrapping = TextWrapping.Wrap,
+                MaxWidth = 86,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                IsVisible = true
+            };
+
+            TextBox nameTextBox = new TextBox
+            {
+                Text = name,
+                Width = 86,
+                Height = 24,
+                MinHeight = 24,
+                Padding = new Thickness(4, 1, 4, 1),
+                Background = new SolidColorBrush(Color.Parse("#1A1A1A")),
+                BorderBrush = new SolidColorBrush(Color.Parse("#555555")),
+                Foreground = Brushes.White,
+                HorizontalContentAlignment = HorizontalAlignment.Center,
+                TextAlignment = TextAlignment.Center,
+                VerticalContentAlignment = VerticalAlignment.Center,
+                IsVisible = false
+            };
 
             Border item = new Border
             {
@@ -4044,30 +4142,28 @@ namespace LimitlessSquareEngine.Editor
                     Spacing = 4,
                     HorizontalAlignment = HorizontalAlignment.Center,
                     Children =
-                    {
-                        new ResourceGlyphIcon
-                        {
-                            Kind = iconKind,
-                            Width = 52,
-                            Height = 52,
-                            Margin = new Thickness(0, 0, 0, 2),
-                            HorizontalAlignment = HorizontalAlignment.Center
-                        },
-                        new TextBlock
-                        {
-                            Text = name,
-                            Foreground = new SolidColorBrush(Color.Parse("#DDDDDD")),
-                            TextAlignment = TextAlignment.Center,
-                            TextWrapping = TextWrapping.Wrap,
-                            MaxWidth = 86,
-                            HorizontalAlignment = HorizontalAlignment.Center
-                        }
-                    }
+            {
+                new ResourceGlyphIcon
+                {
+                    Kind = iconKind,
+                    Width = 80,
+                    Height = 80,
+                    Margin = new Thickness(0, 0, 0, 2),
+                    HorizontalAlignment = HorizontalAlignment.Center
+                },
+                nameTextBlock,
+                nameTextBox
+            }
                 }
             };
 
-            ResourceItemState state = new ResourceItemState(item, path, isDirectory);
+            ResourceItemState state = new ResourceItemState(item, path, isDirectory, nameTextBlock, nameTextBox);
+            item.Tag = state;
+            nameTextBlock.Tag = state;
+            nameTextBox.Tag = state;
             UpdateResourceItemVisual(state);
+
+            item.ContextMenu = CreateResourceItemContextMenu(state);
 
             item.PointerEntered += (_, _) =>
             {
@@ -4082,11 +4178,15 @@ namespace LimitlessSquareEngine.Editor
                 UpdateResourceItemVisual(state);
             };
 
-            item.PointerPressed += (_, _) =>
+            item.PointerPressed += (_, e) =>
             {
                 SelectResourceItem(state);
                 state.IsPressed = true;
                 UpdateResourceItemVisual(state);
+
+                PointerPoint point = e.GetCurrentPoint(item);
+                if (point.Properties.PointerUpdateKind == PointerUpdateKind.RightButtonPressed)
+                    e.Handled = true;
             };
 
             item.PointerReleased += (_, _) =>
@@ -4104,6 +4204,30 @@ namespace LimitlessSquareEngine.Editor
             {
                 SelectResourceItem(state);
                 OnResourceItemDoubleTapped(path, isDirectory);
+            };
+
+            nameTextBlock.PointerPressed += (_, e) =>
+            {
+                SelectResourceItem(state);
+
+                PointerPoint point = e.GetCurrentPoint(nameTextBlock);
+                if (point.Properties.PointerUpdateKind != PointerUpdateKind.LeftButtonPressed)
+                    return;
+
+                DateTime now = DateTime.UtcNow;
+                if (string.Equals(_lastResourceNameClickPath, state.Path, StringComparison.Ordinal) &&
+                    (now - _lastResourceNameClickUtc).TotalMilliseconds >= 350 &&
+                    (now - _lastResourceNameClickUtc).TotalMilliseconds <= 900)
+                {
+                    _lastResourceNameClickUtc = DateTime.MinValue;
+                    _lastResourceNameClickPath = null;
+                    _ = BeginRenameResourceAsync(state);
+                    e.Handled = true;
+                    return;
+                }
+
+                _lastResourceNameClickUtc = now;
+                _lastResourceNameClickPath = state.Path;
             };
 
             return item;
@@ -4149,17 +4273,48 @@ namespace LimitlessSquareEngine.Editor
                     Child = topBarContent
                 };
 
+                Border rootBorder = new Border
+                {
+                    Background = Brushes.Transparent,
+                    Child = content
+                };
+
+                rootBorder.PointerPressed += (_, e) =>
+                {
+                    if (e.Source == rootBorder)
+                        ClearSelectedResourceItem();
+                };
+
+                rootBorder.ContextMenu = CreateResourceExplorerBlankContextMenu();
+                _resourceExplorerRootBorder = rootBorder;
+
                 Grid.SetRow(topBar, 0);
-                Grid.SetRow(content, 1);
+                Grid.SetRow(rootBorder, 1);
 
                 grid.Children.Add(topBar);
-                grid.Children.Add(content);
+                grid.Children.Add(rootBorder);
                 return grid;
             }
 
             grid.RowDefinitions.Add(new RowDefinition(1, GridUnitType.Star));
-            Grid.SetRow(content, 0);
-            grid.Children.Add(content);
+
+            Border bodyBorder = new Border
+            {
+                Background = Brushes.Transparent,
+                Child = content
+            };
+
+            bodyBorder.PointerPressed += (_, e) =>
+            {
+                if (e.Source == bodyBorder)
+                    ClearSelectedResourceItem();
+            };
+
+            bodyBorder.ContextMenu = CreateResourceExplorerBlankContextMenu();
+            _resourceExplorerRootBorder = bodyBorder;
+
+            Grid.SetRow(bodyBorder, 0);
+            grid.Children.Add(bodyBorder);
             return grid;
         }
 
@@ -4273,6 +4428,584 @@ namespace LimitlessSquareEngine.Editor
 
             UpdateResourceItemVisual(state);
             ShowResourceDetailsInViewer(state.Path, state.IsDirectory);
+        }
+
+        private void ClearSelectedResourceItem()
+        {
+            ResourceItemState? previous = _selectedResourceItemState;
+            _selectedResourceItemState = null;
+
+            if (previous != null)
+                UpdateResourceItemVisual(previous);
+
+            RightDockSlot.Content = CreatePlaceholder("未选中文件或节点");
+        }
+
+        private ResourceItemState? FindResourceItemStateByPath(string path)
+        {
+            if (_resourceExplorerPanel == null)
+                return null;
+
+            string fullPath = Path.GetFullPath(path);
+
+            foreach (Control child in _resourceExplorerPanel.Children)
+            {
+                if (child is Border border &&
+                    border.Tag is ResourceItemState state &&
+                    PathsEqual(state.Path, fullPath))
+                    return state;
+            }
+
+            return null;
+        }
+
+        private void BeginRenameResourceByPath(string path)
+        {
+            Dispatcher.UIThread.Post(async () =>
+            {
+                ResourceItemState? state = FindResourceItemStateByPath(path);
+                if (state == null)
+                    return;
+
+                SelectResourceItem(state);
+                await BeginRenameResourceAsync(state);
+            }, DispatcherPriority.Background);
+        }
+
+        private bool IsValidResourceName(string name)
+        {
+            string normalized = (name ?? string.Empty).Trim();
+
+            if (string.IsNullOrWhiteSpace(normalized))
+                return false;
+
+            if (normalized == "." || normalized == "..")
+                return false;
+
+            return normalized.IndexOfAny(Path.GetInvalidFileNameChars()) < 0;
+        }
+
+        private bool HasSiblingResourceWithSameName(string sourcePath, string newName)
+        {
+            string? parentPath = Path.GetDirectoryName(sourcePath);
+            if (string.IsNullOrWhiteSpace(parentPath))
+                return true;
+
+            string targetPath = Path.Combine(parentPath, newName);
+
+            if (PathsEqual(sourcePath, targetPath))
+                return false;
+
+            return Directory.Exists(targetPath) || File.Exists(targetPath);
+        }
+
+        private async Task<bool> TryRenameResourceAsync(ResourceItemState state, string newName)
+        {
+            string normalized = (newName ?? string.Empty).Trim();
+
+            if (!IsValidResourceName(normalized))
+                return false;
+
+            try
+            {
+                string? parentPath = Path.GetDirectoryName(state.Path);
+                if (string.IsNullOrWhiteSpace(parentPath))
+                    return false;
+
+                string targetPath;
+
+                if (state.IsDirectory)
+                {
+                    targetPath = Path.Combine(parentPath, normalized);
+                }
+                else
+                {
+                    string extension = Path.GetExtension(state.Path);
+                    targetPath = Path.Combine(parentPath, normalized + extension);
+                }
+
+                if (!PathsEqual(state.Path, targetPath) &&
+                    (Directory.Exists(targetPath) || File.Exists(targetPath)))
+                    return false;
+
+                if (state.IsDirectory)
+                    Directory.Move(state.Path, targetPath);
+                else
+                    File.Move(state.Path, targetPath);
+
+                if (!string.IsNullOrWhiteSpace(_currentResourceDirectoryPath))
+                    ShowResourceDirectory(_currentResourceDirectoryPath);
+
+                TrySelectProjectTreePath(targetPath);
+                ShowResourceDetailsInViewer(targetPath, state.IsDirectory);
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private async Task BeginRenameResourceAsync(ResourceItemState state)
+        {
+            state.NameTextBlock.IsVisible = false;
+            state.NameTextBox.Text = state.IsDirectory
+                ? Path.GetFileName(state.Path)
+                : Path.GetFileNameWithoutExtension(state.Path);
+            state.NameTextBox.IsVisible = true;
+            _activeResourceRenameTextBox = state.NameTextBox;
+            state.NameTextBox.Focus();
+            state.NameTextBox.SelectAll();
+
+            async Task CommitAsync()
+            {
+                bool success = await TryRenameResourceAsync(state, state.NameTextBox.Text ?? string.Empty);
+                state.NameTextBox.IsVisible = false;
+                state.NameTextBlock.IsVisible = true;
+
+                if (ReferenceEquals(_activeResourceRenameTextBox, state.NameTextBox))
+                    _activeResourceRenameTextBox = null;
+
+                if (!success && !string.IsNullOrWhiteSpace(_currentResourceDirectoryPath))
+                    ShowResourceDirectory(_currentResourceDirectoryPath);
+            }
+
+            void Cancel()
+            {
+                state.NameTextBox.IsVisible = false;
+                state.NameTextBlock.IsVisible = true;
+
+                if (ReferenceEquals(_activeResourceRenameTextBox, state.NameTextBox))
+                    _activeResourceRenameTextBox = null;
+            }
+
+            void OnLostFocus(object? sender, RoutedEventArgs e)
+            {
+                state.NameTextBox.LostFocus -= OnLostFocus;
+                _ = CommitAsync();
+            }
+
+            void OnKeyDown(object? sender, KeyEventArgs e)
+            {
+                if (e.Key == Key.Enter)
+                {
+                    state.NameTextBox.KeyDown -= OnKeyDown;
+                    state.NameTextBox.LostFocus -= OnLostFocus;
+                    _ = CommitAsync();
+                    e.Handled = true;
+                    return;
+                }
+
+                if (e.Key == Key.Escape)
+                {
+                    state.NameTextBox.KeyDown -= OnKeyDown;
+                    state.NameTextBox.LostFocus -= OnLostFocus;
+                    Cancel();
+                    e.Handled = true;
+                }
+            }
+
+            state.NameTextBox.LostFocus += OnLostFocus;
+            state.NameTextBox.KeyDown += OnKeyDown;
+        }
+
+        private async Task<bool> ShowDeleteResourceDialogAsync(ResourceItemState state)
+        {
+            string fileName = Path.GetFileName(state.Path);
+            bool confirmed = false;
+
+            Window dialog = new Window
+            {
+                Title = "删除警告",
+                Width = 360,
+                Height = 120,
+                CanResize = false,
+                CanMinimize = false,
+                WindowStartupLocation = WindowStartupLocation.CenterOwner,
+                SystemDecorations = SystemDecorations.Full,
+                ShowInTaskbar = false,
+                Background = new SolidColorBrush(Color.Parse("#111111"))
+            };
+
+            TextBlock nameLine = new TextBlock
+            {
+                Text = fileName,
+                Foreground = Brushes.White,
+                FontWeight = FontWeight.Bold,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                TextAlignment = TextAlignment.Center,
+                Margin = new Thickness(0, 0, 0, 6),
+                TextWrapping = TextWrapping.Wrap
+            };
+
+            TextBlock questionLine = new TextBlock
+            {
+                Text = "是否确认删除？",
+                Foreground = Brushes.White,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                TextAlignment = TextAlignment.Center,
+                Margin = new Thickness(0, 0, 0, 18),
+                TextWrapping = TextWrapping.Wrap
+            };
+
+            Button confirmButton = new Button
+            {
+                Content = "确定",
+                Width = 88,
+                Height = 32,
+                MinWidth = 88,
+                MinHeight = 32,
+                Padding = new Thickness(0, 0, 0, 1),
+                HorizontalContentAlignment = HorizontalAlignment.Center,
+                VerticalContentAlignment = VerticalAlignment.Center
+            };
+
+            Button cancelButton = new Button
+            {
+                Content = "取消",
+                Width = 88,
+                Height = 32,
+                MinWidth = 88,
+                MinHeight = 32,
+                Padding = new Thickness(0, 0, 0, 1),
+                HorizontalContentAlignment = HorizontalAlignment.Center,
+                VerticalContentAlignment = VerticalAlignment.Center
+            };
+
+            confirmButton.Click += (_, _) =>
+            {
+                confirmed = true;
+                dialog.Close();
+            };
+
+            cancelButton.Click += (_, _) =>
+            {
+                dialog.Close();
+            };
+
+            StackPanel buttons = new StackPanel
+            {
+                Orientation = Orientation.Horizontal,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                Spacing = 12,
+                Children =
+                {
+                    confirmButton,
+                    cancelButton
+                }
+            };
+
+            StackPanel content = new StackPanel
+            {
+                Margin = new Thickness(16),
+                VerticalAlignment = VerticalAlignment.Center,
+                Children =
+                {
+                    nameLine,
+                    questionLine,
+                    buttons
+                }
+            };
+
+            dialog.Content = content;
+
+            await dialog.ShowDialog(this);
+            return confirmed;
+        }
+
+        private async Task DeleteSelectedResourceItemAsync()
+        {
+            if (_selectedResourceItemState == null)
+                return;
+
+            ResourceItemState state = _selectedResourceItemState;
+            string? currentDirectoryPath = _currentResourceDirectoryPath;
+
+            if (!await ShowDeleteResourceDialogAsync(state))
+                return;
+
+            try
+            {
+                if (state.IsDirectory)
+                    Directory.Delete(state.Path, true);
+                else
+                    File.Delete(state.Path);
+
+                ClearSelectedResourceItem();
+
+                if (!string.IsNullOrWhiteSpace(currentDirectoryPath))
+                    ShowResourceDirectory(currentDirectoryPath);
+            }
+            catch (Exception ex)
+            {
+                await ShowSimpleWarningDialogAsync("警告", ex.Message);
+            }
+        }
+
+        private void OpenResourceInSystemExplorer(string path)
+        {
+            try
+            {
+                string fullPath = Path.GetFullPath(path);
+
+                if (OperatingSystem.IsWindows())
+                {
+                    Process.Start(new ProcessStartInfo
+                    {
+                        FileName = "explorer.exe",
+                        Arguments = "/select,\"" + fullPath + "\"",
+                        UseShellExecute = true
+                    });
+                    return;
+                }
+
+                if (OperatingSystem.IsMacOS())
+                {
+                    Process.Start(new ProcessStartInfo
+                    {
+                        FileName = "open",
+                        Arguments = "-R \"" + fullPath + "\"",
+                        UseShellExecute = false
+                    });
+                    return;
+                }
+
+                if (OperatingSystem.IsLinux())
+                {
+                    string? directoryPath = Directory.Exists(fullPath) ? fullPath : Path.GetDirectoryName(fullPath);
+                    if (!string.IsNullOrWhiteSpace(directoryPath))
+                        TryOpenFolderWithSystem(directoryPath);
+                }
+            }
+            catch
+            {
+            }
+        }
+
+        private async Task CreateNewResourceAsync(string kind)
+        {
+            if (string.IsNullOrWhiteSpace(_currentResourceDirectoryPath))
+                return;
+
+            string directoryPath = _currentResourceDirectoryPath;
+            string baseName;
+            string fileName;
+            string content;
+            string createdPath;
+
+            switch (kind)
+            {
+                case "文件夹":
+                    baseName = "新建文件夹";
+                    fileName = GetUniqueResourceName(directoryPath, baseName, null);
+                    createdPath = Path.Combine(directoryPath, fileName);
+                    Directory.CreateDirectory(createdPath);
+                    ShowResourceDirectory(directoryPath);
+                    BeginRenameResourceByPath(createdPath);
+                    return;
+
+                case "Lua脚本":
+                    baseName = "NewLuaScript";
+                    fileName = GetUniqueResourceName(directoryPath, baseName, ".lua");
+                    createdPath = Path.Combine(directoryPath, fileName);
+                    content = @"-- init is called in the first frame
+function init()
+
+end
+
+-- loop is called recursively in each frame
+function loop()
+
+end
+";
+                    File.WriteAllText(createdPath, content, Encoding.UTF8);
+                    break;
+
+                case "顶点着色器":
+                    baseName = "NewVertexShader";
+                    fileName = GetUniqueResourceName(directoryPath, baseName, ".vert");
+                    createdPath = Path.Combine(directoryPath, fileName);
+                    content = @"#version 430 core
+
+layout(location = 0) in vec3 aPos;
+
+void main()
+{
+    gl_Position = vec4(aPos, 1.0);
+}
+";
+                    File.WriteAllText(createdPath, content, Encoding.UTF8);
+                    break;
+
+                case "片元着色器":
+                    baseName = "NewFragmentShader";
+                    fileName = GetUniqueResourceName(directoryPath, baseName, ".frag");
+                    createdPath = Path.Combine(directoryPath, fileName);
+                    content = @"#version 430 core
+
+layout(location = 0) out vec4 FragColor;
+
+void main()
+{
+    FragColor = vec4(1.0, 1.0, 1.0, 1.0);
+}
+";
+                    File.WriteAllText(createdPath, content, Encoding.UTF8);
+                    break;
+
+                case "材质":
+                    baseName = "NewMaterial";
+                    fileName = GetUniqueResourceName(directoryPath, baseName, ".json");
+                    createdPath = Path.Combine(directoryPath, fileName);
+                    content = JsonSerializer.Serialize(new
+                    {
+                        assetType = "Material"
+                    }, SceneJsonWriteOptions);
+                    File.WriteAllText(createdPath, content, Encoding.UTF8);
+                    break;
+
+                case "场景":
+                    baseName = "NewScene";
+                    fileName = GetUniqueResourceName(directoryPath, baseName, ".json");
+                    createdPath = Path.Combine(directoryPath, fileName);
+                    content = JsonSerializer.Serialize(new SceneData
+                    {
+                        SceneId = Guid.NewGuid().ToString("N"),
+                        Objects = new List<SceneObject>()
+                    }, SceneJsonWriteOptions);
+                    File.WriteAllText(createdPath, content, Encoding.UTF8);
+                    break;
+
+                case "画布":
+                    baseName = "NewCanvas";
+                    fileName = GetUniqueResourceName(directoryPath, baseName, ".json");
+                    createdPath = Path.Combine(directoryPath, fileName);
+                    content = "{}";
+                    File.WriteAllText(createdPath, content, Encoding.UTF8);
+                    break;
+
+                default:
+                    return;
+            }
+
+            ShowResourceDirectory(directoryPath);
+            BeginRenameResourceByPath(createdPath);
+        }
+
+        private string GetUniqueResourceName(string directoryPath, string baseName, string? extension)
+        {
+            string candidate = extension == null ? baseName : baseName + extension;
+            int index = 1;
+
+            while (Directory.Exists(Path.Combine(directoryPath, candidate)) || File.Exists(Path.Combine(directoryPath, candidate)))
+            {
+                candidate = extension == null
+                    ? baseName + index.ToString(CultureInfo.InvariantCulture)
+                    : baseName + index.ToString(CultureInfo.InvariantCulture) + extension;
+                index++;
+            }
+
+            return candidate;
+        }
+
+        private ContextMenu CreateResourceItemContextMenu(ResourceItemState state)
+        {
+            MenuItem openItem = new MenuItem { Header = "打开" };
+            MenuItem revealItem = new MenuItem { Header = "查看文件" };
+            MenuItem renameItem = new MenuItem { Header = "重命名" };
+            MenuItem deleteItem = new MenuItem { Header = "删除" };
+
+            openItem.Click += (_, _) =>
+            {
+                SelectResourceItem(state);
+                OnResourceItemDoubleTapped(state.Path, state.IsDirectory);
+            };
+
+            revealItem.Click += (_, _) =>
+            {
+                SelectResourceItem(state);
+                OpenResourceInSystemExplorer(state.Path);
+            };
+
+            renameItem.Click += async (_, _) =>
+            {
+                SelectResourceItem(state);
+                await BeginRenameResourceAsync(state);
+            };
+
+            deleteItem.Click += async (_, _) =>
+            {
+                SelectResourceItem(state);
+                await DeleteSelectedResourceItemAsync();
+            };
+
+            return new ContextMenu
+            {
+                ItemsSource = new object[]
+                {
+                    openItem,
+                    revealItem,
+                    renameItem,
+                    deleteItem
+                }
+            };
+        }
+
+        private ContextMenu CreateResourceExplorerBlankContextMenu()
+        {
+            MenuItem newFolderItem = new MenuItem { Header = "文件夹" };
+            MenuItem newLuaItem = new MenuItem { Header = "Lua脚本" };
+            MenuItem newVertexShaderItem = new MenuItem { Header = "顶点着色器" };
+            MenuItem newFragmentShaderItem = new MenuItem { Header = "片元着色器" };
+            MenuItem newShaderItem = new MenuItem
+            {
+                Header = "着色器",
+                ItemsSource = new object[]
+                {
+                    newVertexShaderItem,
+                    newFragmentShaderItem
+                }
+            };
+            MenuItem newMaterialItem = new MenuItem { Header = "材质" };
+            MenuItem newSceneItem = new MenuItem { Header = "场景" };
+            MenuItem newCanvasItem = new MenuItem { Header = "画布" };
+            MenuItem newItem = new MenuItem
+            {
+                Header = "新建",
+                ItemsSource = new object[]
+                {
+                    newFolderItem,
+                    newLuaItem,
+                    newShaderItem,
+                    newMaterialItem,
+                    newSceneItem,
+                    newCanvasItem
+                }
+            };
+            MenuItem revealItem = new MenuItem { Header = "查看文件" };
+
+            newFolderItem.Click += async (_, _) => await CreateNewResourceAsync("文件夹");
+            newLuaItem.Click += async (_, _) => await CreateNewResourceAsync("Lua脚本");
+            newVertexShaderItem.Click += async (_, _) => await CreateNewResourceAsync("顶点着色器");
+            newFragmentShaderItem.Click += async (_, _) => await CreateNewResourceAsync("片元着色器");
+            newMaterialItem.Click += async (_, _) => await CreateNewResourceAsync("材质");
+            newSceneItem.Click += async (_, _) => await CreateNewResourceAsync("场景");
+            newCanvasItem.Click += async (_, _) => await CreateNewResourceAsync("画布");
+
+            revealItem.Click += (_, _) =>
+            {
+                if (!string.IsNullOrWhiteSpace(_currentResourceDirectoryPath))
+                    TryOpenFolderWithSystem(_currentResourceDirectoryPath);
+            };
+
+            return new ContextMenu
+            {
+                ItemsSource = new object[]
+                {
+            newItem,
+            revealItem
+                }
+            };
         }
 
         private void UpdateResourceItemVisual(ResourceItemState state)
