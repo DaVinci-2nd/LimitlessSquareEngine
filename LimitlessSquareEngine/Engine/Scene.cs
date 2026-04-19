@@ -328,7 +328,7 @@ namespace LimitlessSquareEngine.Engine
             if (_loadedScenes.TryGetValue(sceneId, out SceneData? cached))
                 return cached;
 
-            if (!Program._sceneFileRegistry.TryGetValue(sceneId, out string? filePath))
+            if (!Program.EnsureSceneRegistered(sceneId, out string filePath))
                 throw new FileNotFoundException($"[X] Scene ID '{sceneId}' not registered in scene registry.");
 
             if (!File.Exists(filePath))

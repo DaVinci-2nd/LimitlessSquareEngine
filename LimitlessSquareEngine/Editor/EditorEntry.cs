@@ -25,6 +25,7 @@ namespace LimitlessSquareEngine.Editor
             EnsurePreviewPlaceholderScene(editorRuntimePath);
 
             options.AssetRootPath = editorRuntimePath;
+            options.ResourceLoadTiming = ResourceLoadTiming.Lazy;
         }
 
         private static void EnsurePreviewPlaceholderScene(string editorRuntimePath)

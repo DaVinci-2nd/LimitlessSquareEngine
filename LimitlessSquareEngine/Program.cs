@@ -111,6 +111,7 @@ namespace LimitlessSquareEngine
     {
         public string DefaultAssetRootPath { get; set; } = "";
         public string AssetRootPath { get; set; } = "";
+        public ResourceLoadTiming ResourceLoadTiming { get; set; } = ResourceLoadTiming.Preload;
     }
 
     public sealed class EditorHostBootstrapInfo
@@ -135,6 +136,12 @@ namespace LimitlessSquareEngine
         public byte[] PixelsRgba { get; init; } = Array.Empty<byte>();
     }
 
+    public enum ResourceLoadTiming
+    {
+        Lazy = 0,
+        Preload = 1
+    }
+
     /// <summary>
     /// 入口类
     /// </summary>
@@ -156,6 +163,7 @@ namespace LimitlessSquareEngine
 
 
         private static string _assetRootPath = Path.Combine(AppContext.BaseDirectory, "Assets");
+        private static ResourceLoadTiming _resourceLoadTiming = ResourceLoadTiming.Preload;
         private static string? _editorAssemblyPath;
         private static AssemblyLoadContext? _editorLoadContext;
         private static Assembly? _editorAssembly;
@@ -222,8 +230,6 @@ namespace LimitlessSquareEngine
         // 游戏启动文件夹
         private static string _gameStartupFolder = AppContext.BaseDirectory;
 
-        private static string? _externalControlFilePath;
-
         // 启动Logo显示选项
         static bool _showStartupLogo = true;
         // 启动Logo路径
@@ -241,6 +247,331 @@ namespace LimitlessSquareEngine
         private static int _titleDisplayedFps = 0;
         // 标题立即刷新标志
         private static bool _windowTitleDirty = true;
+
+        private static string? _externalControlFilePath;
+        private static string? _externalStatusFilePath;
+
+        private static readonly object _assetDiscoveryLock = new object();
+        private static readonly HashSet<string> _lazyTextureKeyDiscoveryCompleted = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        private static readonly JsonSerializerOptions _canvasLayoutJsonReadOptions = new JsonSerializerOptions
+        {
+            Converters = { new Vector4JsonConverter() },
+            PropertyNameCaseInsensitive = true
+        };
+
+        static string NormalizeAssetLookupKey(string raw, bool removeExtension = false)
+        {
+            string key = (raw ?? string.Empty).Replace('\\', '/').Trim();
+
+            while (key.StartsWith("/"))
+                key = key[1..];
+
+            if (key.StartsWith("Assets/", StringComparison.OrdinalIgnoreCase))
+                key = key["Assets/".Length..];
+
+            if (key.StartsWith("EditorAssets/", StringComparison.OrdinalIgnoreCase))
+                key = key["EditorAssets/".Length..];
+
+            if (removeExtension)
+            {
+                string ext = Path.GetExtension(key);
+                if (!string.IsNullOrEmpty(ext))
+                    key = key[..^ext.Length];
+            }
+
+            return key;
+        }
+
+        static string GetAssetPathFromKey(string key, string extensionWithDot)
+        {
+            string normalizedKey = NormalizeAssetLookupKey(key, removeExtension: false);
+            string path = Path.Combine(
+                _assetRootPath,
+                normalizedKey.Replace('/', Path.DirectorySeparatorChar));
+
+            if (!string.IsNullOrEmpty(extensionWithDot) &&
+                !path.EndsWith(extensionWithDot, StringComparison.OrdinalIgnoreCase))
+            {
+                path += extensionWithDot;
+            }
+
+            return path;
+        }
+
+        static bool TryRegisterSceneFile(string filePath, out string sceneId)
+        {
+            sceneId = string.Empty;
+
+            if (!TryValidateSceneFile(filePath, out sceneId, out _))
+                return false;
+
+            _sceneFileRegistry[sceneId] = filePath;
+            _sceneFileDisplayName[sceneId] = Path.GetFileName(filePath);
+            return true;
+        }
+
+        internal static bool EnsureSceneRegistered(string sceneId, out string filePath)
+        {
+            filePath = string.Empty;
+
+            string normalizedSceneId = (sceneId ?? string.Empty).Trim();
+            if (string.IsNullOrWhiteSpace(normalizedSceneId))
+                return false;
+
+            if (_sceneFileRegistry.TryGetValue(normalizedSceneId, out filePath))
+                return File.Exists(filePath);
+
+            lock (_assetDiscoveryLock)
+            {
+                if (_sceneFileRegistry.TryGetValue(normalizedSceneId, out filePath))
+                    return File.Exists(filePath);
+
+                if (!Directory.Exists(_assetRootPath))
+                    return false;
+
+                string[] jsonFiles = Directory.GetFiles(_assetRootPath, "*.json", SearchOption.AllDirectories);
+                Array.Sort(jsonFiles, StringComparer.OrdinalIgnoreCase);
+
+                foreach (string jsonFile in jsonFiles)
+                {
+                    if (!TryRegisterSceneFile(jsonFile, out string discoveredSceneId))
+                        continue;
+
+                    if (string.Equals(discoveredSceneId, normalizedSceneId, StringComparison.Ordinal))
+                    {
+                        filePath = _sceneFileRegistry[discoveredSceneId];
+                        Console.WriteLine($"[i] Lazily registered scene: {discoveredSceneId} -> {filePath}");
+                        return true;
+                    }
+                }
+
+                return false;
+            }
+        }
+
+        internal static bool EnsureMaterialRegistered(string materialKey, out string filePath)
+        {
+            filePath = string.Empty;
+
+            string key = NormalizeAssetLookupKey(materialKey, removeExtension: true);
+            if (string.IsNullOrWhiteSpace(key))
+                return false;
+
+            if (_materialFileRegistry.TryGetValue(key, out filePath))
+                return File.Exists(filePath);
+
+            lock (_assetDiscoveryLock)
+            {
+                if (_materialFileRegistry.TryGetValue(key, out filePath))
+                    return File.Exists(filePath);
+
+                string candidate = GetAssetPathFromKey(key, ".json");
+                if (!File.Exists(candidate))
+                    return false;
+
+                if (!TryValidateMaterialFile(candidate, out _))
+                    return false;
+
+                _materialFileRegistry[key] = candidate;
+                filePath = candidate;
+                Console.WriteLine($"[i] Lazily registered material: {key} -> {candidate}");
+                return true;
+            }
+        }
+
+        internal static bool EnsureTextureRegistered(string textureKey, out string filePath)
+        {
+            filePath = string.Empty;
+
+            string key = NormalizeAssetLookupKey(textureKey, removeExtension: false);
+            if (string.IsNullOrWhiteSpace(key))
+                return false;
+
+            if (_textureFileRegistry.TryGetValue(key, out filePath))
+                return File.Exists(filePath);
+
+            lock (_assetDiscoveryLock)
+            {
+                if (_textureFileRegistry.TryGetValue(key, out filePath))
+                    return File.Exists(filePath);
+
+                string candidate = GetAssetPathFromKey(key, "");
+                if (!File.Exists(candidate))
+                    return false;
+
+                string ext = Path.GetExtension(candidate);
+                bool isTexture =
+                    ext.Equals(".png", StringComparison.OrdinalIgnoreCase) ||
+                    ext.Equals(".jpg", StringComparison.OrdinalIgnoreCase) ||
+                    ext.Equals(".jpeg", StringComparison.OrdinalIgnoreCase);
+
+                if (!isTexture)
+                    return false;
+
+                _textureFileRegistry[key] = candidate;
+
+                if (!_texturePaths.Contains(key, StringComparer.OrdinalIgnoreCase))
+                    _texturePaths.Add(key);
+
+                filePath = candidate;
+                Console.WriteLine($"[i] Lazily registered texture: {key} -> {candidate}");
+                return true;
+            }
+        }
+
+        static void EnsureAllTextureKeysDiscovered()
+        {
+            lock (_assetDiscoveryLock)
+            {
+                if (_lazyTextureKeyDiscoveryCompleted.Contains(_assetRootPath))
+                    return;
+
+                if (!Directory.Exists(_assetRootPath))
+                {
+                    _lazyTextureKeyDiscoveryCompleted.Add(_assetRootPath);
+                    return;
+                }
+
+                string[] files = Directory.GetFiles(_assetRootPath, "*.*", SearchOption.AllDirectories);
+                Array.Sort(files, StringComparer.OrdinalIgnoreCase);
+
+                foreach (string file in files)
+                {
+                    string ext = Path.GetExtension(file);
+
+                    bool isTexture =
+                        ext.Equals(".png", StringComparison.OrdinalIgnoreCase) ||
+                        ext.Equals(".jpg", StringComparison.OrdinalIgnoreCase) ||
+                        ext.Equals(".jpeg", StringComparison.OrdinalIgnoreCase);
+
+                    if (!isTexture)
+                        continue;
+
+                    string key = BuildAssetKey(_assetRootPath, file, removeExtension: false);
+                    _textureFileRegistry[key] = file;
+
+                    if (!_texturePaths.Contains(key, StringComparer.OrdinalIgnoreCase))
+                        _texturePaths.Add(key);
+                }
+
+                _lazyTextureKeyDiscoveryCompleted.Add(_assetRootPath);
+            }
+        }
+
+        static bool EnsureUILayoutLoaded(string layoutKey, out List<CanvasElement>? roots)
+        {
+            roots = null;
+
+            string key = NormalizeAssetLookupKey(layoutKey, removeExtension: true);
+            if (string.IsNullOrWhiteSpace(key))
+                return false;
+
+            if (_uiLayouts.TryGetValue(key, out roots) && roots != null)
+                return true;
+
+            lock (_assetDiscoveryLock)
+            {
+                if (_uiLayouts.TryGetValue(key, out roots) && roots != null)
+                    return true;
+
+                string candidate = GetAssetPathFromKey(key, ".json");
+                if (!File.Exists(candidate))
+                    return false;
+
+                if (!TryLoadCanvasLayoutFile(candidate, _canvasLayoutJsonReadOptions, out roots, out _))
+                    return false;
+
+                _uiLayouts[key] = roots;
+                Console.WriteLine($"[i] Lazily loaded UI layout: {key} -> {candidate}");
+                return true;
+            }
+        }
+
+        internal static bool EnsureShaderRegistered(string shaderKey, out string vertexShaderPath)
+        {
+            vertexShaderPath = string.Empty;
+
+            string key = NormalizeAssetLookupKey(shaderKey, removeExtension: true);
+            if (string.IsNullOrWhiteSpace(key))
+                return false;
+
+            string? existingPath = _shaderVertexFiles.FirstOrDefault(p => string.Equals(
+                BuildAssetKey(_assetRootPath, p, removeExtension: true),
+                key,
+                StringComparison.OrdinalIgnoreCase));
+
+            if (!string.IsNullOrWhiteSpace(existingPath))
+            {
+                vertexShaderPath = existingPath;
+                return File.Exists(vertexShaderPath);
+            }
+
+            lock (_assetDiscoveryLock)
+            {
+                existingPath = _shaderVertexFiles.FirstOrDefault(p => string.Equals(
+                    BuildAssetKey(_assetRootPath, p, removeExtension: true),
+                    key,
+                    StringComparison.OrdinalIgnoreCase));
+
+                if (!string.IsNullOrWhiteSpace(existingPath))
+                {
+                    vertexShaderPath = existingPath;
+                    return File.Exists(vertexShaderPath);
+                }
+
+                string[] vertexCandidates =
+                [
+                    GetAssetPathFromKey(key, ".vert"),
+            GetAssetPathFromKey(key, ".vs")
+                ];
+
+                foreach (string candidate in vertexCandidates)
+                {
+                    if (!File.Exists(candidate))
+                        continue;
+
+                    string normalizedCandidateKey = BuildAssetKey(_assetRootPath, candidate, removeExtension: true);
+
+                    if (!_shaderVertexFiles.Any(p => string.Equals(
+                        BuildAssetKey(_assetRootPath, p, removeExtension: true),
+                        normalizedCandidateKey,
+                        StringComparison.OrdinalIgnoreCase)))
+                    {
+                        _shaderVertexFiles.Add(candidate);
+                    }
+
+                    vertexShaderPath = candidate;
+                    Console.WriteLine($"[i] Lazily registered shader: {key} -> {candidate}");
+                    return true;
+                }
+
+                return false;
+            }
+        }
+
+        internal static bool EnsureObjMeshRegistered(string meshKey, Graphics graphics)
+        {
+            string key = NormalizeAssetLookupKey(meshKey, removeExtension: true);
+            if (string.IsNullOrWhiteSpace(key))
+                return false;
+
+            string candidate = GetAssetPathFromKey(key, ".obj");
+            if (!File.Exists(candidate))
+                return false;
+
+            try
+            {
+                graphics.RegisterObjMeshFromFile(_assetRootPath, candidate);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[!] Failed to lazily register OBJ mesh '{key}': {ex.Message}");
+                return false;
+            }
+        }
+
+        internal static string AssetRootPathForShaderLoading => _assetRootPath;
 
         [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
         private static extern nint SetParent(nint hWndChild, nint hWndNewParent);
@@ -499,6 +830,27 @@ namespace LimitlessSquareEngine
             _window?.SwapBuffers();
         }
 
+        static void WriteExternalHostStatus()
+        {
+            if (!_isExternalHostMode)
+                return;
+
+            if (_window == null)
+                return;
+
+            if (string.IsNullOrWhiteSpace(_externalStatusFilePath))
+                return;
+
+            try
+            {
+                string text = $"{_window.Size.X}|{_window.Size.Y}|{_titleDisplayedFps}";
+                File.WriteAllText(_externalStatusFilePath, text);
+            }
+            catch
+            {
+            }
+        }
+
         static void UpdateWindowTitleNow()
         {
             if (_window == null)
@@ -513,12 +865,27 @@ namespace LimitlessSquareEngine
 
             _window.Title = $"{baseTitle}  <>  {width}x{height}  |  FPS {_titleDisplayedFps}";
             _windowTitleDirty = false;
+            WriteExternalHostStatus();
         }
 
         static void TickWindowTitle(float deltaTime)
         {
             if (_window == null)
                 return;
+
+            if (_runtimePaused)
+            {
+                _titleStatAccumulatedSeconds = 0.0;
+                _titleStatFrameCount = 0;
+
+                if (_titleDisplayedFps != 0 || _windowTitleDirty)
+                {
+                    _titleDisplayedFps = 0;
+                    UpdateWindowTitleNow();
+                }
+
+                return;
+            }
 
             _titleStatAccumulatedSeconds += deltaTime;
             _titleStatFrameCount++;
@@ -664,7 +1031,9 @@ namespace LimitlessSquareEngine
             if (!_isEditorMode)
             {
                 _assetRootPath = NormalizeAssetRootPath(defaultAssetRootPath);
+                _resourceLoadTiming = ResourceLoadTiming.Lazy;
                 Console.WriteLine($"[i] Asset root: {_assetRootPath}");
+                Console.WriteLine($"[i] Resource load timing: {_resourceLoadTiming}");
                 return;
             }
 
@@ -673,7 +1042,8 @@ namespace LimitlessSquareEngine
             EditorLaunchOptions launchOptions = new EditorLaunchOptions
             {
                 DefaultAssetRootPath = defaultAssetRootPath,
-                AssetRootPath = defaultAssetRootPath
+                AssetRootPath = defaultAssetRootPath,
+                ResourceLoadTiming = ResourceLoadTiming.Preload
             };
 
             _editorConfigureMethod?.Invoke(null, new object?[] { launchOptions });
@@ -683,7 +1053,9 @@ namespace LimitlessSquareEngine
                 : launchOptions.AssetRootPath;
 
             _assetRootPath = NormalizeAssetRootPath(selectedAssetRootPath);
+            _resourceLoadTiming = launchOptions.ResourceLoadTiming;
             Console.WriteLine($"[i] Asset root: {_assetRootPath}");
+            Console.WriteLine($"[i] Resource load timing: {_resourceLoadTiming}");
         }
 
         static EditorEmbeddingMode ResolveEditorEmbeddingMode(INativeWindow nativeWindow)
@@ -913,6 +1285,174 @@ namespace LimitlessSquareEngine
             EditorHostBridge.Unbind();
         }
 
+        static void ClearRegisteredAssets()
+        {
+            _sceneFileRegistry.Clear();
+            _sceneFileDisplayName.Clear();
+            _materialFileRegistry.Clear();
+            _generatedMaterialJsonRegistry.Clear();
+            _textureFileRegistry.Clear();
+            _texturePaths.Clear();
+            _uiLayouts.Clear();
+            _shaderVertexFiles.Clear();
+            _lazyTextureKeyDiscoveryCompleted.Clear();
+        }
+
+        static void PreloadRegisteredAssets(Graphics graphics, string assetsPath)
+        {
+            var options = new JsonSerializerOptions
+            {
+                Converters = { new Vector4JsonConverter() },
+                PropertyNameCaseInsensitive = true
+            };
+
+            ClearRegisteredAssets();
+
+            string[] allFiles = Directory.GetFiles(assetsPath, "*.*", SearchOption.AllDirectories);
+            Array.Sort(allFiles, StringComparer.OrdinalIgnoreCase);
+
+            foreach (string file in allFiles)
+            {
+                string ext = Path.GetExtension(file);
+
+                if (ext.Equals(".json", StringComparison.OrdinalIgnoreCase))
+                {
+                    try
+                    {
+                        if (TryValidateSceneFile(file, out string sceneId, out string sceneReason))
+                        {
+                            if (_sceneFileRegistry.TryGetValue(sceneId, out string? oldPath))
+                            {
+                                Console.WriteLine($"[!] Duplicate scene id '{sceneId}' found. Replacing:");
+                                Console.WriteLine($"    Old: {oldPath}");
+                                Console.WriteLine($"    New: {file}");
+                            }
+
+                            _sceneFileRegistry[sceneId] = file;
+                            _sceneFileDisplayName[sceneId] = Path.GetFileName(file);
+
+                            Console.WriteLine($"[i] Registered scene: {sceneId} -> {file}");
+                            continue;
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"[!] Scene scan failed for {file}: {ex.Message}");
+                    }
+
+                    try
+                    {
+                        if (TryValidateMaterialFile(file, out string materialReason))
+                        {
+                            string key = BuildAssetKey(assetsPath, file, removeExtension: true);
+                            _materialFileRegistry[key] = file;
+
+                            Console.WriteLine($"[i] Registered material: {key} -> {file}");
+                            continue;
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"[!] Material scan failed for {file}: {ex.Message}");
+                    }
+
+                    try
+                    {
+                        if (TryLoadCanvasLayoutFile(file, options, out List<CanvasElement>? elements, out string canvasReason)
+                            && elements != null)
+                        {
+                            string key = BuildAssetKey(assetsPath, file, removeExtension: true);
+
+                            if (_uiLayouts.ContainsKey(key))
+                            {
+                                Console.WriteLine($"[!] Duplicate UI layout key '{key}' found. Replacing with: {file}");
+                            }
+
+                            _uiLayouts[key] = elements;
+                            Console.WriteLine($"[i] Loaded UI layout: {key} -> {file}");
+                            continue;
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"[!] UI layout scan failed for {file}: {ex.Message}");
+                    }
+
+                    Console.WriteLine($"[i] Unknown json asset skipped: {file}");
+                    continue;
+                }
+
+                if (ext.Equals(".png", StringComparison.OrdinalIgnoreCase) ||
+                    ext.Equals(".jpg", StringComparison.OrdinalIgnoreCase) ||
+                    ext.Equals(".jpeg", StringComparison.OrdinalIgnoreCase))
+                {
+                    string key = BuildAssetKey(assetsPath, file, removeExtension: false);
+
+                    _textureFileRegistry[key] = file;
+                    _texturePaths.Add(key);
+
+                    Console.WriteLine($"[i] Registered texture: {key}");
+                    continue;
+                }
+
+                if (ext.Equals(".obj", StringComparison.OrdinalIgnoreCase))
+                {
+                    try
+                    {
+                        graphics.RegisterObjMeshFromFile(assetsPath, file);
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"[!] Failed to scan OBJ mesh {file}: {ex.Message}");
+                    }
+
+                    continue;
+                }
+
+                if (IsShaderFile(file))
+                {
+                    string shaderKey = BuildAssetKey(assetsPath, file, removeExtension: false);
+
+                    Console.WriteLine($"[i] Found shader file: {shaderKey}");
+
+                    if (ext.Equals(".vert", StringComparison.OrdinalIgnoreCase))
+                    {
+                        _shaderVertexFiles.Add(file);
+                    }
+
+                    continue;
+                }
+            }
+
+            Console.WriteLine($"[i] Asset scan completed. Scenes={_sceneFileRegistry.Count}, Materials={_materialFileRegistry.Count}, UI={_uiLayouts.Count}, Textures={_textureFileRegistry.Count}");
+            graphics.LoadShaders(_shaderVertexFiles, assetsPath);
+            graphics.ConfigureDefaultMainCameraFog();
+        }
+
+        static void ReloadRegisteredAssetsForCurrentTiming()
+        {
+            if (_graphics == null)
+                return;
+
+            string assetsPath = _assetRootPath;
+
+            if (!Directory.Exists(assetsPath))
+            {
+                ClearRegisteredAssets();
+                return;
+            }
+
+            if (_resourceLoadTiming == ResourceLoadTiming.Preload)
+            {
+                PreloadRegisteredAssets(_graphics, assetsPath);
+                return;
+            }
+
+            ClearRegisteredAssets();
+            _graphics.ConfigureDefaultMainCameraFog();
+            Console.WriteLine("[i] Asset scan skipped. Resource load timing: Lazy");
+        }
+
         static void SetAssetRootAndReloadAssetsCore(string assetRootPath)
         {
             _assetRootPath = NormalizeAssetRootPath(assetRootPath);
@@ -925,147 +1465,7 @@ namespace LimitlessSquareEngine
             {
             }
 
-            if (_graphics == null)
-                return;
-
-            string assetsPath = _assetRootPath;
-            if (Directory.Exists(assetsPath))
-            {
-                var options = new JsonSerializerOptions
-                {
-                    Converters = { new Vector4JsonConverter() },
-                    PropertyNameCaseInsensitive = true
-                };
-
-                _sceneFileRegistry.Clear();
-                _sceneFileDisplayName.Clear();
-                _materialFileRegistry.Clear();
-                _generatedMaterialJsonRegistry.Clear();
-                _textureFileRegistry.Clear();
-                _texturePaths.Clear();
-                _uiLayouts.Clear();
-                _shaderVertexFiles.Clear();
-
-                string[] allFiles = Directory.GetFiles(assetsPath, "*.*", SearchOption.AllDirectories);
-                Array.Sort(allFiles, StringComparer.OrdinalIgnoreCase);
-
-                foreach (string file in allFiles)
-                {
-                    string ext = Path.GetExtension(file);
-
-                    if (ext.Equals(".json", StringComparison.OrdinalIgnoreCase))
-                    {
-                        try
-                        {
-                            if (TryValidateSceneFile(file, out string sceneId, out string sceneReason))
-                            {
-                                if (_sceneFileRegistry.TryGetValue(sceneId, out string? oldPath))
-                                {
-                                    Console.WriteLine($"[!] Duplicate scene id '{sceneId}' found. Replacing:");
-                                    Console.WriteLine($"    Old: {oldPath}");
-                                    Console.WriteLine($"    New: {file}");
-                                }
-
-                                _sceneFileRegistry[sceneId] = file;
-                                _sceneFileDisplayName[sceneId] = Path.GetFileName(file);
-
-                                Console.WriteLine($"[i] Registered scene: {sceneId} -> {file}");
-                                continue;
-                            }
-                        }
-                        catch (Exception ex)
-                        {
-                            Console.WriteLine($"[!] Scene scan failed for {file}: {ex.Message}");
-                        }
-
-                        try
-                        {
-                            if (TryValidateMaterialFile(file, out string materialReason))
-                            {
-                                string key = BuildAssetKey(assetsPath, file, removeExtension: true);
-                                _materialFileRegistry[key] = file;
-
-                                Console.WriteLine($"[i] Registered material: {key} -> {file}");
-                                continue;
-                            }
-                        }
-                        catch (Exception ex)
-                        {
-                            Console.WriteLine($"[!] Material scan failed for {file}: {ex.Message}");
-                        }
-
-                        try
-                        {
-                            if (TryLoadCanvasLayoutFile(file, options, out List<CanvasElement>? elements, out string canvasReason)
-                                && elements != null)
-                            {
-                                string key = BuildAssetKey(assetsPath, file, removeExtension: true);
-
-                                if (_uiLayouts.ContainsKey(key))
-                                {
-                                    Console.WriteLine($"[!] Duplicate UI layout key '{key}' found. Replacing with: {file}");
-                                }
-
-                                _uiLayouts[key] = elements;
-                                Console.WriteLine($"[i] Loaded UI layout: {key} -> {file}");
-                                continue;
-                            }
-                        }
-                        catch (Exception ex)
-                        {
-                            Console.WriteLine($"[!] UI layout scan failed for {file}: {ex.Message}");
-                        }
-
-                        Console.WriteLine($"[i] Unknown json asset skipped: {file}");
-                        continue;
-                    }
-
-                    if (ext.Equals(".png", StringComparison.OrdinalIgnoreCase) ||
-                        ext.Equals(".jpg", StringComparison.OrdinalIgnoreCase) ||
-                        ext.Equals(".jpeg", StringComparison.OrdinalIgnoreCase))
-                    {
-                        string key = BuildAssetKey(assetsPath, file, removeExtension: false);
-
-                        _textureFileRegistry[key] = file;
-                        _texturePaths.Add(key);
-
-                        Console.WriteLine($"[i] Registered texture: {key}");
-                        continue;
-                    }
-
-                    if (ext.Equals(".obj", StringComparison.OrdinalIgnoreCase))
-                    {
-                        try
-                        {
-                            _graphics.RegisterObjMeshFromFile(assetsPath, file);
-                        }
-                        catch (Exception ex)
-                        {
-                            Console.WriteLine($"[!] Failed to scan OBJ mesh {file}: {ex.Message}");
-                        }
-
-                        continue;
-                    }
-
-                    if (IsShaderFile(file))
-                    {
-                        string shaderKey = BuildAssetKey(assetsPath, file, removeExtension: false);
-
-                        Console.WriteLine($"[i] Found shader file: {shaderKey}");
-
-                        if (ext.Equals(".vert", StringComparison.OrdinalIgnoreCase))
-                        {
-                            _shaderVertexFiles.Add(file);
-                        }
-
-                        continue;
-                    }
-                }
-
-                Console.WriteLine($"[i] Asset scan completed. Scenes={_sceneFileRegistry.Count}, Materials={_materialFileRegistry.Count}, UI={_uiLayouts.Count}, Textures={_textureFileRegistry.Count}");
-                _graphics.LoadShaders(_shaderVertexFiles, assetsPath);
-                _graphics.ConfigureDefaultMainCameraFog();
-            }
+            ReloadRegisteredAssetsForCurrentTiming();
         }
 
         static EditorRenderedFrame? ConsumeLatestFrameCore()
@@ -1251,6 +1651,7 @@ namespace LimitlessSquareEngine
 
                 // 显示启动Logo
                 ShowStartupLogo();
+                _window?.DoRender();
 
                 // 任务提交函数
                 Func<string, int> submitTaskFunc = (luaCode) =>
@@ -1335,8 +1736,9 @@ namespace LimitlessSquareEngine
                             ClearActiveUILayout();
                         });
                         // 注入纹理路径表
+                        EnsureAllTextureKeysDiscovered();
                         Table textureTable = new Table(instance.LuaScript);
-                        foreach (var path in _texturePaths)
+                        foreach (var path in _texturePaths.OrderBy(p => p, StringComparer.OrdinalIgnoreCase))
                             textureTable.Append(DynValue.NewString(path));
                         instance.LuaScript.Globals["texture_paths"] = textureTable;
 
@@ -1780,148 +2182,7 @@ namespace LimitlessSquareEngine
                 }
 
                 // 扫描资源目录
-                string assetsPath = _assetRootPath;
-                if (Directory.Exists(assetsPath))
-                {
-                    var options = new JsonSerializerOptions
-                    {
-                        Converters = { new Vector4JsonConverter() },
-                        PropertyNameCaseInsensitive = true
-                    };
-
-                    _sceneFileRegistry.Clear();
-                    _sceneFileDisplayName.Clear();
-                    _materialFileRegistry.Clear();
-                    _generatedMaterialJsonRegistry.Clear();
-                    _textureFileRegistry.Clear();
-                    _texturePaths.Clear();
-                    _uiLayouts.Clear();
-                    _shaderVertexFiles.Clear();
-
-                    string[] allFiles = Directory.GetFiles(assetsPath, "*.*", SearchOption.AllDirectories);
-                    Array.Sort(allFiles, StringComparer.OrdinalIgnoreCase);
-
-                    foreach (string file in allFiles)
-                    {
-                        string ext = Path.GetExtension(file);
-
-                        if (ext.Equals(".json", StringComparison.OrdinalIgnoreCase))
-                        {
-                            try
-                            {
-                                if (TryValidateSceneFile(file, out string sceneId, out string sceneReason))
-                                {
-                                    if (_sceneFileRegistry.TryGetValue(sceneId, out string? oldPath))
-                                    {
-                                        Console.WriteLine($"[!] Duplicate scene id '{sceneId}' found. Replacing:");
-                                        Console.WriteLine($"    Old: {oldPath}");
-                                        Console.WriteLine($"    New: {file}");
-                                    }
-
-                                    _sceneFileRegistry[sceneId] = file;
-                                    _sceneFileDisplayName[sceneId] = Path.GetFileName(file);
-
-                                    Console.WriteLine($"[i] Registered scene: {sceneId} -> {file}");
-                                    continue;
-                                }
-                            }
-                            catch (Exception ex)
-                            {
-                                Console.WriteLine($"[!] Scene scan failed for {file}: {ex.Message}");
-                            }
-
-                            try
-                            {
-                                if (TryValidateMaterialFile(file, out string materialReason))
-                                {
-                                    string key = BuildAssetKey(assetsPath, file, removeExtension: true);
-                                    _materialFileRegistry[key] = file;
-
-                                    Console.WriteLine($"[i] Registered material: {key} -> {file}");
-                                    continue;
-                                }
-                            }
-                            catch (Exception ex)
-                            {
-                                Console.WriteLine($"[!] Material scan failed for {file}: {ex.Message}");
-                            }
-
-                            try
-                            {
-                                if (TryLoadCanvasLayoutFile(file, options, out List<CanvasElement>? elements, out string canvasReason)
-                                    && elements != null)
-                                {
-                                    string key = BuildAssetKey(assetsPath, file, removeExtension: true);
-
-                                    if (_uiLayouts.ContainsKey(key))
-                                    {
-                                        Console.WriteLine($"[!] Duplicate UI layout key '{key}' found. Replacing with: {file}");
-                                    }
-
-                                    _uiLayouts[key] = elements;
-                                    Console.WriteLine($"[i] Loaded UI layout: {key} -> {file}");
-                                    continue;
-                                }
-                            }
-                            catch (Exception ex)
-                            {
-                                Console.WriteLine($"[!] UI layout scan failed for {file}: {ex.Message}");
-                            }
-
-                            Console.WriteLine($"[i] Unknown json asset skipped: {file}");
-                            continue;
-                        }
-
-                        if (ext.Equals(".png", StringComparison.OrdinalIgnoreCase) ||
-                            ext.Equals(".jpg", StringComparison.OrdinalIgnoreCase) ||
-                            ext.Equals(".jpeg", StringComparison.OrdinalIgnoreCase))
-                        {
-                            string key = BuildAssetKey(assetsPath, file, removeExtension: false);
-
-                            _textureFileRegistry[key] = file;
-                            _texturePaths.Add(key);
-
-                            Console.WriteLine($"[i] Registered texture: {key}");
-                            continue;
-                        }
-
-                        if (ext.Equals(".obj", StringComparison.OrdinalIgnoreCase))
-                        {
-                            try
-                            {
-                                graphics.RegisterObjMeshFromFile(assetsPath, file);
-                            }
-                            catch (Exception ex)
-                            {
-                                Console.WriteLine($"[!] Failed to scan OBJ mesh {file}: {ex.Message}");
-                            }
-
-                            continue;
-                        }
-
-                        if (IsShaderFile(file))
-                        {
-                            string shaderKey = BuildAssetKey(assetsPath, file, removeExtension: false);
-
-                            Console.WriteLine($"[i] Found shader file: {shaderKey}");
-
-                            if (ext.Equals(".vert", StringComparison.OrdinalIgnoreCase))
-                            {
-                                _shaderVertexFiles.Add(file);
-                            }
-
-                            continue;
-                        }
-                    }
-
-                    Console.WriteLine($"[i] Asset scan completed. Scenes={_sceneFileRegistry.Count}, Materials={_materialFileRegistry.Count}, UI={_uiLayouts.Count}, Textures={_textureFileRegistry.Count}");
-                    graphics.LoadShaders(_shaderVertexFiles, assetsPath);
-                }
-
-                graphics.ConfigureDefaultMainCameraFog();
-
-                // 关闭启动Logo
-                CloseStartupLogo();
+                ReloadRegisteredAssetsForCurrentTiming();
 
                 // 调用所有脚本的init函数
                 foreach (var instance in _luaScriptInstances)
@@ -1938,6 +2199,9 @@ namespace LimitlessSquareEngine
                         Console.WriteLine($"[X] Error in init function of script '{instance.FilePath}': {ex.DecoratedMessage}");
                     }
                 }
+
+                // 关闭启动Logo
+                CloseStartupLogo();
             };
 
             _window.Resize += (size) =>
@@ -2021,6 +2285,19 @@ namespace LimitlessSquareEngine
             }
         }
 
+        static ResourceLoadTiming ParseResourceLoadTimingValue(string value)
+        {
+            string normalized = (value ?? string.Empty).Trim().Trim('"');
+
+            if (normalized.Equals("lazy", StringComparison.OrdinalIgnoreCase))
+                return ResourceLoadTiming.Lazy;
+
+            if (normalized.Equals("preload", StringComparison.OrdinalIgnoreCase))
+                return ResourceLoadTiming.Preload;
+
+            throw new ArgumentException($"Unsupported resource load timing '{value}'.");
+        }
+
         static void ParseLaunchArguments(string[] args)
         {
             foreach (string rawArg in args)
@@ -2059,11 +2336,27 @@ namespace LimitlessSquareEngine
                     continue;
                 }
 
+                if (arg.StartsWith("--resource-load=", StringComparison.OrdinalIgnoreCase))
+                {
+                    string value = arg.Substring("--resource-load=".Length);
+                    _resourceLoadTiming = ParseResourceLoadTimingValue(value);
+                    continue;
+                }
+
                 if (arg.StartsWith("--external-control-file=", StringComparison.OrdinalIgnoreCase))
                 {
                     string value = arg.Substring("--external-control-file=".Length).Trim().Trim('"');
                     if (!string.IsNullOrWhiteSpace(value))
                         _externalControlFilePath = value;
+
+                    continue;
+                }
+
+                if (arg.StartsWith("--external-status-file=", StringComparison.OrdinalIgnoreCase))
+                {
+                    string value = arg.Substring("--external-status-file=".Length).Trim().Trim('"');
+                    if (!string.IsNullOrWhiteSpace(value))
+                        _externalStatusFilePath = value;
 
                     continue;
                 }
@@ -3078,9 +3371,9 @@ namespace LimitlessSquareEngine
             if (string.IsNullOrWhiteSpace(layoutKey))
                 return;
 
-            string key = layoutKey.Trim();
+            string key = NormalizeAssetLookupKey(layoutKey, removeExtension: true);
 
-            if (!_uiLayouts.TryGetValue(key, out var roots) || roots == null)
+            if (!EnsureUILayoutLoaded(key, out var roots) || roots == null)
             {
                 Console.WriteLine($"[!] UI layout not found: {key}");
                 return;

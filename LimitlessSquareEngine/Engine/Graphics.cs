@@ -147,7 +147,6 @@ namespace LimitlessSquareEngine
         private uint _shadowFramebuffer = 0;
         private uint _shadowDepthProgram = 0;
         private uint _directionalShadowCascadeBuffer = 0;
-        private bool _shadowSupportInitialized = false;
         private int _shadowDepthLightViewProjectionLoc = -1;
         private int _shadowDepthModelLoc = -1;
 
@@ -766,7 +765,6 @@ namespace LimitlessSquareEngine
                 _shadowFramebuffer != 0 &&
                 _directionalShadowAtlasAllocatedSize == requiredAtlasSize)
             {
-                _shadowSupportInitialized = true;
                 return;
             }
 
@@ -815,7 +813,6 @@ namespace LimitlessSquareEngine
             _gl.BindFramebuffer(FramebufferTarget.Framebuffer, 0);
 
             _directionalShadowAtlasAllocatedSize = requiredAtlasSize;
-            _shadowSupportInitialized = true;
         }
 
         private readonly struct ActiveUniformInfo
@@ -1939,14 +1936,12 @@ namespace LimitlessSquareEngine
         {
             _directionalShadowCascadeCount = Math.Max(1, count);
             ReleaseDirectionalShadowAtlasStorage();
-            _shadowSupportInitialized = false;
         }
 
         public void SetDirectionalShadowCascadeBaseDistance(float distance)
         {
             _directionalShadowCascadeBaseDistance = MathF.Max(0.0001f, distance);
             ReleaseDirectionalShadowAtlasStorage();
-            _shadowSupportInitialized = false;
         }
 
         public void SetDirectionalShadowCascadeScale(float scale)
@@ -4089,8 +4084,6 @@ namespace LimitlessSquareEngine
             return program;
         }
 
-        private int _fogCompositeReverseZLoc = -1;
-
         private void RenderEquirectTextureToCube(uint equirectTextureId, uint targetCube)
         {
             if (equirectTextureId == 0 || targetCube == 0)
@@ -5327,15 +5320,26 @@ namespace LimitlessSquareEngine
             if (_textures.TryGetValue(path, out TextureInfo existingTexture))
                 return existingTexture;
 
-            if (!File.Exists(path))
+            string fullPath = path;
+
+            if (!File.Exists(fullPath))
             {
-                Console.WriteLine($"[X] The texture file does not exist: {path}");
-                return default;
+                if (!Program.EnsureTextureRegistered(path, out fullPath))
+                {
+                    Console.WriteLine($"[X] The texture file does not exist: {path}");
+                    return default;
+                }
+            }
+
+            if (_textures.TryGetValue(fullPath, out existingTexture))
+            {
+                _textures[path] = existingTexture;
+                return existingTexture;
             }
 
             try
             {
-                using (Image<Rgba32> image = Image.Load<Rgba32>(path))
+                using (Image<Rgba32> image = Image.Load<Rgba32>(fullPath))
                 {
                     uint texture = _gl.GenTexture();
                     _gl.BindTexture(TextureTarget.Texture2D, texture);
@@ -5385,12 +5389,13 @@ namespace LimitlessSquareEngine
                     };
 
                     _textures[path] = info;
+                    _textures[fullPath] = info;
                     return info;
                 }
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"[X] Failed to load texture {path}: {ex.Message}");
+                Console.WriteLine($"[X] Failed to load texture {fullPath}: {ex.Message}");
                 return default;
             }
         }
@@ -5504,62 +5509,48 @@ namespace LimitlessSquareEngine
 
         private uint ResolveShaderProgramOrFallback(string shaderKey)
         {
-            if (!string.IsNullOrWhiteSpace(shaderKey) &&
-                _shaderPrograms.TryGetValue(shaderKey, out uint program))
+            string key = (shaderKey ?? string.Empty).Replace('\\', '/').Trim();
+
+            while (key.StartsWith("/"))
+                key = key[1..];
+
+            if (key.StartsWith("Assets/", StringComparison.OrdinalIgnoreCase))
+                key = key["Assets/".Length..];
+
+            if (key.StartsWith("EditorAssets/", StringComparison.OrdinalIgnoreCase))
+                key = key["EditorAssets/".Length..];
+
+            if (key.EndsWith(".vert", StringComparison.OrdinalIgnoreCase))
+                key = key[..^5];
+            else if (key.EndsWith(".vs", StringComparison.OrdinalIgnoreCase))
+                key = key[..^3];
+
+            if (!string.IsNullOrWhiteSpace(key) &&
+                _shaderPrograms.TryGetValue(key, out uint cachedProgram))
             {
-                return program;
+                return cachedProgram;
+            }
+
+            if (!string.IsNullOrWhiteSpace(key) &&
+                Program.EnsureShaderRegistered(key, out string vertexShaderPath))
+            {
+                try
+                {
+                    if (!_shaderPrograms.ContainsKey(key))
+                    {
+                        LoadShaders(new List<string> { vertexShaderPath }, Program.AssetRootPathForShaderLoading);
+                    }
+
+                    if (_shaderPrograms.TryGetValue(key, out uint loadedProgram))
+                        return loadedProgram;
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[!] Failed to load shader '{shaderKey}': {ex.Message}");
+                }
             }
 
             return GetFallbackProgram();
-        }
-
-        private bool TryBuildMaterialDataFromJson(string materialKey, string json, out MaterialData? material)
-        {
-            material = null;
-
-            try
-            {
-                using JsonDocument doc = JsonDocument.Parse(json);
-
-                JsonElement root = doc.RootElement;
-                if (root.ValueKind != JsonValueKind.Object)
-                    return false;
-
-                string shaderKey = "";
-                if (root.TryGetProperty("shader", out JsonElement shaderElement) &&
-                    shaderElement.ValueKind == JsonValueKind.String)
-                {
-                    shaderKey = shaderElement.GetString() ?? "";
-                }
-
-                JsonElement parameters = _emptyJsonObject;
-                if (root.TryGetProperty("parameters", out JsonElement parametersElement) &&
-                    parametersElement.ValueKind == JsonValueKind.Object)
-                {
-                    parameters = parametersElement.Clone();
-                }
-
-                Vector2 textureUV = ReadMaterialTextureUV(parameters);
-                MaterialTextureWrapMode textureWrap = ReadMaterialTextureWrap(parameters);
-                RenderCullMode cullMode = ReadMaterialCullMode(parameters, RenderCullMode.Front);
-
-                material = new MaterialData
-                {
-                    Id = materialKey,
-                    Program = ResolveShaderProgramOrFallback(shaderKey),
-                    Parameters = parameters,
-                    TextureUV = textureUV,
-                    TextureWrap = textureWrap,
-                    CullMode = cullMode
-                };
-
-                return true;
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"[!] Failed to parse material '{materialKey}': {ex.Message}");
-                return false;
-            }
         }
 
         private bool TryLoadMaterial(string materialKey, out MaterialData? material)
@@ -5574,29 +5565,71 @@ namespace LimitlessSquareEngine
                 return true;
             }
 
-            if (Program._generatedMaterialJsonRegistry.TryGetValue(key, out var generatedJson))
+            if (Program._generatedMaterialJsonRegistry.TryGetValue(key, out string? generatedJson))
             {
-                if (TryBuildMaterialDataFromJson(key, generatedJson, out material))
+                try
                 {
+                    using JsonDocument doc = JsonDocument.Parse(generatedJson);
+                    JsonElement root = doc.RootElement;
+
+                    string shaderKey = root.TryGetProperty("shader", out JsonElement shaderElement) &&
+                                       shaderElement.ValueKind == JsonValueKind.String
+                        ? shaderElement.GetString() ?? ""
+                        : "";
+
+                    JsonElement parameters = root.TryGetProperty("parameters", out JsonElement paramsElement) &&
+                                             paramsElement.ValueKind == JsonValueKind.Object
+                        ? paramsElement.Clone()
+                        : _emptyJsonObject;
+
+                    material = new MaterialData
+                    {
+                        Id = key,
+                        Program = ResolveShaderProgramOrFallback(shaderKey),
+                        Parameters = parameters,
+                        TextureUV = ReadMaterialTextureUV(parameters),
+                        TextureWrap = ReadMaterialTextureWrap(parameters),
+                        CullMode = ReadMaterialCullMode(parameters, RenderCullMode.Front)
+                    };
+
                     _materialCache[key] = material;
                     return true;
                 }
-
-                return false;
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[!] Failed to load generated material '{materialKey}': {ex.Message}");
+                    return false;
+                }
             }
 
-            if (!Program._materialFileRegistry.TryGetValue(key, out var filePath))
-                return false;
-
-            if (!File.Exists(filePath))
+            if (!Program.EnsureMaterialRegistered(key, out string filePath))
                 return false;
 
             try
             {
                 string json = File.ReadAllText(filePath);
+                using JsonDocument doc = JsonDocument.Parse(json);
+                JsonElement root = doc.RootElement;
 
-                if (!TryBuildMaterialDataFromJson(key, json, out material))
-                    return false;
+                string shaderKey = root.TryGetProperty("shader", out JsonElement shaderElement) &&
+                                   shaderElement.ValueKind == JsonValueKind.String
+                    ? shaderElement.GetString() ?? ""
+                    : "";
+
+                JsonElement parameters = root.TryGetProperty("parameters", out JsonElement paramsElement) &&
+                                         paramsElement.ValueKind == JsonValueKind.Object
+                    ? paramsElement.Clone()
+                    : _emptyJsonObject;
+
+                material = new MaterialData
+                {
+                    Id = key,
+                    Program = ResolveShaderProgramOrFallback(shaderKey),
+                    Parameters = parameters,
+                    TextureUV = ReadMaterialTextureUV(parameters),
+                    TextureWrap = ReadMaterialTextureWrap(parameters),
+                    CullMode = ReadMaterialCullMode(parameters, RenderCullMode.Front)
+                };
 
                 _materialCache[key] = material;
                 return true;
@@ -6468,28 +6501,7 @@ namespace LimitlessSquareEngine
             if (string.IsNullOrWhiteSpace(rawPath))
                 return false;
 
-            string key = rawPath.Replace('\\', '/').Trim();
-
-            while (key.StartsWith("/"))
-                key = key[1..];
-
-            if (key.StartsWith("Assets/", StringComparison.OrdinalIgnoreCase))
-                key = key["Assets/".Length..];
-
-            if (Program._textureFileRegistry.TryGetValue(key, out fullPath))
-                return true;
-
-            string assetsRoot = Path.Combine(AppContext.BaseDirectory, "Assets");
-            string candidate = Path.GetFullPath(
-                Path.Combine(assetsRoot, key.Replace('/', Path.DirectorySeparatorChar)));
-
-            if (File.Exists(candidate))
-            {
-                fullPath = candidate;
-                return true;
-            }
-
-            return false;
+            return Program.EnsureTextureRegistered(rawPath, out fullPath);
         }
 
         private bool TryReadNumericArray(JsonElement element, out double[] values)
@@ -7249,6 +7261,11 @@ namespace LimitlessSquareEngine
                     continue;
 
                 if (!_meshes.TryGetValue(obj.Mesh, out MeshData mesh))
+                {
+                    Program.EnsureObjMeshRegistered(obj.Mesh, this);
+                }
+
+                if (!_meshes.TryGetValue(obj.Mesh, out mesh))
                 {
                     Console.WriteLine($"[!] Mesh '{obj.Mesh}' not found for object '{obj.ObjectId}'.");
                     continue;
@@ -8251,7 +8268,6 @@ namespace LimitlessSquareEngine
 
             _cameraFogSettings.Clear();
 
-            _shadowSupportInitialized = false;
             _directionalShadowAtlasAllocatedSize = 0;
             _directionalShadowBatchCache.Clear();
         }

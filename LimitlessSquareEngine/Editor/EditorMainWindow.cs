@@ -105,9 +105,11 @@ namespace LimitlessSquareEngine.Editor
         private nint _playbackWindowNativeHandle;
         private Process? _playbackProcess;
         private string? _playbackControlFilePath;
+        private string? _playbackStatusFilePath;
         private WindowState _playbackWindowState = WindowState.Normal;
         private DateTime _playbackSuppressFocusUntilUtc = DateTime.MinValue;
         private DispatcherTimer? _playbackDeferredFocusTimer;
+        private DispatcherTimer? _playbackTitlePollTimer;
 
         private const string EditorPreviewSceneId = "__editor_preview_scene__";
         private const string EditorPreviewDirectoryName = "EditorPreview";
@@ -441,7 +443,7 @@ namespace LimitlessSquareEngine.Editor
 
             _playbackWindow = new Window
             {
-                Title = "Game",
+                Title = BuildPlaybackWindowTitle(960, 540, 0),
                 Width = 960,
                 Height = 540,
                 MinWidth = 320,
@@ -456,6 +458,10 @@ namespace LimitlessSquareEngine.Editor
             _playbackWindow.Opened += (_, _) =>
             {
                 _playbackWindowState = _playbackWindow?.WindowState ?? WindowState.Normal;
+
+                PixelSize size = GetPlaybackWindowPixelSize();
+                if (size.Width > 0 && size.Height > 0)
+                    UpdatePlaybackWindowTitle(size.Width, size.Height, 0);
 
                 if (!TryGetPlaybackWindowNativeHandle(out nint handle))
                     return;
@@ -526,7 +532,7 @@ namespace LimitlessSquareEngine.Editor
 
             _playbackWindow.SizeChanged += (_, _) =>
             {
-                if (!_isPlaybackRunning || _playbackWindow == null)
+                if (_playbackWindow == null)
                     return;
 
                 if (_playbackWindow.WindowState == WindowState.Minimized)
@@ -534,6 +540,11 @@ namespace LimitlessSquareEngine.Editor
 
                 PixelSize size = GetPlaybackWindowPixelSize();
                 if (size.Width <= 0 || size.Height <= 0)
+                    return;
+
+                UpdatePlaybackWindowTitle(size.Width, size.Height, 0);
+
+                if (!_isPlaybackRunning)
                     return;
 
                 QueuePlaybackCommand($"resize {size.Width} {size.Height}");
@@ -545,6 +556,7 @@ namespace LimitlessSquareEngine.Editor
             _playbackWindow.Closed += (_, _) =>
             {
                 _playbackDeferredFocusTimer?.Stop();
+                StopPlaybackTitlePolling();
 
                 if (_isPlaybackRunning)
                     StopPlayback();
@@ -614,6 +626,115 @@ namespace LimitlessSquareEngine.Editor
             int height = Math.Max(1, (int)Math.Round(clientSize.Height * scaling));
 
             return new PixelSize(width, height);
+        }
+
+        private string GetPlaybackProjectFolderName()
+        {
+            string rootPath = string.IsNullOrWhiteSpace(_projectRootPath)
+                ? AppContext.BaseDirectory
+                : _projectRootPath;
+
+            string trimmed = rootPath.TrimEnd(
+                Path.DirectorySeparatorChar,
+                Path.AltDirectorySeparatorChar);
+
+            string name = Path.GetFileName(trimmed);
+
+            if (!string.IsNullOrWhiteSpace(name))
+                return name;
+
+            return trimmed;
+        }
+
+        private string BuildPlaybackWindowTitle(int width, int height, int fps)
+        {
+            string projectFolderName = GetPlaybackProjectFolderName();
+            return $"{projectFolderName}  <>  {width}x{height}  |  FPS {fps}";
+        }
+
+        private void UpdatePlaybackWindowTitle(int width, int height, int fps)
+        {
+            if (_playbackWindow == null)
+                return;
+
+            _playbackWindow.Title = BuildPlaybackWindowTitle(width, height, fps);
+        }
+
+        private bool TryReadPlaybackStatus(out int width, out int height, out int fps)
+        {
+            width = 0;
+            height = 0;
+            fps = 0;
+
+            if (string.IsNullOrWhiteSpace(_playbackStatusFilePath))
+                return false;
+
+            if (!File.Exists(_playbackStatusFilePath))
+                return false;
+
+            string text;
+
+            try
+            {
+                text = File.ReadAllText(_playbackStatusFilePath).Trim();
+            }
+            catch
+            {
+                return false;
+            }
+
+            if (string.IsNullOrWhiteSpace(text))
+                return false;
+
+            string[] parts = text.Split('|', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            if (parts.Length != 3)
+                return false;
+
+            if (!int.TryParse(parts[0], out width))
+                return false;
+
+            if (!int.TryParse(parts[1], out height))
+                return false;
+
+            if (!int.TryParse(parts[2], out fps))
+                return false;
+
+            if (width <= 0 || height <= 0 || fps < 0)
+                return false;
+
+            return true;
+        }
+
+        private void StartPlaybackTitlePolling()
+        {
+            _playbackTitlePollTimer ??= new DispatcherTimer();
+
+            _playbackTitlePollTimer.Stop();
+            _playbackTitlePollTimer.Interval = TimeSpan.FromMilliseconds(200);
+            _playbackTitlePollTimer.Tick -= OnPlaybackTitlePollTimerTick;
+            _playbackTitlePollTimer.Tick += OnPlaybackTitlePollTimerTick;
+            _playbackTitlePollTimer.Start();
+        }
+
+        private void StopPlaybackTitlePolling()
+        {
+            _playbackTitlePollTimer?.Stop();
+        }
+
+        private void OnPlaybackTitlePollTimerTick(object? sender, EventArgs e)
+        {
+            if (!_isPlaybackRunning || _playbackWindow == null)
+                return;
+
+            if (TryReadPlaybackStatus(out int width, out int height, out int fps))
+            {
+                UpdatePlaybackWindowTitle(width, height, fps);
+                return;
+            }
+
+            PixelSize size = GetPlaybackWindowPixelSize();
+            if (size.Width > 0 && size.Height > 0)
+                UpdatePlaybackWindowTitle(size.Width, size.Height, 0);
         }
 
         private void SuppressPlaybackFocusFor(int milliseconds)
@@ -733,6 +854,12 @@ namespace LimitlessSquareEngine.Editor
             return Path.Combine(Path.GetTempPath(), fileName);
         }
 
+        private string CreatePlaybackStatusFilePath()
+        {
+            string fileName = "lse-playback-status-" + Guid.NewGuid().ToString("N") + ".txt";
+            return Path.Combine(Path.GetTempPath(), fileName);
+        }
+
         private void QueuePlaybackCommand(string command)
         {
             if (string.IsNullOrWhiteSpace(_playbackControlFilePath))
@@ -761,6 +888,9 @@ namespace LimitlessSquareEngine.Editor
             if (string.IsNullOrWhiteSpace(_playbackControlFilePath))
                 throw new InvalidOperationException("Playback control file path is missing.");
 
+            if (string.IsNullOrWhiteSpace(_playbackStatusFilePath))
+                throw new InvalidOperationException("Playback status file path is missing.");
+
             PixelSize size = GetPlaybackWindowPixelSize();
 
             string arguments = EngineLaunchArgumentBuilder.BuildGameModeArguments(_projectRootPath ?? AppContext.BaseDirectory);
@@ -768,6 +898,7 @@ namespace LimitlessSquareEngine.Editor
             arguments += $" --external-host-width={size.Width}";
             arguments += $" --external-host-height={size.Height}";
             arguments += $" --external-control-file=\"{_playbackControlFilePath}\"";
+            arguments += $" --external-status-file=\"{_playbackStatusFilePath}\"";
 
             if (_playbackEmbeddingMode == EditorEmbeddingMode.CocoaViewHost)
             {
@@ -1965,7 +2096,22 @@ namespace LimitlessSquareEngine.Editor
                 return;
 
             _playbackControlFilePath = CreatePlaybackControlFilePath();
+            _playbackStatusFilePath = CreatePlaybackStatusFilePath();
             _isPlaybackPaused = false;
+
+            try
+            {
+                File.WriteAllText(_playbackStatusFilePath, string.Empty);
+            }
+            catch
+            {
+            }
+
+            PixelSize startupSize = GetPlaybackWindowPixelSize();
+            if (startupSize.Width > 0 && startupSize.Height > 0)
+                UpdatePlaybackWindowTitle(startupSize.Width, startupSize.Height, 0);
+
+            StartPlaybackTitlePolling();
 
             Dispatcher.UIThread.Post(() =>
             {
@@ -2034,6 +2180,8 @@ namespace LimitlessSquareEngine.Editor
 
                             _playbackProcess = null;
 
+                            StopPlaybackTitlePolling();
+
                             if (!string.IsNullOrWhiteSpace(_playbackControlFilePath))
                             {
                                 try
@@ -2045,6 +2193,19 @@ namespace LimitlessSquareEngine.Editor
                                 }
 
                                 _playbackControlFilePath = null;
+                            }
+
+                            if (!string.IsNullOrWhiteSpace(_playbackStatusFilePath))
+                            {
+                                try
+                                {
+                                    File.Delete(_playbackStatusFilePath);
+                                }
+                                catch
+                                {
+                                }
+
+                                _playbackStatusFilePath = null;
                             }
 
                             UpdatePlaybackButtonsVisualState();
@@ -2061,6 +2222,7 @@ namespace LimitlessSquareEngine.Editor
         {
             _isPlaybackRunning = false;
             _isPlaybackPaused = false;
+            StopPlaybackTitlePolling();
 
             QueuePlaybackCommand("stop");
 
@@ -2097,6 +2259,19 @@ namespace LimitlessSquareEngine.Editor
                 }
 
                 _playbackControlFilePath = null;
+            }
+
+            if (!string.IsNullOrWhiteSpace(_playbackStatusFilePath))
+            {
+                try
+                {
+                    File.Delete(_playbackStatusFilePath);
+                }
+                catch
+                {
+                }
+
+                _playbackStatusFilePath = null;
             }
 
             if (_playbackWindow != null)
@@ -2564,7 +2739,9 @@ namespace LimitlessSquareEngine.Editor
                     return true;
 
                 BeginSceneParameterChange();
+                #pragma warning disable CS8601
                 obj.Data = newValue;
+                #pragma warning restore CS8601
                 return PersistSceneObjectChanges(obj, false);
             }));
 
@@ -2757,31 +2934,6 @@ namespace LimitlessSquareEngine.Editor
             }
         }
 
-        private static (int Start, int End) GetTextBoxSelectionRange(TextBox textBox)
-        {
-            string text = textBox.Text ?? string.Empty;
-            int length = text.Length;
-
-            int start = Math.Clamp(Math.Min(textBox.SelectionStart, textBox.SelectionEnd), 0, length);
-            int end = Math.Clamp(Math.Max(textBox.SelectionStart, textBox.SelectionEnd), 0, length);
-
-            return (start, end);
-        }
-
-        private static void ReplaceTextBoxSelection(TextBox textBox, string replacement)
-        {
-            string text = textBox.Text ?? string.Empty;
-            (int start, int end) = GetTextBoxSelectionRange(textBox);
-
-            string newText = text.Substring(0, start) + replacement + text.Substring(end);
-            int caretIndex = start + replacement.Length;
-
-            textBox.Text = newText;
-            textBox.SelectionStart = caretIndex;
-            textBox.SelectionEnd = caretIndex;
-            textBox.CaretIndex = caretIndex;
-        }
-
         private Control CreateInlineBoolToggle(
             string text,
             Func<bool> getter,
@@ -2811,17 +2963,11 @@ namespace LimitlessSquareEngine.Editor
                 button.Foreground = Brushes.White;
             }
 
-            button.Checked += (_, _) =>
+            button.IsCheckedChanged += (_, _) =>
             {
-                if (!apply(true))
-                    button.IsChecked = getter();
+                bool newValue = button.IsChecked == true;
 
-                UpdateVisual();
-            };
-
-            button.Unchecked += (_, _) =>
-            {
-                if (!apply(false))
+                if (!apply(newValue))
                     button.IsChecked = getter();
 
                 UpdateVisual();
@@ -2950,10 +3096,10 @@ namespace LimitlessSquareEngine.Editor
         }
 
         private Control CreateTextPropertyEditor(
-    string label,
-    Func<string> getter,
-    Func<string, bool> apply,
-    bool isReadOnly = false)
+            string label,
+            Func<string> getter,
+            Func<string, bool> apply,
+            bool isReadOnly = false)
         {
             TextBox textBox = CreateInspectorTextBox(getter());
             textBox.IsReadOnly = isReadOnly;
@@ -3362,7 +3508,6 @@ namespace LimitlessSquareEngine.Editor
             string defaultRootDirectoryPath = Path.GetFullPath(
                 Path.Combine(AppContext.BaseDirectory, "."));
 
-            bool allowClose = false;
             bool isBusy = false;
 
             Window dialog = new Window
@@ -3601,7 +3746,6 @@ namespace LimitlessSquareEngine.Editor
                     TryOpenFolderWithSystem(projectDirectoryPath);
                     ShowProjectFolderTree(projectDirectoryPath);
 
-                    allowClose = true;
                     dialog.Close(new CreateProjectDialogResult
                     {
                         Confirmed = true,
@@ -3740,8 +3884,6 @@ namespace LimitlessSquareEngine.Editor
 
         private async Task ShowSimpleWarningDialogAsync(string title, string message)
         {
-            bool allowClose = false;
-
             Window dialog = new Window
             {
                 Title = title,
@@ -4485,32 +4627,18 @@ namespace LimitlessSquareEngine.Editor
             return normalized.IndexOfAny(Path.GetInvalidFileNameChars()) < 0;
         }
 
-        private bool HasSiblingResourceWithSameName(string sourcePath, string newName)
-        {
-            string? parentPath = Path.GetDirectoryName(sourcePath);
-            if (string.IsNullOrWhiteSpace(parentPath))
-                return true;
-
-            string targetPath = Path.Combine(parentPath, newName);
-
-            if (PathsEqual(sourcePath, targetPath))
-                return false;
-
-            return Directory.Exists(targetPath) || File.Exists(targetPath);
-        }
-
-        private async Task<bool> TryRenameResourceAsync(ResourceItemState state, string newName)
+        private Task<bool> TryRenameResourceAsync(ResourceItemState state, string newName)
         {
             string normalized = (newName ?? string.Empty).Trim();
 
             if (!IsValidResourceName(normalized))
-                return false;
+                return Task.FromResult(false);
 
             try
             {
                 string? parentPath = Path.GetDirectoryName(state.Path);
                 if (string.IsNullOrWhiteSpace(parentPath))
-                    return false;
+                    return Task.FromResult(false);
 
                 string targetPath;
 
@@ -4526,7 +4654,7 @@ namespace LimitlessSquareEngine.Editor
 
                 if (!PathsEqual(state.Path, targetPath) &&
                     (Directory.Exists(targetPath) || File.Exists(targetPath)))
-                    return false;
+                    return Task.FromResult(false);
 
                 if (state.IsDirectory)
                     Directory.Move(state.Path, targetPath);
@@ -4538,15 +4666,15 @@ namespace LimitlessSquareEngine.Editor
 
                 TrySelectProjectTreePath(targetPath);
                 ShowResourceDetailsInViewer(targetPath, state.IsDirectory);
-                return true;
+                return Task.FromResult(true);
             }
             catch
             {
-                return false;
+                return Task.FromResult(false);
             }
         }
 
-        private async Task BeginRenameResourceAsync(ResourceItemState state)
+        private Task BeginRenameResourceAsync(ResourceItemState state)
         {
             state.NameTextBlock.IsVisible = false;
             state.NameTextBox.Text = state.IsDirectory
@@ -4607,6 +4735,7 @@ namespace LimitlessSquareEngine.Editor
 
             state.NameTextBox.LostFocus += OnLostFocus;
             state.NameTextBox.KeyDown += OnKeyDown;
+            return Task.CompletedTask;
         }
 
         private async Task<bool> ShowDeleteResourceDialogAsync(ResourceItemState state)
@@ -4782,11 +4911,10 @@ namespace LimitlessSquareEngine.Editor
             }
         }
 
-        private async Task CreateNewResourceAsync(string kind)
+        private Task CreateNewResourceAsync(string kind)
         {
             if (string.IsNullOrWhiteSpace(_currentResourceDirectoryPath))
-                return;
-
+                return Task.CompletedTask;
             string directoryPath = _currentResourceDirectoryPath;
             string baseName;
             string fileName;
@@ -4802,8 +4930,7 @@ namespace LimitlessSquareEngine.Editor
                     Directory.CreateDirectory(createdPath);
                     ShowResourceDirectory(directoryPath);
                     BeginRenameResourceByPath(createdPath);
-                    return;
-
+                    return Task.CompletedTask;
                 case "Lua脚本":
                     baseName = "NewLuaScript";
                     fileName = GetUniqueResourceName(directoryPath, baseName, ".lua");
@@ -4885,11 +5012,12 @@ void main()
                     break;
 
                 default:
-                    return;
+                    return Task.CompletedTask;
             }
 
             ShowResourceDirectory(directoryPath);
             BeginRenameResourceByPath(createdPath);
+            return Task.CompletedTask;
         }
 
         private string GetUniqueResourceName(string directoryPath, string baseName, string? extension)

@@ -386,6 +386,11 @@ namespace LimitlessSquareEngine
                 return false;
 
             if (!_meshes.TryGetValue(meshId, out MeshData mesh))
+            {
+                Program.EnsureObjMeshRegistered(meshId, this);
+            }
+
+            if (!_meshes.TryGetValue(meshId, out mesh))
                 return false;
 
             foreach (MeshSurfaceData surface in mesh.Surfaces)
