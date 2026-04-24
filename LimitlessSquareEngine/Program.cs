@@ -1918,6 +1918,111 @@ namespace LimitlessSquareEngine
                             Scene.RebuildCameraQueue(sceneId);
                         });
 
+                        // 注入相机渲染模式设置函数
+                        instance.LuaScript.Globals["set_camera_render_mode"] =
+                            (Action<string, string, int>)((sceneId, objectId, renderMode) =>
+                            {
+                                Scene.SetCameraRenderMode(sceneId, objectId, renderMode);
+                            });
+
+                        // 注入相机视角或正交尺寸设置函数
+                        instance.LuaScript.Globals["set_camera_fov_or_size"] =
+                            (Action<string, string, double>)((sceneId, objectId, fovOrSize) =>
+                            {
+                                Scene.SetCameraFovOrSize(sceneId, objectId, fovOrSize);
+                            });
+
+                        // 注入相机渲染面偏移设置函数
+                        instance.LuaScript.Globals["set_camera_render_plane_offset"] =
+                            (Action<string, string, double, double>)((sceneId, objectId, x, y) =>
+                            {
+                                Scene.SetCameraRenderPlaneOffset(sceneId, objectId, x, y);
+                            });
+
+                        // 注入相机近裁剪面设置函数
+                        instance.LuaScript.Globals["set_camera_near_clip"] =
+                            (Action<string, string, double>)((sceneId, objectId, nearClip) =>
+                            {
+                                Scene.SetCameraNearClip(sceneId, objectId, nearClip);
+                            });
+
+                        // 注入相机远裁剪面设置函数
+                        instance.LuaScript.Globals["set_camera_far_clip"] =
+                            (Action<string, string, double>)((sceneId, objectId, farClip) =>
+                            {
+                                Scene.SetCameraFarClip(sceneId, objectId, farClip);
+                            });
+
+                        // 注入相机裁剪范围设置函数
+                        instance.LuaScript.Globals["set_camera_clip_range"] =
+                            (Action<string, string, double, double>)((sceneId, objectId, nearClip, farClip) =>
+                            {
+                                Scene.SetCameraClipRange(sceneId, objectId, nearClip, farClip);
+                            });
+
+                        // 注入相机投影类型设置函数
+                        instance.LuaScript.Globals["set_camera_projection_type"] =
+                            (Action<string, string, int>)((sceneId, objectId, projectionType) =>
+                            {
+                                Scene.SetCameraProjectionType(sceneId, objectId, projectionType);
+                            });
+
+                        // 注入主相机标记设置函数
+                        instance.LuaScript.Globals["set_camera_main"] =
+                            (Action<string, string, bool>)((sceneId, objectId, isMainCamera) =>
+                            {
+                                Scene.SetCameraMain(sceneId, objectId, isMainCamera);
+                            });
+
+                        // 注入相机后处理总开关设置函数
+                        instance.LuaScript.Globals["set_camera_post_process_enabled"] =
+                            (Action<string, string, bool>)((sceneId, objectId, enabled) =>
+                            {
+                                Scene.SetCameraPostProcessEnabled(sceneId, objectId, enabled);
+                            });
+
+                        // 注入相机亮度后处理设置函数
+                        instance.LuaScript.Globals["set_camera_post_brightness"] =
+                            (Action<string, string, bool, double>)((sceneId, objectId, enabled, value) =>
+                            {
+                                Scene.SetCameraPostBrightness(sceneId, objectId, enabled, value);
+                            });
+
+                        // 注入相机对比度后处理设置函数
+                        instance.LuaScript.Globals["set_camera_post_contrast"] =
+                            (Action<string, string, bool, double>)((sceneId, objectId, enabled, value) =>
+                            {
+                                Scene.SetCameraPostContrast(sceneId, objectId, enabled, value);
+                            });
+
+                        // 注入相机饱和度后处理设置函数
+                        instance.LuaScript.Globals["set_camera_post_saturation"] =
+                            (Action<string, string, bool, double>)((sceneId, objectId, enabled, value) =>
+                            {
+                                Scene.SetCameraPostSaturation(sceneId, objectId, enabled, value);
+                            });
+
+                        // 注入相机色相后处理设置函数
+                        instance.LuaScript.Globals["set_camera_post_hue"] =
+                            (Action<string, string, bool, double>)((sceneId, objectId, enabled, degrees) =>
+                            {
+                                Scene.SetCameraPostHue(sceneId, objectId, enabled, degrees);
+                            });
+
+                        // 注入相机色温后处理设置函数
+                        instance.LuaScript.Globals["set_camera_post_temperature"] =
+                            (Action<string, string, bool, double>)((sceneId, objectId, enabled, value) =>
+                            {
+                                Scene.SetCameraPostTemperature(sceneId, objectId, enabled, value);
+                            });
+
+                        // 注入相机泛光后处理设置函数
+                        instance.LuaScript.Globals["set_camera_bloom"] =
+                            (Action<string, string, bool, double, double, double, int, int>)((sceneId, objectId, enabled, threshold, softKnee, intensity, iterations, downsample) =>
+                            {
+                                Scene.SetCameraBloom(sceneId, objectId, enabled, threshold, softKnee, intensity, iterations, downsample);
+                            });
+
                         // 注入天空盒设置函数
                         instance.LuaScript.Globals["set_skybox"] = (Action<string, string>)((shaderName, parametersJson) =>
                         {

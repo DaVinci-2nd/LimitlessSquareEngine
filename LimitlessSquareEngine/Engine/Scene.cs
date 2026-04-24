@@ -157,6 +157,12 @@ namespace LimitlessSquareEngine.Engine
         }
     }
 
+    internal sealed class CameraRenderPlaneOffsetSettings
+    {
+        public double X { get; set; } = 0.0;
+        public double Y { get; set; } = 0.0;
+    }
+
     internal sealed class CameraScalarPostProcessSettings
     {
         public bool Enabled { get; set; } = false;
@@ -185,6 +191,11 @@ namespace LimitlessSquareEngine.Engine
         public int Downsample { get; set; } = 2;
     }
 
+    internal sealed class CameraSmaaPostProcessSettings
+    {
+        public bool Enabled { get; set; } = true;
+    }
+
     internal sealed class CameraPostProcessSettings
     {
         public bool Enabled { get; set; } = false;
@@ -195,6 +206,7 @@ namespace LimitlessSquareEngine.Engine
         public CameraHuePostProcessSettings Hue { get; set; } = new();
         public CameraTemperaturePostProcessSettings Temperature { get; set; } = new();
         public CameraBloomPostProcessSettings Bloom { get; set; } = new();
+        public CameraSmaaPostProcessSettings Smaa { get; set; } = new();
     }
 
     /// <summary>
@@ -204,6 +216,7 @@ namespace LimitlessSquareEngine.Engine
     {
         public int RenderMode { get; set; } = 0;
         public double FovOrSize { get; set; } = 75.0;
+        public CameraRenderPlaneOffsetSettings RenderPlaneOffset { get; set; } = new();
         public double NearClip { get; set; } = 0.01;
         public double FarClip { get; set; } = 1000.0;
         public int ProjectionType { get; set; } = 0;
@@ -1204,22 +1217,15 @@ namespace LimitlessSquareEngine.Engine
                 if (!string.Equals(obj.Type, "Camera", StringComparison.Ordinal))
                     continue;
 
-                try
-                {
-                    CameraRenderSettings settings = ParseCameraSettings(obj.Data, obj.Id);
+                CameraRenderSettings settings = ParseCameraSettings(obj.Data, obj.Id);
 
-                    queue.Add(new SceneCameraQueueItem
-                    {
-                        SceneId = scene.SceneId,
-                        ObjectId = obj.Id,
-                        Settings = settings,
-                        SubmissionOrder = order++
-                    });
-                }
-                catch (Exception ex)
+                queue.Add(new SceneCameraQueueItem
                 {
-                    Console.WriteLine($"[!] Camera '{obj.Id}' skipped while rebuilding queue: {ex.Message}");
-                }
+                    SceneId = scene.SceneId,
+                    ObjectId = obj.Id,
+                    Settings = settings,
+                    SubmissionOrder = order++
+                });
             }
 
             _cameraQueues[sceneId] = queue;
@@ -1326,6 +1332,259 @@ namespace LimitlessSquareEngine.Engine
             }
         }
 
+        private static bool TryGetCameraNode(string sceneId, string objectId, out SceneRuntimeData runtime, out SceneRuntimeNode node)
+        {
+            if (!TryGetNode(sceneId, objectId, out runtime, out node))
+                return false;
+
+            if (!string.Equals(node.Source.Type, "Camera", StringComparison.Ordinal))
+            {
+                Console.WriteLine($"[!] Camera setting skipped: object '{objectId}' is not a camera. scene='{sceneId}'");
+                return false;
+            }
+
+            return true;
+        }
+
+        private static CameraRenderSettings ReadCameraSettingsForMutation(SceneRuntimeNode node)
+        {
+            return ParseCameraSettings(node.Source.Data, node.Source.Id);
+        }
+
+        private static void CommitCameraSettings(SceneRuntimeData runtime, SceneRuntimeNode node, CameraRenderSettings settings)
+        {
+            if (settings.FovOrSize <= 0.0)
+                throw new InvalidOperationException($"[X] Camera '{node.Source.Id}' fovOrSize must be > 0.");
+
+            if (settings.NearClip <= 0.0)
+                throw new InvalidOperationException($"[X] Camera '{node.Source.Id}' nearClip must be > 0.");
+
+            if (settings.FarClip <= 0.0)
+                throw new InvalidOperationException($"[X] Camera '{node.Source.Id}' farClip must be > 0.");
+
+            if (settings.FarClip <= settings.NearClip)
+                throw new InvalidOperationException($"[X] Camera '{node.Source.Id}' farClip must be greater than nearClip.");
+
+            node.Source.Data = JsonSerializer.Serialize(settings, _jsonOptions);
+            runtime.CameraCacheDirty = true;
+        }
+
+        public static void SetCameraRenderMode(string sceneId, string objectId, int renderMode)
+        {
+            if (renderMode != 0 && renderMode != 1)
+                throw new ArgumentException("[X] Camera renderMode must be 0 or 1.", nameof(renderMode));
+
+            if (!TryGetCameraNode(sceneId, objectId, out var runtime, out var node))
+                return;
+
+            CameraRenderSettings settings = ReadCameraSettingsForMutation(node);
+            settings.RenderMode = renderMode;
+            CommitCameraSettings(runtime, node, settings);
+        }
+
+        public static void SetCameraFovOrSize(string sceneId, string objectId, double fovOrSize)
+        {
+            if (fovOrSize <= 0.0)
+                throw new ArgumentException("[X] Camera fovOrSize must be > 0.", nameof(fovOrSize));
+
+            if (!TryGetCameraNode(sceneId, objectId, out var runtime, out var node))
+                return;
+
+            CameraRenderSettings settings = ReadCameraSettingsForMutation(node);
+            settings.FovOrSize = fovOrSize;
+            CommitCameraSettings(runtime, node, settings);
+        }
+
+        public static void SetCameraRenderPlaneOffset(string sceneId, string objectId, double x, double y)
+        {
+            if (!TryGetCameraNode(sceneId, objectId, out var runtime, out var node))
+                return;
+
+            CameraRenderSettings settings = ReadCameraSettingsForMutation(node);
+            settings.RenderPlaneOffset.X = x;
+            settings.RenderPlaneOffset.Y = y;
+            CommitCameraSettings(runtime, node, settings);
+        }
+
+        public static void SetCameraNearClip(string sceneId, string objectId, double nearClip)
+        {
+            if (nearClip <= 0.0)
+                throw new ArgumentException("[X] Camera nearClip must be > 0.", nameof(nearClip));
+
+            if (!TryGetCameraNode(sceneId, objectId, out var runtime, out var node))
+                return;
+
+            CameraRenderSettings settings = ReadCameraSettingsForMutation(node);
+            settings.NearClip = nearClip;
+            CommitCameraSettings(runtime, node, settings);
+        }
+
+        public static void SetCameraFarClip(string sceneId, string objectId, double farClip)
+        {
+            if (farClip <= 0.0)
+                throw new ArgumentException("[X] Camera farClip must be > 0.", nameof(farClip));
+
+            if (!TryGetCameraNode(sceneId, objectId, out var runtime, out var node))
+                return;
+
+            CameraRenderSettings settings = ReadCameraSettingsForMutation(node);
+            settings.FarClip = farClip;
+            CommitCameraSettings(runtime, node, settings);
+        }
+
+        public static void SetCameraClipRange(string sceneId, string objectId, double nearClip, double farClip)
+        {
+            if (nearClip <= 0.0)
+                throw new ArgumentException("[X] Camera nearClip must be > 0.", nameof(nearClip));
+
+            if (farClip <= 0.0)
+                throw new ArgumentException("[X] Camera farClip must be > 0.", nameof(farClip));
+
+            if (farClip <= nearClip)
+                throw new ArgumentException("[X] Camera farClip must be greater than nearClip.");
+
+            if (!TryGetCameraNode(sceneId, objectId, out var runtime, out var node))
+                return;
+
+            CameraRenderSettings settings = ReadCameraSettingsForMutation(node);
+            settings.NearClip = nearClip;
+            settings.FarClip = farClip;
+            CommitCameraSettings(runtime, node, settings);
+        }
+
+        public static void SetCameraProjectionType(string sceneId, string objectId, int projectionType)
+        {
+            if (projectionType != 0 && projectionType != 1)
+                throw new ArgumentException("[X] Camera projectionType must be 0 or 1.", nameof(projectionType));
+
+            if (!TryGetCameraNode(sceneId, objectId, out var runtime, out var node))
+                return;
+
+            CameraRenderSettings settings = ReadCameraSettingsForMutation(node);
+            settings.ProjectionType = projectionType;
+            CommitCameraSettings(runtime, node, settings);
+        }
+
+        public static void SetCameraMain(string sceneId, string objectId, bool isMainCamera)
+        {
+            if (!TryGetCameraNode(sceneId, objectId, out var runtime, out var node))
+                return;
+
+            CameraRenderSettings settings = ReadCameraSettingsForMutation(node);
+            settings.IsMainCamera = isMainCamera;
+            CommitCameraSettings(runtime, node, settings);
+        }
+
+        public static void SetCameraPostProcessEnabled(string sceneId, string objectId, bool enabled)
+        {
+            if (!TryGetCameraNode(sceneId, objectId, out var runtime, out var node))
+                return;
+
+            CameraRenderSettings settings = ReadCameraSettingsForMutation(node);
+            settings.PostProcess.Enabled = enabled;
+            CommitCameraSettings(runtime, node, settings);
+        }
+
+        public static void SetCameraPostBrightness(string sceneId, string objectId, bool enabled, double value)
+        {
+            SetCameraScalarPostProcess(sceneId, objectId, "brightness", enabled, value);
+        }
+
+        public static void SetCameraPostContrast(string sceneId, string objectId, bool enabled, double value)
+        {
+            SetCameraScalarPostProcess(sceneId, objectId, "contrast", enabled, value);
+        }
+
+        public static void SetCameraPostSaturation(string sceneId, string objectId, bool enabled, double value)
+        {
+            SetCameraScalarPostProcess(sceneId, objectId, "saturation", enabled, value);
+        }
+
+        private static void SetCameraScalarPostProcess(string sceneId, string objectId, string propertyName, bool enabled, double value)
+        {
+            if (value < 0.0)
+                throw new ArgumentException($"[X] Camera postProcess.{propertyName}.value must be >= 0.", nameof(value));
+
+            if (!TryGetCameraNode(sceneId, objectId, out var runtime, out var node))
+                return;
+
+            CameraRenderSettings settings = ReadCameraSettingsForMutation(node);
+
+            CameraScalarPostProcessSettings scalar = propertyName switch
+            {
+                "brightness" => settings.PostProcess.Brightness,
+                "contrast" => settings.PostProcess.Contrast,
+                "saturation" => settings.PostProcess.Saturation,
+                _ => throw new ArgumentException("[X] Unsupported scalar post process property.", nameof(propertyName))
+            };
+
+            scalar.Enabled = enabled;
+            scalar.Value = value;
+            CommitCameraSettings(runtime, node, settings);
+        }
+
+        public static void SetCameraPostHue(string sceneId, string objectId, bool enabled, double degrees)
+        {
+            if (!TryGetCameraNode(sceneId, objectId, out var runtime, out var node))
+                return;
+
+            CameraRenderSettings settings = ReadCameraSettingsForMutation(node);
+            settings.PostProcess.Hue.Enabled = enabled;
+            settings.PostProcess.Hue.Degrees = degrees;
+            CommitCameraSettings(runtime, node, settings);
+        }
+
+        public static void SetCameraPostTemperature(string sceneId, string objectId, bool enabled, double value)
+        {
+            if (!TryGetCameraNode(sceneId, objectId, out var runtime, out var node))
+                return;
+
+            CameraRenderSettings settings = ReadCameraSettingsForMutation(node);
+            settings.PostProcess.Temperature.Enabled = enabled;
+            settings.PostProcess.Temperature.Value = value;
+            CommitCameraSettings(runtime, node, settings);
+        }
+
+        public static void SetCameraBloom(string sceneId, string objectId, bool enabled, double threshold, double softKnee, double intensity, int iterations, int downsample)
+        {
+            if (threshold < 0.0)
+                throw new ArgumentException("[X] Camera bloom threshold must be >= 0.", nameof(threshold));
+
+            if (softKnee < 0.0)
+                throw new ArgumentException("[X] Camera bloom softKnee must be >= 0.", nameof(softKnee));
+
+            if (intensity < 0.0)
+                throw new ArgumentException("[X] Camera bloom intensity must be >= 0.", nameof(intensity));
+
+            if (iterations < 1)
+                throw new ArgumentException("[X] Camera bloom iterations must be >= 1.", nameof(iterations));
+
+            if (downsample < 1)
+                throw new ArgumentException("[X] Camera bloom downsample must be >= 1.", nameof(downsample));
+
+            if (!TryGetCameraNode(sceneId, objectId, out var runtime, out var node))
+                return;
+
+            CameraRenderSettings settings = ReadCameraSettingsForMutation(node);
+            settings.PostProcess.Bloom.Enabled = enabled;
+            settings.PostProcess.Bloom.Threshold = threshold;
+            settings.PostProcess.Bloom.SoftKnee = softKnee;
+            settings.PostProcess.Bloom.Intensity = intensity;
+            settings.PostProcess.Bloom.Iterations = iterations;
+            settings.PostProcess.Bloom.Downsample = downsample;
+            CommitCameraSettings(runtime, node, settings);
+        }
+
+        public static void SetCameraSmaa(string sceneId, string objectId, bool enabled)
+        {
+            if (!TryGetCameraNode(sceneId, objectId, out var runtime, out var node))
+                return;
+
+            CameraRenderSettings settings = ReadCameraSettingsForMutation(node);
+            settings.PostProcess.Smaa.Enabled = enabled;
+            CommitCameraSettings(runtime, node, settings);
+        }
+
         private static CameraRenderSettings ParseCameraSettings(string? rawData, string objectId)
         {
             var settings = new CameraRenderSettings();
@@ -1352,6 +1611,10 @@ namespace LimitlessSquareEngine.Engine
                         if (prop.Value.ValueKind != JsonValueKind.Number || !prop.Value.TryGetDouble(out double fovOrSize) || fovOrSize <= 0.0)
                             throw new InvalidDataException($"[X] Camera '{objectId}' data.fovOrSize must be > 0.");
                         settings.FovOrSize = fovOrSize;
+                        break;
+
+                    case "renderPlaneOffset":
+                        ParseCameraRenderPlaneOffset(prop.Value, settings.RenderPlaneOffset, objectId);
                         break;
 
                     case "nearClip":
@@ -1393,6 +1656,36 @@ namespace LimitlessSquareEngine.Engine
             return settings;
         }
 
+        private static void ParseCameraRenderPlaneOffset(
+            JsonElement element,
+            CameraRenderPlaneOffsetSettings settings,
+            string objectId)
+        {
+            if (element.ValueKind != JsonValueKind.Object)
+                throw new InvalidDataException($"[X] Camera '{objectId}' data.renderPlaneOffset must be an object.");
+
+            foreach (JsonProperty prop in element.EnumerateObject())
+            {
+                switch (prop.Name)
+                {
+                    case "x":
+                        if (prop.Value.ValueKind != JsonValueKind.Number || !prop.Value.TryGetDouble(out double x))
+                            throw new InvalidDataException($"[X] Camera '{objectId}' data.renderPlaneOffset.x must be a number.");
+                        settings.X = x;
+                        break;
+
+                    case "y":
+                        if (prop.Value.ValueKind != JsonValueKind.Number || !prop.Value.TryGetDouble(out double y))
+                            throw new InvalidDataException($"[X] Camera '{objectId}' data.renderPlaneOffset.y must be a number.");
+                        settings.Y = y;
+                        break;
+
+                    default:
+                        throw new InvalidDataException($"[X] Camera '{objectId}' data.renderPlaneOffset contains unknown or wrong-cased property '{prop.Name}'.");
+                }
+            }
+        }
+
         private static void ParseCameraPostProcessSettings(
             JsonElement element,
             CameraPostProcessSettings settings,
@@ -1431,6 +1724,10 @@ namespace LimitlessSquareEngine.Engine
 
                     case "bloom":
                         ParseCameraBloomPostProcessSettings(prop.Value, settings.Bloom, objectId);
+                        break;
+
+                    case "smaa":
+                        ParseCameraSmaaPostProcessSettings(prop.Value, settings.Smaa, objectId);
                         break;
 
                     default:
@@ -1580,6 +1877,29 @@ namespace LimitlessSquareEngine.Engine
                 }
             }
         }
+
+        private static void ParseCameraSmaaPostProcessSettings(
+            JsonElement element,
+            CameraSmaaPostProcessSettings settings,
+            string objectId)
+        {
+            if (element.ValueKind != JsonValueKind.Object)
+                throw new InvalidDataException($"[X] Camera '{objectId}' data.postProcess.smaa must be an object.");
+
+            foreach (JsonProperty prop in element.EnumerateObject())
+            {
+                switch (prop.Name)
+                {
+                    case "enabled":
+                        settings.Enabled = ReadStrictBoolean(prop.Value, $"Camera '{objectId}' data.postProcess.smaa.enabled");
+                        break;
+
+                    default:
+                        throw new InvalidDataException($"[X] Camera '{objectId}' data.postProcess.smaa contains unknown or wrong-cased property '{prop.Name}'.");
+                }
+            }
+        }
+
 
         private static bool ReadStrictBoolean(JsonElement element, string fieldName)
         {

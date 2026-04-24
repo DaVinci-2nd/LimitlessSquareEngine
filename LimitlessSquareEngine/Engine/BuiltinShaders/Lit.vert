@@ -76,7 +76,8 @@ void main()
             else
                 outlineDir = vec2(0.0, 1.0);
 
-            float outlineWidthPx = max(uOutlineWidth, 0.0);
+            float outlineScale = max(uViewportSize.y, 1.0) / 1080.0;
+            float outlineWidthPx = max(uOutlineWidth, 0.0) * outlineScale;
             vec2 ndcOffset = outlineDir * (outlineWidthPx * 2.0 / max(uViewportSize, vec2(1.0)));
             clipPos.xy += ndcOffset * clipPos.w;
         }

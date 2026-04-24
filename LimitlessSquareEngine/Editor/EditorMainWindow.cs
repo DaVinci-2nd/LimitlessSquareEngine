@@ -2667,6 +2667,7 @@ namespace LimitlessSquareEngine.Editor
                 }));
 
             root.Children.Add(CreateInspectorSectionHeader("参数"));
+
             root.Children.Add(CreateTextPropertyEditor("Controller", () => obj.Controller ?? "", value =>
             {
                 string? newValue = string.IsNullOrWhiteSpace(value) ? null : value;
@@ -5721,6 +5722,8 @@ void main()
         {
             int renderMode = 0;
             double fovOrSize = 75.0;
+            double renderPlaneOffsetX = 0.0;
+            double renderPlaneOffsetY = 0.0;
             double nearClip = 0.01;
             double farClip = 1000.0;
             int projectionType = 0;
@@ -5739,6 +5742,18 @@ void main()
                     if (root.TryGetProperty("fovOrSize", out JsonElement fovElement) &&
                         fovElement.ValueKind == JsonValueKind.Number)
                         fovOrSize = fovElement.GetDouble();
+
+                    if (root.TryGetProperty("renderPlaneOffset", out JsonElement renderPlaneOffsetElement) &&
+                        renderPlaneOffsetElement.ValueKind == JsonValueKind.Object)
+                    {
+                        if (renderPlaneOffsetElement.TryGetProperty("x", out JsonElement renderPlaneOffsetXElement) &&
+                            renderPlaneOffsetXElement.ValueKind == JsonValueKind.Number)
+                            renderPlaneOffsetX = renderPlaneOffsetXElement.GetDouble();
+
+                        if (renderPlaneOffsetElement.TryGetProperty("y", out JsonElement renderPlaneOffsetYElement) &&
+                            renderPlaneOffsetYElement.ValueKind == JsonValueKind.Number)
+                            renderPlaneOffsetY = renderPlaneOffsetYElement.GetDouble();
+                    }
 
                     if (root.TryGetProperty("nearClip", out JsonElement nearElement) &&
                         nearElement.ValueKind == JsonValueKind.Number)
@@ -5761,6 +5776,11 @@ void main()
             {
                 renderMode,
                 fovOrSize,
+                renderPlaneOffset = new
+                {
+                    x = renderPlaneOffsetX,
+                    y = renderPlaneOffsetY
+                },
                 nearClip,
                 farClip,
                 projectionType,
@@ -7004,16 +7024,16 @@ void main()
         }
 
         private static GizmoAxis BuildAxis(
-    Point center,
-    Double3 worldAxis,
-    CameraOrientationState camera,
-    double axisBaseOffset,
-    double axisLength,
-    double coneLength,
-    double coneBaseRadius,
-    IBrush brush,
-    Pen pen,
-    double fovDegrees)
+            Point center,
+            Double3 worldAxis,
+            CameraOrientationState camera,
+            double axisBaseOffset,
+            double axisLength,
+            double coneLength,
+            double coneBaseRadius,
+            IBrush brush,
+            Pen pen,
+            double fovDegrees)
         {
             Double3 axis = Normalize3(worldAxis);
 
