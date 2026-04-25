@@ -186,9 +186,10 @@ namespace LimitlessSquareEngine.Engine
         public bool Enabled { get; set; } = false;
         public double Threshold { get; set; } = 1.0;
         public double SoftKnee { get; set; } = 0.5;
-        public double Intensity { get; set; } = 0.7;
-        public int Iterations { get; set; } = 4;
+        public double Intensity { get; set; } = 0.5;
+        public int Iterations { get; set; } = 16;
         public int Downsample { get; set; } = 2;
+        public double Range { get; set; } = 100.0;
     }
 
     internal sealed class CameraSmaaPostProcessSettings
@@ -1545,7 +1546,7 @@ namespace LimitlessSquareEngine.Engine
             CommitCameraSettings(runtime, node, settings);
         }
 
-        public static void SetCameraBloom(string sceneId, string objectId, bool enabled, double threshold, double softKnee, double intensity, int iterations, int downsample)
+        public static void SetCameraBloom(string sceneId, string objectId, bool enabled, double threshold, double softKnee, double intensity, int iterations, int downsample, double range)
         {
             if (threshold < 0.0)
                 throw new ArgumentException("[X] Camera bloom threshold must be >= 0.", nameof(threshold));
@@ -1562,6 +1563,9 @@ namespace LimitlessSquareEngine.Engine
             if (downsample < 1)
                 throw new ArgumentException("[X] Camera bloom downsample must be >= 1.", nameof(downsample));
 
+            if (range < 0.0)
+                throw new ArgumentException("[X] Camera bloom range must be >= 0.", nameof(range));
+
             if (!TryGetCameraNode(sceneId, objectId, out var runtime, out var node))
                 return;
 
@@ -1572,6 +1576,7 @@ namespace LimitlessSquareEngine.Engine
             settings.PostProcess.Bloom.Intensity = intensity;
             settings.PostProcess.Bloom.Iterations = iterations;
             settings.PostProcess.Bloom.Downsample = downsample;
+            settings.PostProcess.Bloom.Range = range;
             CommitCameraSettings(runtime, node, settings);
         }
 
@@ -1870,6 +1875,12 @@ namespace LimitlessSquareEngine.Engine
                         if (prop.Value.ValueKind != JsonValueKind.Number || !prop.Value.TryGetInt32(out int downsample) || downsample < 1)
                             throw new InvalidDataException($"[X] Camera '{objectId}' data.postProcess.bloom.downsample must be >= 1.");
                         settings.Downsample = downsample;
+                        break;
+
+                    case "range":
+                        if (prop.Value.ValueKind != JsonValueKind.Number || !prop.Value.TryGetDouble(out double range) || range < 0.0)
+                            throw new InvalidDataException($"[X] Camera '{objectId}' data.postProcess.bloom.range must be >= 0.");
+                        settings.Range = range;
                         break;
 
                     default:

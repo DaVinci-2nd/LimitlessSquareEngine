@@ -2018,9 +2018,9 @@ namespace LimitlessSquareEngine
 
                         // 注入相机泛光后处理设置函数
                         instance.LuaScript.Globals["set_camera_bloom"] =
-                            (Action<string, string, bool, double, double, double, int, int>)((sceneId, objectId, enabled, threshold, softKnee, intensity, iterations, downsample) =>
+                            (Action<string, string, bool, double, double, double, int, int, double>)((sceneId, objectId, enabled, threshold, softKnee, intensity, iterations, downsample, range) =>
                             {
-                                Scene.SetCameraBloom(sceneId, objectId, enabled, threshold, softKnee, intensity, iterations, downsample);
+                                Scene.SetCameraBloom(sceneId, objectId, enabled, threshold, softKnee, intensity, iterations, downsample, range);
                             });
 
                         // 注入天空盒设置函数

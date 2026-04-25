@@ -606,8 +606,9 @@ namespace LimitlessSquareEngine
             public float BloomThreshold { get; set; } = 1f;
             public float BloomSoftKnee { get; set; } = 0.5f;
             public float BloomIntensity { get; set; } = 0.7f;
-            public int BloomIterations { get; set; } = 100;
+            public int BloomIterations { get; set; } = 4;
             public int BloomDownsample { get; set; } = 2;
+            public float BloomRange { get; set; } = 100f;
 
             public bool SmaaEnabled { get; set; } = true;
         }
@@ -3684,6 +3685,12 @@ namespace LimitlessSquareEngine
             settings.BloomDownsample = Math.Clamp(value, 1, 8);
         }
 
+        public void SetCameraBloomRange(string cameraObjectId, float value)
+        {
+            CameraPostProcessSettings settings = GetOrCreateCameraPostProcessSettings(cameraObjectId);
+            settings.BloomRange = Math.Max(0f, value);
+        }
+
         public void SetCameraSmaaEnabled(string cameraObjectId, bool enabled)
         {
             CameraPostProcessSettings settings = GetOrCreateCameraPostProcessSettings(cameraObjectId);
@@ -4984,6 +4991,8 @@ namespace LimitlessSquareEngine
             int bloomWidth = Math.Max(1, _postProcessSceneWidth / Math.Max(1, settings.BloomDownsample));
             int bloomHeight = Math.Max(1, _postProcessSceneHeight / Math.Max(1, settings.BloomDownsample));
             float bloomScale = GetResolutionEffectScale(_postProcessSceneHeight);
+            float bloomRange = Math.Max(0f, settings.BloomRange) * bloomScale;
+            float bloomStep = bloomRange / Math.Max(1, settings.BloomIterations);
 
             EnsurePostProcessBloomTargets(bloomWidth, bloomHeight);
 
@@ -5023,7 +5032,7 @@ namespace LimitlessSquareEngine
                 _gl.ActiveTexture(TextureUnit.Texture0);
                 _gl.BindTexture(TextureTarget.Texture2D, _postProcessPingTexture);
                 if (_postProcessBlurTexelSizeLoc != -1)
-                    _gl.Uniform2(_postProcessBlurTexelSizeLoc, bloomScale / bloomWidth, bloomScale / bloomHeight);
+                    _gl.Uniform2(_postProcessBlurTexelSizeLoc, bloomStep / _postProcessSceneWidth, bloomStep / _postProcessSceneHeight);
                 if (_postProcessBlurHorizontalLoc != -1)
                     _gl.Uniform1(_postProcessBlurHorizontalLoc, 1);
                 DrawFullscreenQuad();
@@ -5033,7 +5042,7 @@ namespace LimitlessSquareEngine
                 _gl.ActiveTexture(TextureUnit.Texture0);
                 _gl.BindTexture(TextureTarget.Texture2D, _postProcessPongTexture);
                 if (_postProcessBlurTexelSizeLoc != -1)
-                    _gl.Uniform2(_postProcessBlurTexelSizeLoc, bloomScale / bloomWidth, bloomScale / bloomHeight);
+                    _gl.Uniform2(_postProcessBlurTexelSizeLoc, bloomStep / _postProcessSceneWidth, bloomStep / _postProcessSceneHeight);
                 if (_postProcessBlurHorizontalLoc != -1)
                     _gl.Uniform1(_postProcessBlurHorizontalLoc, 0);
                 DrawFullscreenQuad();
@@ -7355,6 +7364,7 @@ namespace LimitlessSquareEngine
             SetCameraBloomIntensity(cameraItem.ObjectId, (float)postProcess.Bloom.Intensity);
             SetCameraBloomIterations(cameraItem.ObjectId, postProcess.Bloom.Iterations);
             SetCameraBloomDownsample(cameraItem.ObjectId, postProcess.Bloom.Downsample);
+            SetCameraBloomRange(cameraItem.ObjectId, (float)postProcess.Bloom.Range);
 
             SetCameraSmaaEnabled(cameraItem.ObjectId, postProcess.Smaa.Enabled);
 
