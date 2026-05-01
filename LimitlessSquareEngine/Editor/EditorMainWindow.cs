@@ -164,6 +164,20 @@ namespace LimitlessSquareEngine.Editor
             public string Message { get; init; } = "";
         }
 
+        private sealed class PlaybackRenderStatus
+        {
+            public int Width { get; init; }
+            public int Height { get; init; }
+            public int Fps { get; init; }
+            public bool GpuTimeAvailable { get; init; }
+            public double GpuFrameMilliseconds { get; init; }
+            public int DrawCalls { get; init; }
+            public long DrawnVertices { get; init; }
+            public long DrawnTriangles { get; init; }
+            public int CulledCommands { get; init; }
+            public int SubmittedCommands { get; init; }
+        }
+
         public EditorMainWindow()
         {
             Title = "Limitless Square Editor";
@@ -648,23 +662,34 @@ namespace LimitlessSquareEngine.Editor
 
         private string BuildPlaybackWindowTitle(int width, int height, int fps)
         {
-            string projectFolderName = GetPlaybackProjectFolderName();
-            return $"{projectFolderName}  <>  {width}x{height}  |  FPS {fps}";
+            return BuildPlaybackWindowTitle(width, height, fps, null);
         }
 
-        private void UpdatePlaybackWindowTitle(int width, int height, int fps)
+        private string BuildPlaybackWindowTitle(int width, int height, int fps, PlaybackRenderStatus? status)
+        {
+            string projectFolderName = GetPlaybackProjectFolderName();
+
+            if (status == null)
+                return $"{projectFolderName}  <>  {width}x{height}  |  FPS {fps}";
+
+            string gpuText = status.GpuTimeAvailable
+                ? status.GpuFrameMilliseconds.ToString("F2", CultureInfo.InvariantCulture) + "ms"
+                : "--ms";
+
+            return $"{projectFolderName}  <>  {width}x{height}  |  FPS {fps}  |  GPU {gpuText}  |  Draw {status.DrawCalls}  |  Vtx {status.DrawnVertices}  |  Tri {status.DrawnTriangles}  |  Cull {status.CulledCommands}/{status.SubmittedCommands}";
+        }
+
+        private void UpdatePlaybackWindowTitle(int width, int height, int fps, PlaybackRenderStatus? status = null)
         {
             if (_playbackWindow == null)
                 return;
 
-            _playbackWindow.Title = BuildPlaybackWindowTitle(width, height, fps);
+            _playbackWindow.Title = BuildPlaybackWindowTitle(width, height, fps, status);
         }
 
-        private bool TryReadPlaybackStatus(out int width, out int height, out int fps)
+        private bool TryReadPlaybackStatus(out PlaybackRenderStatus status)
         {
-            width = 0;
-            height = 0;
-            fps = 0;
+            status = new PlaybackRenderStatus();
 
             if (string.IsNullOrWhiteSpace(_playbackStatusFilePath))
                 return false;
@@ -687,20 +712,67 @@ namespace LimitlessSquareEngine.Editor
                 return false;
 
             string[] parts = text.Split('|', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-            if (parts.Length != 3)
+            if (parts.Length != 3 && parts.Length != 9)
                 return false;
 
-            if (!int.TryParse(parts[0], out width))
+            if (!int.TryParse(parts[0], NumberStyles.Integer, CultureInfo.InvariantCulture, out int width))
                 return false;
 
-            if (!int.TryParse(parts[1], out height))
+            if (!int.TryParse(parts[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out int height))
                 return false;
 
-            if (!int.TryParse(parts[2], out fps))
+            if (!int.TryParse(parts[2], NumberStyles.Integer, CultureInfo.InvariantCulture, out int fps))
                 return false;
 
             if (width <= 0 || height <= 0 || fps < 0)
                 return false;
+
+            if (parts.Length == 3)
+            {
+                status = new PlaybackRenderStatus
+                {
+                    Width = width,
+                    Height = height,
+                    Fps = fps
+                };
+
+                return true;
+            }
+
+            if (!double.TryParse(parts[3], NumberStyles.Float, CultureInfo.InvariantCulture, out double gpuMilliseconds))
+                return false;
+
+            if (!int.TryParse(parts[4], NumberStyles.Integer, CultureInfo.InvariantCulture, out int drawCalls))
+                return false;
+
+            if (!long.TryParse(parts[5], NumberStyles.Integer, CultureInfo.InvariantCulture, out long drawnVertices))
+                return false;
+
+            if (!long.TryParse(parts[6], NumberStyles.Integer, CultureInfo.InvariantCulture, out long drawnTriangles))
+                return false;
+
+            if (!int.TryParse(parts[7], NumberStyles.Integer, CultureInfo.InvariantCulture, out int culledCommands))
+                return false;
+
+            if (!int.TryParse(parts[8], NumberStyles.Integer, CultureInfo.InvariantCulture, out int submittedCommands))
+                return false;
+
+            if (drawCalls < 0 || drawnVertices < 0 || drawnTriangles < 0 || culledCommands < 0 || submittedCommands < 0)
+                return false;
+
+            status = new PlaybackRenderStatus
+            {
+                Width = width,
+                Height = height,
+                Fps = fps,
+                GpuTimeAvailable = gpuMilliseconds >= 0.0,
+                GpuFrameMilliseconds = Math.Max(0.0, gpuMilliseconds),
+                DrawCalls = drawCalls,
+                DrawnVertices = drawnVertices,
+                DrawnTriangles = drawnTriangles,
+                CulledCommands = culledCommands,
+                SubmittedCommands = submittedCommands
+            };
 
             return true;
         }
@@ -726,9 +798,9 @@ namespace LimitlessSquareEngine.Editor
             if (!_isPlaybackRunning || _playbackWindow == null)
                 return;
 
-            if (TryReadPlaybackStatus(out int width, out int height, out int fps))
+            if (TryReadPlaybackStatus(out PlaybackRenderStatus status))
             {
-                UpdatePlaybackWindowTitle(width, height, fps);
+                UpdatePlaybackWindowTitle(status.Width, status.Height, status.Fps, status);
                 return;
             }
 

@@ -29,6 +29,20 @@ namespace LimitlessSquareEngine
         private float[] _dynamicGeometryScratch = Array.Empty<float>();
 
         private long _sceneBatchCounter = 0;
+        private readonly uint[] _gpuTimerQueries = new uint[3];
+        private readonly bool[] _gpuTimerQueryPending = new bool[3];
+        private int _gpuTimerWriteIndex = 0;
+        private bool _gpuTimerSupported = true;
+        private bool _gpuTimerQueryActive = false;
+        private bool _renderFrameDiagnosticsActive = false;
+        private double _lastGpuFrameMilliseconds = 0.0;
+        private bool _lastGpuFrameMillisecondsAvailable = false;
+        private int _frameSubmittedCommands = 0;
+        private int _frameCulledCommands = 0;
+        private int _frameDrawCalls = 0;
+        private long _frameDrawnVertices = 0;
+        private long _frameDrawnTriangles = 0;
+        private RenderFrameDiagnostics _lastRenderFrameDiagnostics = default;
 
         // 渲染区域
         private bool _sceneViewportUseFixedAspect = false;
@@ -1207,10 +1221,284 @@ namespace LimitlessSquareEngine
         private readonly List<RenderCommand> _renderQueue = new();
         private long _submissionCounter = 0;
         private readonly List<RenderCommand> _shadowCasterScratch = new();
+        private readonly List<RenderCommand> _visibleShadowReceiverScratch = new();
         private readonly List<RenderCommand> _sceneCommandsScratch = new();
         private readonly List<RenderCommand> _canvasCommandsScratch = new();
         private readonly List<RenderCommand> _fogSceneCommandsScratch = new();
         private readonly HashSet<string> _sceneCommandWarmupCache = new(StringComparer.Ordinal);
+
+        public RenderFrameDiagnostics GetLastRenderFrameDiagnostics()
+        {
+            return _lastRenderFrameDiagnostics;
+        }
+
+        private void BeginRenderFrameDiagnostics(int submittedCommandCount)
+        {
+            _renderFrameDiagnosticsActive = true;
+            _frameSubmittedCommands = submittedCommandCount;
+            _frameCulledCommands = 0;
+            _frameDrawCalls = 0;
+            _frameDrawnVertices = 0;
+            _frameDrawnTriangles = 0;
+            BeginGpuFrameTimer();
+        }
+
+        private void EndRenderFrameDiagnostics()
+        {
+            EndGpuFrameTimer();
+
+            _lastRenderFrameDiagnostics = new RenderFrameDiagnostics
+            {
+                SubmittedCommands = _frameSubmittedCommands,
+                CulledCommands = _frameCulledCommands,
+                DrawCalls = _frameDrawCalls,
+                DrawnVertices = _frameDrawnVertices,
+                DrawnTriangles = _frameDrawnTriangles,
+                GpuTimeAvailable = _lastGpuFrameMillisecondsAvailable,
+                GpuFrameMilliseconds = _lastGpuFrameMilliseconds
+            };
+
+            _renderFrameDiagnosticsActive = false;
+        }
+
+        private bool EnsureGpuTimerQueries()
+        {
+            if (!_gpuTimerSupported)
+                return false;
+
+            if (_gpuTimerQueries[0] != 0)
+                return true;
+
+            try
+            {
+                for (int i = 0; i < _gpuTimerQueries.Length; i++)
+                    _gpuTimerQueries[i] = _gl.GenQuery();
+
+                return true;
+            }
+            catch
+            {
+                _gpuTimerSupported = false;
+                return false;
+            }
+        }
+
+        private void TryReadGpuTimerQueries()
+        {
+            if (!_gpuTimerSupported)
+                return;
+
+            for (int i = 0; i < _gpuTimerQueries.Length; i++)
+            {
+                if (!_gpuTimerQueryPending[i])
+                    continue;
+
+                try
+                {
+                    _gl.GetQueryObject(_gpuTimerQueries[i], QueryObjectParameterName.QueryResultAvailable, out int available);
+                    if (available == 0)
+                        continue;
+
+                    _gl.GetQueryObject(_gpuTimerQueries[i], QueryObjectParameterName.QueryResult, out ulong elapsedNanoseconds);
+                    _lastGpuFrameMilliseconds = elapsedNanoseconds / 1000000.0;
+                    _lastGpuFrameMillisecondsAvailable = true;
+                    _gpuTimerQueryPending[i] = false;
+                }
+                catch
+                {
+                    _gpuTimerSupported = false;
+                    _lastGpuFrameMillisecondsAvailable = false;
+                    return;
+                }
+            }
+        }
+
+        private void BeginGpuFrameTimer()
+        {
+            _gpuTimerQueryActive = false;
+
+            if (!EnsureGpuTimerQueries())
+                return;
+
+            TryReadGpuTimerQueries();
+
+            if (_gpuTimerQueryPending[_gpuTimerWriteIndex])
+                return;
+
+            try
+            {
+                _gl.BeginQuery(QueryTarget.TimeElapsed, _gpuTimerQueries[_gpuTimerWriteIndex]);
+                _gpuTimerQueryActive = true;
+            }
+            catch
+            {
+                _gpuTimerSupported = false;
+                _lastGpuFrameMillisecondsAvailable = false;
+                _gpuTimerQueryActive = false;
+            }
+        }
+
+        private void EndGpuFrameTimer()
+        {
+            if (!_gpuTimerQueryActive)
+                return;
+
+            try
+            {
+                _gl.EndQuery(QueryTarget.TimeElapsed);
+                _gpuTimerQueryPending[_gpuTimerWriteIndex] = true;
+                _gpuTimerWriteIndex = (_gpuTimerWriteIndex + 1) % _gpuTimerQueries.Length;
+            }
+            catch
+            {
+                _gpuTimerSupported = false;
+                _lastGpuFrameMillisecondsAvailable = false;
+            }
+
+            _gpuTimerQueryActive = false;
+        }
+
+        private bool HasVisibleNonSkyboxSceneCommand(List<RenderCommand> commands)
+        {
+            for (int i = 0; i < commands.Count; i++)
+            {
+                RenderCommand cmd = commands[i];
+
+                if (cmd.IsSkybox)
+                    continue;
+
+                if (cmd.Pass != RenderPass.Scene)
+                    continue;
+
+                if (ShouldCullCommandByCameraFrustum(cmd))
+                    continue;
+
+                return true;
+            }
+
+            return false;
+        }
+
+        private bool CommandIntersectsCameraDepthRange(in RenderCommand cmd, float rangeNear, float rangeFar)
+        {
+            if (!cmd.HasBoundingBox)
+                return true;
+
+            Matrix4x4 modelView = cmd.Model * cmd.View;
+
+            bool allBeforeNear = true;
+            bool allAfterFar = true;
+
+            for (int i = 0; i < 8; i++)
+            {
+                Vector3 local = GetBoundingBoxCorner(cmd.BoundingLocalMin, cmd.BoundingLocalMax, i);
+                Vector4 view = Vector4.Transform(new Vector4(local, 1f), modelView);
+                float depth = -view.Z;
+
+                if (depth >= rangeNear)
+                    allBeforeNear = false;
+
+                if (depth <= rangeFar)
+                    allAfterFar = false;
+            }
+
+            return !(allBeforeNear || allAfterFar);
+        }
+
+        private bool HasVisibleShadowReceiverInCameraCascade(List<RenderCommand> visibleReceivers, float cascadeNear, float cascadeFar)
+        {
+            for (int i = 0; i < visibleReceivers.Count; i++)
+            {
+                RenderCommand cmd = visibleReceivers[i];
+
+                if (CommandIntersectsCameraDepthRange(cmd, cascadeNear, cascadeFar))
+                    return true;
+            }
+
+            return false;
+        }
+
+        private bool ShouldCullShadowCasterForCascade(in RenderCommand cmd, DirectionalShadowCascadeInfo cascade)
+        {
+            if (!cmd.HasBoundingBox)
+                return false;
+
+            if (!cascade.Valid)
+                return false;
+
+            Matrix4x4 localToShadowClip = cmd.Model * cascade.ShadowMatrix;
+
+            bool allLeft = true;
+            bool allRight = true;
+            bool allBottom = true;
+            bool allTop = true;
+            bool allTooNear = true;
+            bool allTooFar = true;
+
+            for (int i = 0; i < 8; i++)
+            {
+                Vector3 local = GetBoundingBoxCorner(cmd.BoundingLocalMin, cmd.BoundingLocalMax, i);
+                Vector4 clip = Vector4.Transform(new Vector4(local, 1f), localToShadowClip);
+
+                if (clip.W <= 0.000001f)
+                    return false;
+
+                float guard = MathF.Abs(clip.W) * 0.02f + 0.0001f;
+
+                if (clip.X >= -clip.W - guard)
+                    allLeft = false;
+
+                if (clip.X <= clip.W + guard)
+                    allRight = false;
+
+                if (clip.Y >= -clip.W - guard)
+                    allBottom = false;
+
+                if (clip.Y <= clip.W + guard)
+                    allTop = false;
+
+                if (clip.Z >= -clip.W - guard)
+                    allTooNear = false;
+
+                if (clip.Z <= clip.W + guard)
+                    allTooFar = false;
+            }
+
+            return allLeft || allRight || allBottom || allTop || allTooNear || allTooFar;
+        }
+
+        private bool ShouldCullCommandByCameraFrustumAndRecord(in RenderCommand cmd)
+        {
+            bool culled = ShouldCullCommandByCameraFrustum(cmd);
+
+            if (culled && _renderFrameDiagnosticsActive)
+                _frameCulledCommands++;
+
+            return culled;
+        }
+
+        private void SubmitDrawArrays(PrimitiveType primitiveType, int first, uint count)
+        {
+            if (_renderFrameDiagnosticsActive)
+            {
+                _frameDrawCalls++;
+                _frameDrawnVertices += count;
+                _frameDrawnTriangles += EstimateTriangleCount(primitiveType, count);
+            }
+
+            _gl.DrawArrays((GLEnum)primitiveType, first, count);
+        }
+
+        private static long EstimateTriangleCount(PrimitiveType primitiveType, uint vertexCount)
+        {
+            if (primitiveType == PrimitiveType.Triangles)
+                return vertexCount / 3;
+
+            if (primitiveType == PrimitiveType.TriangleStrip || primitiveType == PrimitiveType.TriangleFan)
+                return vertexCount >= 3 ? vertexCount - 2 : 0;
+
+            return 0;
+        }
 
         private string BuildSceneCommandWarmupKey(in RenderCommand cmd)
         {
@@ -1287,7 +1575,7 @@ namespace LimitlessSquareEngine
             uint warmupVertexCount = (uint)Math.Min(vertexCount, cmd.PrimitiveType == PrimitiveType.Triangles ? 3 : 1);
 
             if (warmupVertexCount > 0)
-                _gl.DrawArrays(cmd.PrimitiveType, 0, warmupVertexCount);
+                _gl.DrawArrays((GLEnum)cmd.PrimitiveType, 0, warmupVertexCount);
 
             _gl.ColorMask(true, true, true, true);
             _gl.DepthMask(true);
@@ -2427,6 +2715,7 @@ namespace LimitlessSquareEngine
                 return;
 
             _shadowCasterScratch.Clear();
+            _visibleShadowReceiverScratch.Clear();
 
             for (int i = 0; i < batchCommands.Count; i++)
             {
@@ -2434,6 +2723,12 @@ namespace LimitlessSquareEngine
 
                 if (cmd.IsSkybox)
                     continue;
+
+                if (cmd.Pass != RenderPass.Scene)
+                    continue;
+
+                if (!ShouldCullCommandByCameraFrustum(cmd))
+                    _visibleShadowReceiverScratch.Add(cmd);
 
                 if (cmd.QueueType != RenderQueueType.Opaque)
                     continue;
@@ -2444,7 +2739,7 @@ namespace LimitlessSquareEngine
                 _shadowCasterScratch.Add(cmd);
             }
 
-            if (_shadowCasterScratch.Count == 0)
+            if (_shadowCasterScratch.Count == 0 || _visibleShadowReceiverScratch.Count == 0)
                 return;
 
             uint previousProgram = _currentProgram;
@@ -2485,6 +2780,9 @@ namespace LimitlessSquareEngine
                     previousSplitFar = cascadeMaxDistance;
 
                     if (cascadeFar <= cascadeNear)
+                        continue;
+
+                    if (!HasVisibleShadowReceiverInCameraCascade(_visibleShadowReceiverScratch, cascadeNear, cascadeFar))
                         continue;
 
                     int tileIndex = lightIndex * _directionalShadowCascadeCount + cascadeIndex;
@@ -2529,9 +2827,12 @@ namespace LimitlessSquareEngine
                         if (!ShouldCastShadow(cmd.Material))
                             continue;
 
+                        if (ShouldCullShadowCasterForCascade(cmd, cascadeInfo))
+                            continue;
+
                         BindCommandGeometryForShadow(cmd);
                         SetMatrixUniform(modelLoc, cmd.Model);
-                        _gl.DrawArrays(cmd.PrimitiveType, 0, (uint)(cmd.Vertices.Length / cmd.VertexStrideFloats));
+                        SubmitDrawArrays(cmd.PrimitiveType, 0, (uint)(cmd.Vertices.Length / cmd.VertexStrideFloats));
                     }
 
                     if (cascadeFar >= batchAnchor.ClusterFar)
@@ -3958,7 +4259,7 @@ namespace LimitlessSquareEngine
         private void DrawFullscreenQuad()
         {
             _gl.BindVertexArray(_quadVao);
-            _gl.DrawArrays(PrimitiveType.Triangles, 0, 6);
+            SubmitDrawArrays(PrimitiveType.Triangles, 0, 6);
             _gl.BindVertexArray(0);
         }
 
@@ -4312,7 +4613,7 @@ namespace LimitlessSquareEngine
             _activeProjectionMatrix = captureProjection;
 
             BindReflectionCubeGeometry();
-            _gl.DrawArrays(PrimitiveType.Triangles, 0, (uint)_reflectionCubeVertexCount);
+            SubmitDrawArrays(PrimitiveType.Triangles, 0, (uint)_reflectionCubeVertexCount);
 
             _gl.ActiveTexture(TextureUnit.Texture0);
             _gl.BindTexture(TextureTarget.Texture2D, 0);
@@ -4397,7 +4698,7 @@ namespace LimitlessSquareEngine
                 _gl.ClearColor(0f, 0f, 0f, 1f);
                 _gl.Clear(ClearBufferMask.ColorBufferBit);
 
-                _gl.DrawArrays(PrimitiveType.Triangles, 0, (uint)_reflectionCubeVertexCount);
+                SubmitDrawArrays(PrimitiveType.Triangles, 0, (uint)_reflectionCubeVertexCount);
             }
 
             _gl.ActiveTexture((TextureUnit)((int)TextureUnit.Texture0 + 1));
@@ -6732,7 +7033,7 @@ namespace LimitlessSquareEngine
 
                 ApplyCoreSceneUniforms();
 
-                _gl.DrawArrays(
+                SubmitDrawArrays(
                     PrimitiveType.Triangles,
                     0,
                     (uint)_reflectionCubeVertexCount);
@@ -7900,30 +8201,39 @@ namespace LimitlessSquareEngine
         [MoonSharpHidden]
         public void ExecuteRenderQueue()
         {
-            _skyboxRenderedThisFrame = false;
-            _sceneCommandsScratch.Clear();
-            _canvasCommandsScratch.Clear();
+            BeginRenderFrameDiagnostics(_renderQueue.Count);
 
-            for (int i = 0; i < _renderQueue.Count; i++)
+            try
             {
-                RenderCommand cmd = _renderQueue[i];
+                _skyboxRenderedThisFrame = false;
+                _sceneCommandsScratch.Clear();
+                _canvasCommandsScratch.Clear();
 
-                if (cmd.Pass == RenderPass.Scene)
-                    _sceneCommandsScratch.Add(cmd);
-                else
-                    _canvasCommandsScratch.Add(cmd);
+                for (int i = 0; i < _renderQueue.Count; i++)
+                {
+                    RenderCommand cmd = _renderQueue[i];
+
+                    if (cmd.Pass == RenderPass.Scene)
+                        _sceneCommandsScratch.Add(cmd);
+                    else
+                        _canvasCommandsScratch.Add(cmd);
+                }
+
+                ExecuteScenePass(_sceneCommandsScratch);
+                ExecuteCanvasPass(_canvasCommandsScratch);
+
+                if (_pendingSkyboxReflectionRefreshAfterRender && _skyboxRenderedThisFrame)
+                {
+                    ResetCapturedSkyboxReflectionCache();
+                    _pendingSkyboxReflectionRefreshAfterRender = false;
+                }
+
+                _renderQueue.Clear();
             }
-
-            ExecuteScenePass(_sceneCommandsScratch);
-            ExecuteCanvasPass(_canvasCommandsScratch);
-
-            if (_pendingSkyboxReflectionRefreshAfterRender && _skyboxRenderedThisFrame)
+            finally
             {
-                ResetCapturedSkyboxReflectionCache();
-                _pendingSkyboxReflectionRefreshAfterRender = false;
+                EndRenderFrameDiagnostics();
             }
-
-            _renderQueue.Clear();
         }
 
         private void ExecuteScenePass(List<RenderCommand> sceneCommands)
@@ -7949,11 +8259,20 @@ namespace LimitlessSquareEngine
                 if (batchSkybox != null)
                     _skyboxRenderedThisFrame = true;
 
-                if (!_pendingSkyboxReflectionRefreshAfterRender)
+                bool hasVisibleNonSkyboxSceneCommand = HasVisibleNonSkyboxSceneCommand(batchCommands);
+
+                if (hasVisibleNonSkyboxSceneCommand && !_pendingSkyboxReflectionRefreshAfterRender)
                     CaptureSkyboxReflectionForBatch(first, batchSkybox);
 
-                PrepareDirectionalShadowBatch(first, batchCommands);
-                PrepareLightingBuffersForBatch(first);
+                if (hasVisibleNonSkyboxSceneCommand)
+                {
+                    PrepareDirectionalShadowBatch(first, batchCommands);
+                    PrepareLightingBuffersForBatch(first);
+                }
+                else
+                {
+                    _directionalShadowBatchCache.Remove(first.BatchId);
+                }
 
                 CameraPostProcessSettings? postSettings = ResolvePostProcessForCamera(first.CameraObjectId);
 
@@ -8052,7 +8371,7 @@ namespace LimitlessSquareEngine
                 _gl.BindTexture(TextureTarget.Texture2D, 0);
             }
 
-            _gl.DrawArrays(cmd.PrimitiveType, 0, (uint)(cmd.Vertices.Length / cmd.VertexStrideFloats));
+            SubmitDrawArrays(cmd.PrimitiveType, 0, (uint)(cmd.Vertices.Length / cmd.VertexStrideFloats));
 
             _gl.ActiveTexture(TextureUnit.Texture0);
             _gl.BindTexture(TextureTarget.Texture2D, 0);
@@ -8082,12 +8401,12 @@ namespace LimitlessSquareEngine
                 .ToList();
 
             var opaque = commands
-                .Where(c => !c.IsSkybox && c.QueueType == RenderQueueType.Opaque && !ShouldCullCommandByCameraFrustum(c))
+                .Where(c => !c.IsSkybox && c.QueueType == RenderQueueType.Opaque && !ShouldCullCommandByCameraFrustumAndRecord(c))
                 .OrderBy(c => c.SubmissionIndex)
                 .ToList();
 
             var transparent = commands
-                .Where(c => !c.IsSkybox && c.QueueType == RenderQueueType.Transparent && !ShouldCullCommandByCameraFrustum(c))
+                .Where(c => !c.IsSkybox && c.QueueType == RenderQueueType.Transparent && !ShouldCullCommandByCameraFrustumAndRecord(c))
                 .OrderByDescending(c => c.SortDepth)
                 .ThenBy(c => c.SubmissionIndex)
                 .ToList();
@@ -8139,7 +8458,7 @@ namespace LimitlessSquareEngine
 
             ApplySkybox(cmd.Skybox);
 
-            _gl.DrawArrays(cmd.PrimitiveType, 0, (uint)(cmd.Vertices.Length / cmd.VertexStrideFloats));
+            SubmitDrawArrays(cmd.PrimitiveType, 0, (uint)(cmd.Vertices.Length / cmd.VertexStrideFloats));
 
             _gl.DepthMask(true);
             _gl.Enable(GLEnum.DepthTest);
@@ -8218,7 +8537,7 @@ namespace LimitlessSquareEngine
             {
                 ApplyBaseDepthState();
                 ApplyBaseMaterialAndState();
-                _gl.DrawArrays(cmd.PrimitiveType, 0, (uint)(cmd.Vertices.Length / cmd.VertexStrideFloats));
+                SubmitDrawArrays(cmd.PrimitiveType, 0, (uint)(cmd.Vertices.Length / cmd.VertexStrideFloats));
             }
 
             void DrawOutlinePass()
@@ -8234,7 +8553,7 @@ namespace LimitlessSquareEngine
                 if (cmd.Material != null)
                     ApplySceneMaterial(cmd.Material, cmd);
 
-                _gl.DrawArrays(cmd.PrimitiveType, 0, (uint)(cmd.Vertices.Length / cmd.VertexStrideFloats));
+                SubmitDrawArrays(cmd.PrimitiveType, 0, (uint)(cmd.Vertices.Length / cmd.VertexStrideFloats));
 
                 ApplyBaseDepthState();
                 ApplyCullMode(cmd.CullMode);
@@ -8257,7 +8576,7 @@ namespace LimitlessSquareEngine
                 _gl.ColorMask(false, false, false, false);
 
                 ApplyBaseMaterialAndState();
-                _gl.DrawArrays(cmd.PrimitiveType, 0, (uint)(cmd.Vertices.Length / cmd.VertexStrideFloats));
+                SubmitDrawArrays(cmd.PrimitiveType, 0, (uint)(cmd.Vertices.Length / cmd.VertexStrideFloats));
 
                 _gl.ColorMask(true, true, true, true);
 
@@ -8467,6 +8786,25 @@ namespace LimitlessSquareEngine
             _uploadedLightCount = 0;
 
             _sceneCommandWarmupCache.Clear();
+
+            for (int i = 0; i < _gpuTimerQueries.Length; i++)
+            {
+                if (_gpuTimerQueries[i] != 0)
+                {
+                    _gl.DeleteQuery(_gpuTimerQueries[i]);
+                    _gpuTimerQueries[i] = 0;
+                }
+
+                _gpuTimerQueryPending[i] = false;
+            }
+
+            _gpuTimerWriteIndex = 0;
+            _gpuTimerSupported = true;
+            _gpuTimerQueryActive = false;
+            _renderFrameDiagnosticsActive = false;
+            _lastGpuFrameMilliseconds = 0.0;
+            _lastGpuFrameMillisecondsAvailable = false;
+            _lastRenderFrameDiagnostics = default;
 
             _capturedSkyboxReflectionValid = false;
             _capturedSkyboxReflectionCameraObjectId = "";

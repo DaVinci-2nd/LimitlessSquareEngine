@@ -10,6 +10,7 @@ using SkiaSharp;
 using System;
 using System.Collections.Concurrent;
 using System.Drawing;
+using System.Globalization;
 using System.Numerics;
 using System.Reflection;
 using System.Runtime.Loader;
@@ -134,6 +135,17 @@ namespace LimitlessSquareEngine
         public int Width { get; init; }
         public int Height { get; init; }
         public byte[] PixelsRgba { get; init; } = Array.Empty<byte>();
+    }
+
+    public readonly struct RenderFrameDiagnostics
+    {
+        public int SubmittedCommands { get; init; }
+        public int CulledCommands { get; init; }
+        public int DrawCalls { get; init; }
+        public long DrawnVertices { get; init; }
+        public long DrawnTriangles { get; init; }
+        public bool GpuTimeAvailable { get; init; }
+        public double GpuFrameMilliseconds { get; init; }
     }
 
     public enum ResourceLoadTiming
@@ -843,7 +855,21 @@ namespace LimitlessSquareEngine
 
             try
             {
-                string text = $"{_window.Size.X}|{_window.Size.Y}|{_titleDisplayedFps}";
+                RenderFrameDiagnostics diagnostics = _graphics?.GetLastRenderFrameDiagnostics() ?? default;
+                string gpuMilliseconds = diagnostics.GpuTimeAvailable
+                    ? diagnostics.GpuFrameMilliseconds.ToString("F2", CultureInfo.InvariantCulture)
+                    : "-1";
+
+                string text = string.Join("|",
+                    _window.Size.X.ToString(CultureInfo.InvariantCulture),
+                    _window.Size.Y.ToString(CultureInfo.InvariantCulture),
+                    _titleDisplayedFps.ToString(CultureInfo.InvariantCulture),
+                    gpuMilliseconds,
+                    diagnostics.DrawCalls.ToString(CultureInfo.InvariantCulture),
+                    diagnostics.DrawnVertices.ToString(CultureInfo.InvariantCulture),
+                    diagnostics.DrawnTriangles.ToString(CultureInfo.InvariantCulture),
+                    diagnostics.CulledCommands.ToString(CultureInfo.InvariantCulture),
+                    diagnostics.SubmittedCommands.ToString(CultureInfo.InvariantCulture));
                 File.WriteAllText(_externalStatusFilePath, text);
             }
             catch
