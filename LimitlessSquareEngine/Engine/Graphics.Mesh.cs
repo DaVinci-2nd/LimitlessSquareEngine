@@ -32,6 +32,8 @@ namespace LimitlessSquareEngine
             public string? DefaultMaterialKey { get; }
             public Vector3 LocalCenter { get; }
             public bool VertexColorsAreWhite { get; }
+            public Vector3 LocalBoundsMin { get; }
+            public Vector3 LocalBoundsMax { get; }
 
             public MeshSurfaceData(
                 string id,
@@ -41,7 +43,9 @@ namespace LimitlessSquareEngine
                 int materialSlot,
                 string? defaultMaterialKey = null,
                 Vector3 localCenter = default,
-                bool vertexColorsAreWhite = false)
+                bool vertexColorsAreWhite = false,
+                Vector3 localBoundsMin = default,
+                Vector3 localBoundsMax = default)
             {
                 Id = id;
                 Vertices = vertices;
@@ -51,6 +55,8 @@ namespace LimitlessSquareEngine
                 DefaultMaterialKey = defaultMaterialKey;
                 LocalCenter = localCenter;
                 VertexColorsAreWhite = vertexColorsAreWhite;
+                LocalBoundsMin = localBoundsMin;
+                LocalBoundsMax = localBoundsMax;
             }
         }
 
@@ -70,6 +76,7 @@ namespace LimitlessSquareEngine
                 VertexStrideFloats = vertexStrideFloats;
 
                 Vector3 localCenter = Graphics.ComputeMeshLocalCenter(vertices, vertexStrideFloats);
+                Graphics.ComputeMeshLocalBounds(vertices, vertexStrideFloats, out Vector3 localBoundsMin, out Vector3 localBoundsMax);
                 bool vertexColorsAreWhite = Graphics.AreMeshVertexColorsWhite(vertices, vertexStrideFloats);
 
                 Surfaces = new[]
@@ -82,7 +89,9 @@ namespace LimitlessSquareEngine
                         0,
                         null,
                         localCenter,
-                        vertexColorsAreWhite)
+                        vertexColorsAreWhite,
+                        localBoundsMin,
+                        localBoundsMax)
                 };
             }
 
@@ -134,6 +143,28 @@ namespace LimitlessSquareEngine
             }
 
             return center / vertexCount;
+        }
+
+        private static void ComputeMeshLocalBounds(float[] vertices, int vertexStrideFloats, out Vector3 min, out Vector3 max)
+        {
+            int vertexCount = vertices.Length / vertexStrideFloats;
+            if (vertexCount <= 0)
+            {
+                min = Vector3.Zero;
+                max = Vector3.Zero;
+                return;
+            }
+
+            min = new Vector3(float.PositiveInfinity, float.PositiveInfinity, float.PositiveInfinity);
+            max = new Vector3(float.NegativeInfinity, float.NegativeInfinity, float.NegativeInfinity);
+
+            for (int i = 0; i < vertexCount; i++)
+            {
+                int idx = i * vertexStrideFloats;
+                Vector3 p = new Vector3(vertices[idx + 0], vertices[idx + 1], vertices[idx + 2]);
+                min = Vector3.Min(min, p);
+                max = Vector3.Max(max, p);
+            }
         }
 
         private static bool AreMeshVertexColorsWhite(float[] vertices, int vertexStrideFloats)
@@ -292,6 +323,7 @@ namespace LimitlessSquareEngine
             InvalidateMeshGpuResources(id);
 
             Vector3 localCenter = ComputeMeshLocalCenter(vertices, vertexStrideFloats);
+            ComputeMeshLocalBounds(vertices, vertexStrideFloats, out Vector3 localBoundsMin, out Vector3 localBoundsMax);
             bool vertexColorsAreWhite = AreMeshVertexColorsWhite(vertices, vertexStrideFloats);
 
             MeshSurfaceData surface = new MeshSurfaceData(
@@ -302,7 +334,9 @@ namespace LimitlessSquareEngine
                 0,
                 null,
                 localCenter,
-                vertexColorsAreWhite);
+                vertexColorsAreWhite,
+                localBoundsMin,
+                localBoundsMax);
 
             _meshes[id] = new MeshData(id, new[] { surface });
         }
@@ -539,6 +573,7 @@ namespace LimitlessSquareEngine
                 generatedMaterialKeysByIndex.TryGetValue(mesh.MaterialIndex, out string? defaultMaterialKey);
 
                 Vector3 localCenter = ComputeMeshLocalCenter(surfaceVertices, vertexStrideFloats);
+                ComputeMeshLocalBounds(surfaceVertices, vertexStrideFloats, out Vector3 localBoundsMin, out Vector3 localBoundsMax);
                 bool vertexColorsAreWhite = AreMeshVertexColorsWhite(surfaceVertices, vertexStrideFloats);
 
                 surfaces.Add(new MeshSurfaceData(
@@ -549,7 +584,9 @@ namespace LimitlessSquareEngine
                     mesh.MaterialIndex,
                     defaultMaterialKey,
                     localCenter,
-                    vertexColorsAreWhite));
+                    vertexColorsAreWhite,
+                    localBoundsMin,
+                    localBoundsMax));
             }
 
             if (surfaces.Count == 0)

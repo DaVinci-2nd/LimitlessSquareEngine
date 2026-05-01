@@ -1198,6 +1198,9 @@ namespace LimitlessSquareEngine
             public string MeshId;
             public string MeshSurfaceId;
             public bool MeshVertexColorsAreWhite;
+            public bool HasBoundingBox;
+            public Vector3 BoundingLocalMin;
+            public Vector3 BoundingLocalMax;
 
             public bool UsePremultipliedTransparentBlend;
         }
@@ -1207,6 +1210,103 @@ namespace LimitlessSquareEngine
         private readonly List<RenderCommand> _sceneCommandsScratch = new();
         private readonly List<RenderCommand> _canvasCommandsScratch = new();
         private readonly List<RenderCommand> _fogSceneCommandsScratch = new();
+        private readonly HashSet<string> _sceneCommandWarmupCache = new(StringComparer.Ordinal);
+
+        private string BuildSceneCommandWarmupKey(in RenderCommand cmd)
+        {
+            string materialId = cmd.Material != null ? cmd.Material.Id : "";
+            string materialRaw =
+                cmd.Material != null &&
+                cmd.Material.Parameters.ValueKind != JsonValueKind.Undefined &&
+                cmd.Material.Parameters.ValueKind != JsonValueKind.Null
+                    ? cmd.Material.Parameters.GetRawText()
+                    : "";
+
+            return string.Join("|",
+                cmd.Program.ToString(CultureInfo.InvariantCulture),
+                cmd.MeshId ?? "",
+                cmd.MeshSurfaceId ?? "",
+                cmd.VertexStrideFloats.ToString(CultureInfo.InvariantCulture),
+                materialId,
+                materialRaw);
+        }
+
+        private void WarmupSceneCommandResources(in RenderCommand cmd)
+        {
+            if (cmd.Pass != RenderPass.Scene)
+                return;
+
+            if (cmd.IsSkybox)
+                return;
+
+            if (cmd.Material == null)
+                return;
+
+            string key = BuildSceneCommandWarmupKey(cmd);
+            if (!_sceneCommandWarmupCache.Add(key))
+                return;
+
+            uint previousProgram = _currentProgram;
+            RenderSpace previousRenderSpace = _activeRenderSpace;
+            Matrix4x4 previousModel = _activeModelMatrix;
+            Matrix4x4 previousView = _activeViewMatrix;
+            Matrix4x4 previousProjection = _activeProjectionMatrix;
+
+            _currentProgram = cmd.Program;
+            _gl.UseProgram(cmd.Program);
+
+            _activeRenderSpace = cmd.RenderSpace;
+            _activeModelMatrix = cmd.Model;
+            _activeViewMatrix = cmd.View;
+            _activeProjectionMatrix = cmd.Projection;
+
+            _gl.ColorMask(false, false, false, false);
+            _gl.DepthMask(false);
+            _gl.StencilMask(0x00);
+
+            BindCommandGeometry(cmd);
+            ApplyCullMode(cmd.CullMode);
+
+            Dictionary<string, int> samplerUnits = ApplyMaterialDefaults(_currentProgram);
+            ApplyCoreSceneUniforms();
+
+            if (cmd.Material.Parameters.ValueKind == JsonValueKind.Object)
+            {
+                foreach (JsonProperty prop in cmd.Material.Parameters.EnumerateObject())
+                {
+                    ApplyMaterialParameter(prop.Name, prop.Value, samplerUnits, cmd.Material);
+                }
+            }
+
+            if (ReadReflectionSourceMode(cmd.Material) == 1)
+            {
+                TryGetReflectionEnvironmentCube(cmd.Material, cmd, out _, out _);
+            }
+
+            int vertexCount = cmd.Vertices.Length / cmd.VertexStrideFloats;
+            uint warmupVertexCount = (uint)Math.Min(vertexCount, cmd.PrimitiveType == PrimitiveType.Triangles ? 3 : 1);
+
+            if (warmupVertexCount > 0)
+                _gl.DrawArrays(cmd.PrimitiveType, 0, warmupVertexCount);
+
+            _gl.ColorMask(true, true, true, true);
+            _gl.DepthMask(true);
+            _gl.StencilMask(0xFF);
+
+            _currentProgram = previousProgram;
+            _gl.UseProgram(previousProgram);
+
+            _activeRenderSpace = previousRenderSpace;
+            _activeModelMatrix = previousModel;
+            _activeViewMatrix = previousView;
+            _activeProjectionMatrix = previousProjection;
+
+            _gl.ActiveTexture(TextureUnit.Texture0);
+            _gl.BindTexture(TextureTarget.Texture2D, 0);
+            _gl.BindTexture(TextureTarget.TextureCubeMap, 0);
+            _gl.BindBuffer(BufferTargetARB.ArrayBuffer, 0);
+            _gl.BindVertexArray(0);
+        }
 
         private void EnsureDynamicGeometryScratchCapacity(int requiredFloatCount)
         {
@@ -1623,6 +1723,67 @@ namespace LimitlessSquareEngine
             Vector4 world = Vector4.Transform(new Vector4(localCenter, 1f), model);
             Vector4 viewPos = Vector4.Transform(world, view);
             return -viewPos.Z;
+        }
+
+        private static Vector3 GetBoundingBoxCorner(Vector3 min, Vector3 max, int index)
+        {
+            return new Vector3(
+                (index & 1) == 0 ? min.X : max.X,
+                (index & 2) == 0 ? min.Y : max.Y,
+                (index & 4) == 0 ? min.Z : max.Z);
+        }
+
+        private bool ShouldCullCommandByCameraFrustum(in RenderCommand cmd)
+        {
+            if (!cmd.HasBoundingBox)
+                return false;
+
+            if (cmd.RenderSpace != RenderSpace.Camera)
+                return false;
+
+            if (cmd.IsSkybox)
+                return false;
+
+            Matrix4x4 modelView = cmd.Model * cmd.View;
+            Matrix4x4 modelViewProjection = modelView * cmd.Projection;
+
+            float near = MathF.Max(0.0001f, cmd.ClusterNear);
+            float far = MathF.Max(near + 0.0001f, cmd.ClusterFar);
+
+            bool allLeft = true;
+            bool allRight = true;
+            bool allBottom = true;
+            bool allTop = true;
+            bool allTooNear = true;
+            bool allTooFar = true;
+
+            for (int i = 0; i < 8; i++)
+            {
+                Vector3 local = GetBoundingBoxCorner(cmd.BoundingLocalMin, cmd.BoundingLocalMax, i);
+                Vector4 local4 = new Vector4(local, 1f);
+                Vector4 view = Vector4.Transform(local4, modelView);
+                Vector4 clip = Vector4.Transform(local4, modelViewProjection);
+
+                if (clip.X >= -clip.W)
+                    allLeft = false;
+
+                if (clip.X <= clip.W)
+                    allRight = false;
+
+                if (clip.Y >= -clip.W)
+                    allBottom = false;
+
+                if (clip.Y <= clip.W)
+                    allTop = false;
+
+                if (view.Z <= -near)
+                    allTooNear = false;
+
+                if (view.Z >= -far)
+                    allTooFar = false;
+            }
+
+            return allLeft || allRight || allBottom || allTop || allTooNear || allTooFar;
         }
 
         /// <summary>
@@ -3172,6 +3333,12 @@ namespace LimitlessSquareEngine
                 for (int j = 0; j < list.Count; j++)
                     clusterIndices[writeCursor++] = list[j];
             }
+        }
+
+        private void PrepareLightingBuffersForBatch(in RenderCommand batchAnchor)
+        {
+            InitializeLightingSupportResources();
+            UploadPointLightsForCommand(batchAnchor);
         }
 
         private void ApplyLightingSupportUniforms(in RenderCommand cmd)
@@ -7512,10 +7679,14 @@ namespace LimitlessSquareEngine
                         MeshId = obj.Mesh ?? "",
                         MeshSurfaceId = surface.Id,
                         CameraObjectId = cameraItem.ObjectId,
-                        MeshVertexColorsAreWhite = surface.VertexColorsAreWhite
+                        MeshVertexColorsAreWhite = surface.VertexColorsAreWhite,
+                        HasBoundingBox = true,
+                        BoundingLocalMin = surface.LocalBoundsMin,
+                        BoundingLocalMax = surface.LocalBoundsMax
                     };
 
                     ApplyFogStateToRenderCommand(ref cmd, fogSettings, skybox);
+                    WarmupSceneCommandResources(cmd);
                     _renderQueue.Add(cmd);
                 }
             }
@@ -7782,6 +7953,7 @@ namespace LimitlessSquareEngine
                     CaptureSkyboxReflectionForBatch(first, batchSkybox);
 
                 PrepareDirectionalShadowBatch(first, batchCommands);
+                PrepareLightingBuffersForBatch(first);
 
                 CameraPostProcessSettings? postSettings = ResolvePostProcessForCamera(first.CameraObjectId);
 
@@ -7910,12 +8082,12 @@ namespace LimitlessSquareEngine
                 .ToList();
 
             var opaque = commands
-                .Where(c => !c.IsSkybox && c.QueueType == RenderQueueType.Opaque)
+                .Where(c => !c.IsSkybox && c.QueueType == RenderQueueType.Opaque && !ShouldCullCommandByCameraFrustum(c))
                 .OrderBy(c => c.SubmissionIndex)
                 .ToList();
 
             var transparent = commands
-                .Where(c => !c.IsSkybox && c.QueueType == RenderQueueType.Transparent)
+                .Where(c => !c.IsSkybox && c.QueueType == RenderQueueType.Transparent && !ShouldCullCommandByCameraFrustum(c))
                 .OrderByDescending(c => c.SortDepth)
                 .ThenBy(c => c.SubmissionIndex)
                 .ToList();
@@ -8293,6 +8465,8 @@ namespace LimitlessSquareEngine
 
             _uploadedLightingBatchId = long.MinValue;
             _uploadedLightCount = 0;
+
+            _sceneCommandWarmupCache.Clear();
 
             _capturedSkyboxReflectionValid = false;
             _capturedSkyboxReflectionCameraObjectId = "";
