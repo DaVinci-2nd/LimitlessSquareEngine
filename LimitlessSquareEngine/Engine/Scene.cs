@@ -326,6 +326,8 @@ namespace LimitlessSquareEngine.Engine
         private static readonly ConcurrentDictionary<string, SceneData> _loadedScenes = new();
         private static readonly ConcurrentDictionary<string, List<SceneCameraQueueItem>> _cameraQueues = new();
 
+        private const int StaticRenderStillFrameThreshold = 1;
+
         private static readonly JsonSerializerOptions _jsonOptions = new JsonSerializerOptions
         {
             PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
@@ -425,6 +427,8 @@ namespace LimitlessSquareEngine.Engine
             {
                 var node = stack.Pop();
                 node.Dirty = true;
+                node.StillFramesSinceLastTransform = 0;
+                node.TransformMutationVersion++;
                 runtime.DirtyNodes.Add(node.Source.Id);
 
                 if (string.Equals(node.Source.Type, "Camera", StringComparison.Ordinal))
@@ -505,6 +509,8 @@ namespace LimitlessSquareEngine.Engine
             public SceneWorldState World;
 
             public bool Dirty = true;
+            public int StillFramesSinceLastTransform = 0;
+            public int TransformMutationVersion = 0;
         }
 
         internal sealed class SceneRuntimeData
@@ -1065,6 +1071,53 @@ namespace LimitlessSquareEngine.Engine
                 .ToArray();
         }
 
+        private static bool HasNonStaticPhysics(SceneRuntimeNode node)
+        {
+            PhysicsBody? physics = node.Source.Physics;
+
+            if (physics == null || !physics.Enabled)
+                return false;
+
+            return !string.Equals(physics.MotionType, "Static", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool IsStaticRenderEligible(SceneRuntimeNode node)
+        {
+            if (!string.Equals(node.Source.Type, "Object", StringComparison.Ordinal))
+                return false;
+
+            if (!node.Source.Active || !node.Source.Visible)
+                return false;
+
+            if (string.IsNullOrWhiteSpace(node.Source.Mesh))
+                return false;
+
+            if (HasNonStaticPhysics(node))
+                return false;
+
+            return node.StillFramesSinceLastTransform >= StaticRenderStillFrameThreshold;
+        }
+
+        private static void UpdateStaticRenderStability(SceneRuntimeData runtime)
+        {
+            foreach (SceneRuntimeNode node in runtime.Nodes.Values)
+            {
+                if (node.Dirty || HasNonStaticPhysics(node))
+                {
+                    node.StillFramesSinceLastTransform = 0;
+                    continue;
+                }
+
+                if (node.StillFramesSinceLastTransform < StaticRenderStillFrameThreshold)
+                {
+                    node.StillFramesSinceLastTransform++;
+
+                    if (node.StillFramesSinceLastTransform == StaticRenderStillFrameThreshold)
+                        runtime.DirtyNodes.Add(node.Source.Id);
+                }
+            }
+        }
+
         public static void FlushDirtyToRenderer()
         {
             if (_boundGraphics == null)
@@ -1074,6 +1127,8 @@ namespace LimitlessSquareEngine.Engine
             {
                 string sceneId = pair.Key;
                 SceneRuntimeData runtime = pair.Value;
+
+                UpdateStaticRenderStability(runtime);
 
                 if (runtime.DirtyNodes.Count == 0 && !runtime.CameraCacheDirty)
                     continue;
@@ -1099,7 +1154,9 @@ namespace LimitlessSquareEngine.Engine
                         RenderTag = node.Source.RenderTag,
                         WorldPosition = node.World.Position,
                         WorldRotation = node.World.Rotation,
-                        WorldScale = node.World.Scale
+                        WorldScale = node.World.Scale,
+                        StaticRenderEligible = IsStaticRenderEligible(node),
+                        TransformRevision = node.TransformMutationVersion
                     });
 
                     if (string.Equals(node.Source.Type, "Light", StringComparison.Ordinal))

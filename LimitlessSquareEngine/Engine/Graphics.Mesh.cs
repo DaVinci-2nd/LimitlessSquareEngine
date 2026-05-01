@@ -14,6 +14,8 @@ namespace LimitlessSquareEngine
     {
         private readonly Dictionary<string, MeshData> _meshes = new(StringComparer.Ordinal);
 
+        private int _meshRevisionCounter = 0;
+
         private sealed class MeshSurfaceGpuResource
         {
             public uint Vao { get; init; }
@@ -63,14 +65,16 @@ namespace LimitlessSquareEngine
         private readonly struct MeshData
         {
             public string Id { get; }
+            public int Revision { get; }
             public float[] Vertices { get; }
             public PrimitiveType PrimitiveType { get; }
             public int VertexStrideFloats { get; }
             public MeshSurfaceData[] Surfaces { get; }
 
-            public MeshData(string id, float[] vertices, PrimitiveType primitiveType, int vertexStrideFloats)
+            public MeshData(string id, float[] vertices, PrimitiveType primitiveType, int vertexStrideFloats, int revision)
             {
                 Id = id;
+                Revision = revision;
                 Vertices = vertices;
                 PrimitiveType = primitiveType;
                 VertexStrideFloats = vertexStrideFloats;
@@ -95,12 +99,13 @@ namespace LimitlessSquareEngine
                 };
             }
 
-            public MeshData(string id, MeshSurfaceData[] surfaces)
+            public MeshData(string id, MeshSurfaceData[] surfaces, int revision)
             {
                 if (surfaces == null || surfaces.Length == 0)
                     throw new ArgumentException("[X] Mesh surfaces cannot be null or empty.", nameof(surfaces));
 
                 Id = id;
+                Revision = revision;
                 Surfaces = surfaces;
 
                 Vertices = surfaces[0].Vertices;
@@ -277,6 +282,8 @@ namespace LimitlessSquareEngine
                 DeleteMeshSurfaceGpuResource(_meshSurfaceGpuCache[key]);
                 _meshSurfaceGpuCache.Remove(key);
             }
+
+            InvalidateStaticSceneObjectRenderCachesForMesh(meshId);
         }
 
         private bool TryBindStaticCommandGeometry(in RenderCommand cmd)
@@ -338,7 +345,8 @@ namespace LimitlessSquareEngine
                 localBoundsMin,
                 localBoundsMax);
 
-            _meshes[id] = new MeshData(id, new[] { surface });
+            int revision = ++_meshRevisionCounter;
+            _meshes[id] = new MeshData(id, new[] { surface }, revision);
         }
 
         [MoonSharpHidden]
@@ -382,7 +390,8 @@ namespace LimitlessSquareEngine
                 generatedMaterialKeysByIndex);
 
             InvalidateMeshGpuResources(meshKey);
-            _meshes[meshKey] = new MeshData(meshKey, surfaces.ToArray());
+            int revision = ++_meshRevisionCounter;
+            _meshes[meshKey] = new MeshData(meshKey, surfaces.ToArray(), revision);
 
             Console.WriteLine($"[i] Registered OBJ mesh: {meshKey}.obj ({surfaces.Count} surfaces)");
         }
