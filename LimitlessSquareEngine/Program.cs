@@ -1299,8 +1299,21 @@ namespace LimitlessSquareEngine
                 (sceneId, objectId, value) => Scene.SetLocalPosition(sceneId, objectId, value),
                 (sceneId, objectId, value) => Scene.SetLocalRotation(sceneId, objectId, value),
                 ConsumeLatestFrameCore,
-                paused => QueueEditorHostAction(() => SetRuntimePausedCore(paused)),
-                GetRuntimePausedCore,
+                (screenX, screenY) => _graphics?.RaycastRenderedMeshAtPixel(screenX, screenY) ?? new RenderedMeshRaycastHit
+                {
+                    Hit = false,
+                    ScreenX = screenX,
+                    ScreenY = screenY
+                },
+                (sceneId, objectId, enabled, r, g, b, thicknessPixels) => QueueEditorHostAction(() =>
+                {
+                    _graphics?.SetSceneObjectContour(sceneId, objectId, enabled, r, g, b, thicknessPixels);
+                }),
+                sceneId => QueueEditorHostAction(() =>
+                {
+                    _graphics?.ClearSceneContours(sceneId);
+                }),
+                paused => QueueEditorHostAction(() => SetRuntimePausedCore(paused)), GetRuntimePausedCore,
                 () => QueueEditorHostAction(StepRuntimeFrameCore),
                 folderPath => QueueEditorHostAction(() => SetGameStartupFolderCore(folderPath)),
                 GetGameStartupFolderCore);
@@ -1613,6 +1626,7 @@ namespace LimitlessSquareEngine
             // 注册数据类型
             UserData.RegisterType<GameData>();
             UserData.RegisterType<Graphics>();
+            UserData.RegisterType<RenderedMeshRaycastHit>();
             UserData.RegisterType<SceneData>();
             UserData.RegisterType<SceneObject>();
             UserData.RegisterType<SceneTransform>();

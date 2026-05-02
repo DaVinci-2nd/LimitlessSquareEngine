@@ -21,6 +21,9 @@ namespace LimitlessSquareEngine
         private static Action<string, string, Double3>? _setSceneObjectLocalPosition;
         private static Action<string, string, Double3>? _setSceneObjectLocalRotation;
         private static Func<EditorRenderedFrame?>? _consumeLatestFrame;
+        private static Func<int, int, RenderedMeshRaycastHit>? _raycastRenderedMeshAtPixel;
+        private static Action<string, string, bool, float, float, float, float>? _setSceneObjectContour;
+        private static Action<string>? _clearSceneContours;
         private static Action<bool>? _setRuntimePaused;
         private static Func<bool>? _getRuntimePaused;
         private static Action? _stepRuntimeFrame;
@@ -40,6 +43,9 @@ namespace LimitlessSquareEngine
             Action<string, string, Double3> setSceneObjectLocalPosition,
             Action<string, string, Double3> setSceneObjectLocalRotation,
             Func<EditorRenderedFrame?> consumeLatestFrame,
+            Func<int, int, RenderedMeshRaycastHit> raycastRenderedMeshAtPixel,
+            Action<string, string, bool, float, float, float, float> setSceneObjectContour,
+            Action<string> clearSceneContours,
             Action<bool> setRuntimePaused,
             Func<bool> getRuntimePaused,
             Action stepRuntimeFrame,
@@ -58,6 +64,9 @@ namespace LimitlessSquareEngine
             _setSceneObjectLocalPosition = setSceneObjectLocalPosition;
             _setSceneObjectLocalRotation = setSceneObjectLocalRotation;
             _consumeLatestFrame = consumeLatestFrame;
+            _raycastRenderedMeshAtPixel = raycastRenderedMeshAtPixel;
+            _setSceneObjectContour = setSceneObjectContour;
+            _clearSceneContours = clearSceneContours;
             _setRuntimePaused = setRuntimePaused;
             _getRuntimePaused = getRuntimePaused;
             _stepRuntimeFrame = stepRuntimeFrame;
@@ -79,6 +88,9 @@ namespace LimitlessSquareEngine
             _setSceneObjectLocalPosition = null;
             _setSceneObjectLocalRotation = null;
             _consumeLatestFrame = null;
+            _raycastRenderedMeshAtPixel = null;
+            _setSceneObjectContour = null;
+            _clearSceneContours = null;
             _setRuntimePaused = null;
             _getRuntimePaused = null;
             _stepRuntimeFrame = null;
@@ -120,6 +132,46 @@ namespace LimitlessSquareEngine
                 throw new InvalidOperationException("Editor host bridge is not bound.");
 
             return _consumeLatestFrame();
+        }
+
+        public static RenderedMeshRaycastHit RaycastRenderedMeshAtPixel(int screenX, int screenY)
+        {
+            if (_raycastRenderedMeshAtPixel == null)
+                throw new InvalidOperationException("Editor host bridge is not bound.");
+
+            return _raycastRenderedMeshAtPixel(screenX, screenY);
+        }
+
+        public static void SetSceneObjectContour(
+            string sceneId,
+            string objectId,
+            bool enabled,
+            float r,
+            float g,
+            float b,
+            float thicknessPixels)
+        {
+            if (string.IsNullOrWhiteSpace(sceneId))
+                throw new ArgumentException("Scene ID cannot be null or empty.", nameof(sceneId));
+
+            if (string.IsNullOrWhiteSpace(objectId))
+                throw new ArgumentException("Object ID cannot be null or empty.", nameof(objectId));
+
+            if (_setSceneObjectContour == null)
+                throw new InvalidOperationException("Editor host bridge is not bound.");
+
+            _setSceneObjectContour(sceneId, objectId, enabled, r, g, b, thicknessPixels);
+        }
+
+        public static void ClearSceneContours(string sceneId)
+        {
+            if (string.IsNullOrWhiteSpace(sceneId))
+                throw new ArgumentException("Scene ID cannot be null or empty.", nameof(sceneId));
+
+            if (_clearSceneContours == null)
+                throw new InvalidOperationException("Editor host bridge is not bound.");
+
+            _clearSceneContours(sceneId);
         }
 
         public static void SetAssetRootAndReloadAssets(string assetRootPath)

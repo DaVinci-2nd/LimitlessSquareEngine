@@ -54,6 +54,7 @@ namespace LimitlessSquareEngine.Editor
         private string? _currentPreviewScenePath;
         private SceneData? _currentTreeScene;
         private SceneData? _currentPreviewScene;
+        private string? _currentPreviewContouredObjectId;
 
         private string? _currentSceneOriginalPath;
         private Border? _sceneTreeDockHeader;
@@ -1078,6 +1079,14 @@ namespace LimitlessSquareEngine.Editor
         {
             PointerPoint point = e.GetCurrentPoint(_sceneHost);
 
+            if (point.Properties.PointerUpdateKind == PointerUpdateKind.LeftButtonPressed)
+            {
+                if (!_isSceneHostRightDragging && TryHandleSceneHostRenderedMeshSelection(point.Position))
+                    e.Handled = true;
+
+                return;
+            }
+
             if (point.Properties.PointerUpdateKind == PointerUpdateKind.MiddleButtonPressed)
             {
                 if (!_isSceneHostRightDragging)
@@ -1224,6 +1233,90 @@ namespace LimitlessSquareEngine.Editor
                    key == Key.RightShift;
         }
 
+        private bool TryHandleSceneHostRenderedMeshSelection(Point position)
+        {
+            if (_currentTreeScene == null)
+                return false;
+
+            if (!EditorHostBridge.IsRenderWindowAlive)
+                return false;
+
+            PixelSize hostSize = GetSceneHostPixelSize();
+            if (hostSize.Width <= 0 || hostSize.Height <= 0)
+                return false;
+
+            double scaling = TopLevel.GetTopLevel(_sceneHost)?.RenderScaling ?? 1.0;
+
+            int screenX = (int)Math.Floor(position.X * scaling);
+            int screenY = (int)Math.Floor(position.Y * scaling);
+
+            screenX = Math.Clamp(screenX, 0, hostSize.Width - 1);
+            screenY = Math.Clamp(screenY, 0, hostSize.Height - 1);
+
+            RenderedMeshRaycastHit hit;
+
+            try
+            {
+                hit = EditorHostBridge.RaycastRenderedMeshAtPixel(screenX, screenY);
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine(ex.ToString());
+                Debug.WriteLine(ex.GetBaseException().ToString());
+                return false;
+            }
+
+            if (!hit.Hit || string.IsNullOrWhiteSpace(hit.ObjectId))
+            {
+                ClearSceneHostRenderedMeshSelection();
+                return true;
+            }
+
+            SceneObject? matched = _currentTreeScene.Objects.FirstOrDefault(
+                o => string.Equals(o.Id, hit.ObjectId, StringComparison.Ordinal));
+
+            if (matched == null)
+            {
+                ClearSceneHostRenderedMeshSelection();
+                return true;
+            }
+
+            SelectSceneObjectFromSceneHost(matched);
+            return true;
+        }
+
+        private void SelectSceneObjectFromSceneHost(SceneObject obj)
+        {
+            _selectedSceneObject = obj;
+            ApplyPreviewSelectionContour(obj);
+
+            _isProgrammaticSceneTreeSelection = true;
+            try
+            {
+                TrySelectSceneObjectInTree(obj);
+            }
+            finally
+            {
+                _isProgrammaticSceneTreeSelection = false;
+            }
+
+            ShowSceneObjectInspector(obj);
+
+            if (_sceneTreeDeleteButton != null)
+                _sceneTreeDeleteButton.IsEnabled = true;
+        }
+
+        private void ClearSceneHostRenderedMeshSelection()
+        {
+            ClearSelectedSceneObjectState();
+            ClearPreviewSelectionContour();
+
+            if (_sceneTreeView?.ItemsSource is System.Collections.IEnumerable items)
+                ClearSceneTreeSelection(items);
+
+            RightDockSlot.Content = CreatePlaceholder("未选中文件或节点");
+        }
+
         private void ResetSceneHostNavigationState()
         {
             _isSceneHostRightDragging = false;
@@ -1249,6 +1342,88 @@ namespace LimitlessSquareEngine.Editor
 
             normalized = value / length;
             return true;
+        }
+
+        private bool CanPreviewContourSceneObject(SceneObject? obj)
+        {
+            if (obj == null)
+                return false;
+
+            if (!obj.Active || !obj.Visible)
+                return false;
+
+            if (string.IsNullOrWhiteSpace(obj.Mesh))
+                return false;
+
+            return true;
+        }
+
+        private void ClearPreviewSelectionContour()
+        {
+            _currentPreviewContouredObjectId = null;
+
+            if (!EditorHostBridge.IsRenderWindowAlive)
+                return;
+
+            try
+            {
+                EditorHostBridge.ClearSceneContours(EditorPreviewSceneId);
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine(ex.ToString());
+                Debug.WriteLine(ex.GetBaseException().ToString());
+            }
+        }
+
+        private void ApplyPreviewSelectionContour(SceneObject? treeObject)
+        {
+            ClearPreviewSelectionContour();
+
+            if (treeObject == null)
+                return;
+
+            if (_currentPreviewScene == null)
+                return;
+
+            SceneObject? previewObject = _currentPreviewScene.Objects.FirstOrDefault(
+                o => string.Equals(o.Id, treeObject.Id, StringComparison.Ordinal));
+
+            if (!CanPreviewContourSceneObject(previewObject))
+                return;
+
+            if (!EditorHostBridge.IsRenderWindowAlive)
+                return;
+
+            try
+            {
+                EditorHostBridge.SetSceneObjectContour(
+                    EditorPreviewSceneId,
+                    previewObject.Id,
+                    true,
+                    0f,
+                    1f,
+                    1f,
+                    2f);
+
+                _currentPreviewContouredObjectId = previewObject.Id;
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine(ex.ToString());
+                Debug.WriteLine(ex.GetBaseException().ToString());
+            }
+        }
+
+        private void ReapplyPreviewSelectionOutline()
+        {
+            if (_selectedSceneObject == null)
+            {
+                ClearPreviewSelectionContour();
+                return;
+            }
+
+            ApplyPreviewSelectionContour(_selectedSceneObject);
         }
 
         private void RefreshCurrentPreviewCameraId()
@@ -5714,6 +5889,7 @@ void main()
         private void ClearSelectedSceneObjectState()
         {
             _selectedSceneObject = null;
+            ClearPreviewSelectionContour();
 
             if (_sceneTreeDeleteButton != null)
                 _sceneTreeDeleteButton.IsEnabled = false;
@@ -6914,6 +7090,7 @@ void main()
                     return;
 
                 _selectedSceneObject = obj;
+                ApplyPreviewSelectionContour(obj);
                 ShowSceneObjectInspector(obj);
 
                 if (_sceneTreeDeleteButton != null)

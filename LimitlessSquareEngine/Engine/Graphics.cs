@@ -14,6 +14,22 @@ using System.Text.Json;
 namespace LimitlessSquareEngine
 {
     [MoonSharpUserData]
+    public sealed class RenderedMeshRaycastHit
+    {
+        public bool Hit { get; set; }
+        public int ScreenX { get; set; }
+        public int ScreenY { get; set; }
+        public string SceneId { get; set; } = "";
+        public string ObjectId { get; set; } = "";
+        public string MeshId { get; set; } = "";
+        public string MeshSurfaceId { get; set; } = "";
+        public string CameraObjectId { get; set; } = "";
+        public int ViewportX { get; set; }
+        public int ViewportY { get; set; }
+        public int ViewportWidth { get; set; }
+        public int ViewportHeight { get; set; }
+    }
+    [MoonSharpUserData]
     internal partial class Graphics
     {
         private GL _gl;
@@ -1236,6 +1252,7 @@ namespace LimitlessSquareEngine
             public float ClusterNear;
             public float ClusterFar;
             public string SceneId;
+            public string ObjectId;
             public Double3 CameraWorldPosition;
 
             public string CameraObjectId;
@@ -1293,6 +1310,140 @@ namespace LimitlessSquareEngine
         private readonly List<RenderCommand> _canvasCommandsScratch = new();
         private readonly List<RenderCommand> _fogSceneCommandsScratch = new();
         private readonly HashSet<string> _sceneCommandWarmupCache = new(StringComparer.Ordinal);
+
+        private uint _meshPickFramebuffer = 0;
+        private uint _meshPickColorTexture = 0;
+        private uint _meshPickDepthTexture = 0;
+        private int _meshPickFramebufferWidth = 0;
+        private int _meshPickFramebufferHeight = 0;
+        private uint _meshPickProgram = 0;
+        private int _meshPickModelLocation = -1;
+        private int _meshPickViewLocation = -1;
+        private int _meshPickProjectionLocation = -1;
+        private int _meshPickColorLocation = -1;
+
+        private uint _contourFramebuffer = 0;
+        private uint _contourMaskTexture = 0;
+        private int _contourTargetWidth = 0;
+        private int _contourTargetHeight = 0;
+
+        private uint _contourFillProgram = 0;
+        private int _contourFillModelLocation = -1;
+        private int _contourFillViewLocation = -1;
+        private int _contourFillProjectionLocation = -1;
+
+        private uint _contourCompositeProgram = 0;
+        private int _contourCompositeMaskLocation = -1;
+        private int _contourCompositeTextureSizeLocation = -1;
+        private int _contourCompositeColorLocation = -1;
+        private int _contourCompositeThicknessLocation = -1;
+
+        private uint _contourQuadVao = 0;
+        private uint _contourQuadVbo = 0;
+
+        private readonly Dictionary<string, ContourStyle> _sceneObjectContours = new(StringComparer.Ordinal);
+
+        private sealed class ContourStyle
+        {
+            public Vector3 Color { get; set; } = Vector3.One;
+            public int ThicknessPixels { get; set; } = 1;
+        }
+
+        private readonly struct MeshPickEntry
+        {
+            public string SceneId { get; }
+            public string ObjectId { get; }
+            public string MeshId { get; }
+            public string MeshSurfaceId { get; }
+            public string CameraObjectId { get; }
+            public int ViewportX { get; }
+            public int ViewportY { get; }
+            public int ViewportWidth { get; }
+            public int ViewportHeight { get; }
+
+            public MeshPickEntry(
+                string sceneId,
+                string objectId,
+                string meshId,
+                string meshSurfaceId,
+                string cameraObjectId,
+                int viewportX,
+                int viewportY,
+                int viewportWidth,
+                int viewportHeight)
+            {
+                SceneId = sceneId ?? "";
+                ObjectId = objectId ?? "";
+                MeshId = meshId ?? "";
+                MeshSurfaceId = meshSurfaceId ?? "";
+                CameraObjectId = cameraObjectId ?? "";
+                ViewportX = viewportX;
+                ViewportY = viewportY;
+                ViewportWidth = viewportWidth;
+                ViewportHeight = viewportHeight;
+            }
+        }
+
+        private static string BuildSceneObjectContourKey(string sceneId, string objectId)
+        {
+            return (sceneId ?? "") + "::" + (objectId ?? "");
+        }
+
+        [MoonSharpHidden]
+        public void SetSceneObjectContour(
+            string sceneId,
+            string objectId,
+            bool enabled,
+            float r = 1f,
+            float g = 1f,
+            float b = 1f,
+            float thicknessPixels = 1f)
+        {
+            if (string.IsNullOrWhiteSpace(sceneId) || string.IsNullOrWhiteSpace(objectId))
+                return;
+
+            string key = BuildSceneObjectContourKey(sceneId, objectId);
+
+            if (!enabled)
+            {
+                _sceneObjectContours.Remove(key);
+                return;
+            }
+
+            _sceneObjectContours[key] = new ContourStyle
+            {
+                Color = new Vector3(
+                    Math.Clamp(r, 0f, 1f),
+                    Math.Clamp(g, 0f, 1f),
+                    Math.Clamp(b, 0f, 1f)),
+                ThicknessPixels = Math.Clamp((int)MathF.Round(thicknessPixels), 1, 16)
+            };
+        }
+
+        [MoonSharpHidden]
+        public void ClearSceneObjectContour(string sceneId, string objectId)
+        {
+            if (string.IsNullOrWhiteSpace(sceneId) || string.IsNullOrWhiteSpace(objectId))
+                return;
+
+            _sceneObjectContours.Remove(BuildSceneObjectContourKey(sceneId, objectId));
+        }
+
+        [MoonSharpHidden]
+        public void ClearSceneContours(string sceneId)
+        {
+            if (string.IsNullOrWhiteSpace(sceneId))
+                return;
+
+            string prefix = sceneId + "::";
+
+            List<string> keys = _sceneObjectContours.Keys
+                .Where(k => k.StartsWith(prefix, StringComparison.Ordinal))
+                .ToList();
+
+            foreach (string key in keys)
+                _sceneObjectContours.Remove(key);
+        }
 
         private static string BuildSceneObjectRenderCacheKey(string sceneId, string objectId)
         {
@@ -8083,6 +8234,7 @@ namespace LimitlessSquareEngine
                     ForceWhiteVertexColor = true,
                     IsSkybox = true,
                     SceneId = sceneId,
+                    ObjectId = "",
                     CameraWorldPosition = cameraWorld.Position,
                     CullMode = skybox.CullMode,
                     MeshId = skyboxMesh.Id,
@@ -8153,6 +8305,7 @@ namespace LimitlessSquareEngine
                             ClusterNear = (float)cameraItem.Settings.NearClip,
                             ClusterFar = (float)cameraItem.Settings.FarClip,
                             SceneId = sceneId,
+                            ObjectId = obj.ObjectId,
                             CameraWorldPosition = cameraWorld.Position,
                             RenderSpace = RenderSpace.Camera,
                             Model = model,
@@ -8211,6 +8364,7 @@ namespace LimitlessSquareEngine
                         ClusterNear = (float)cameraItem.Settings.NearClip,
                         ClusterFar = (float)cameraItem.Settings.FarClip,
                         SceneId = sceneId,
+                        ObjectId = obj.ObjectId,
                         CameraWorldPosition = cameraWorld.Position,
                         RenderSpace = RenderSpace.Camera,
                         Model = model,
@@ -8540,6 +8694,7 @@ namespace LimitlessSquareEngine
                         ExecuteBloomPasses(postSettings);
 
                     CompositePostProcessToBackbuffer(first, postSettings);
+                    ExecuteObjectContourPass(batchCommands, first);
                 }
                 else
                 {
@@ -8561,6 +8716,7 @@ namespace LimitlessSquareEngine
                     _gl.Clear(ClearBufferMask.ColorBufferBit | ClearBufferMask.DepthBufferBit | ClearBufferMask.StencilBufferBit);
                     _gl.Disable(GLEnum.ScissorTest);
                     ExecuteSortedCommands(batchCommands, first.UseReverseZ);
+                    ExecuteObjectContourPass(batchCommands, first);
                 }
             }
 
@@ -8568,6 +8724,1089 @@ namespace LimitlessSquareEngine
             _gl.Viewport(0, 0, (uint)_window.Size.X, (uint)_window.Size.Y);
             _gl.ClearDepth(1.0);
             _gl.Clear(ClearBufferMask.DepthBufferBit);
+        }
+
+        private void ExecuteObjectContourPass(List<RenderCommand> batchCommands, in RenderCommand batchAnchor)
+        {
+            if (_sceneObjectContours.Count == 0 || batchCommands.Count == 0)
+                return;
+
+            Dictionary<string, List<RenderCommand>> commandsByObject = new(StringComparer.Ordinal);
+            Dictionary<string, ContourStyle> stylesByObject = new(StringComparer.Ordinal);
+
+            foreach (RenderCommand cmd in batchCommands)
+            {
+                if (cmd.IsSkybox)
+                    continue;
+
+                if (cmd.Pass != RenderPass.Scene)
+                    continue;
+
+                if (cmd.RenderSpace != RenderSpace.Camera)
+                    continue;
+
+                if (string.IsNullOrWhiteSpace(cmd.SceneId) || string.IsNullOrWhiteSpace(cmd.ObjectId))
+                    continue;
+
+                if (string.IsNullOrWhiteSpace(cmd.MeshId) || string.IsNullOrWhiteSpace(cmd.MeshSurfaceId))
+                    continue;
+
+                if (ShouldCullCommandByCameraFrustum(cmd))
+                    continue;
+
+                string key = BuildSceneObjectContourKey(cmd.SceneId, cmd.ObjectId);
+
+                if (!_sceneObjectContours.TryGetValue(key, out ContourStyle? style))
+                    continue;
+
+                if (!commandsByObject.TryGetValue(key, out List<RenderCommand>? list))
+                {
+                    list = new List<RenderCommand>();
+                    commandsByObject[key] = list;
+                    stylesByObject[key] = style;
+                }
+
+                list.Add(cmd);
+            }
+
+            if (commandsByObject.Count == 0)
+                return;
+
+            int width = Math.Max(1, _window.Size.X);
+            int height = Math.Max(1, _window.Size.Y);
+
+            EnsureObjectContourResources(width, height);
+
+            uint previousProgram = _currentProgram;
+            RenderSpace previousRenderSpace = _activeRenderSpace;
+            Matrix4x4 previousModel = _activeModelMatrix;
+            Matrix4x4 previousView = _activeViewMatrix;
+            Matrix4x4 previousProjection = _activeProjectionMatrix;
+
+            _gl.GetInteger(GLEnum.FramebufferBinding, out int previousFramebuffer);
+            _gl.GetInteger(GLEnum.CurrentProgram, out int previousGlProgram);
+            _gl.GetInteger(GLEnum.ActiveTexture, out int previousActiveTexture);
+            _gl.GetInteger(GLEnum.ArrayBufferBinding, out int previousArrayBuffer);
+            _gl.GetInteger(GLEnum.VertexArrayBinding, out int previousVertexArray);
+
+            int[] previousViewport = new int[4];
+            int[] previousScissorBox = new int[4];
+            _gl.GetInteger(GLEnum.Viewport, previousViewport);
+            _gl.GetInteger(GLEnum.ScissorBox, previousScissorBox);
+
+            bool previousScissorEnabled = _gl.IsEnabled(GLEnum.ScissorTest);
+            bool previousBlendEnabled = _gl.IsEnabled(GLEnum.Blend);
+            bool previousDepthTestEnabled = _gl.IsEnabled(GLEnum.DepthTest);
+            bool previousCullFaceEnabled = _gl.IsEnabled(GLEnum.CullFace);
+
+            _gl.GetBoolean(GLEnum.DepthWritemask, out bool previousDepthMask);
+            _gl.GetInteger(GLEnum.DepthFunc, out int previousDepthFunc);
+
+            float[] previousClearColor = new float[4];
+            _gl.GetFloat(GLEnum.ColorClearValue, previousClearColor);
+
+            try
+            {
+                foreach (var pair in commandsByObject)
+                {
+                    if (!stylesByObject.TryGetValue(pair.Key, out ContourStyle? style))
+                        continue;
+
+                    RenderContourMask(pair.Value, batchAnchor);
+                    CompositeContourMask(batchAnchor, style);
+                }
+            }
+            finally
+            {
+                _gl.BindFramebuffer(FramebufferTarget.Framebuffer, (uint)previousFramebuffer);
+
+                _gl.Viewport(
+                    previousViewport[0],
+                    previousViewport[1],
+                    (uint)Math.Max(1, previousViewport[2]),
+                    (uint)Math.Max(1, previousViewport[3]));
+
+                _gl.Scissor(
+                    previousScissorBox[0],
+                    previousScissorBox[1],
+                    (uint)Math.Max(1, previousScissorBox[2]),
+                    (uint)Math.Max(1, previousScissorBox[3]));
+
+                if (previousScissorEnabled)
+                    _gl.Enable(GLEnum.ScissorTest);
+                else
+                    _gl.Disable(GLEnum.ScissorTest);
+
+                if (previousBlendEnabled)
+                    _gl.Enable(GLEnum.Blend);
+                else
+                    _gl.Disable(GLEnum.Blend);
+
+                if (previousDepthTestEnabled)
+                    _gl.Enable(GLEnum.DepthTest);
+                else
+                    _gl.Disable(GLEnum.DepthTest);
+
+                if (previousCullFaceEnabled)
+                    _gl.Enable(GLEnum.CullFace);
+                else
+                    _gl.Disable(GLEnum.CullFace);
+
+                _gl.DepthMask(previousDepthMask);
+                _gl.DepthFunc((GLEnum)previousDepthFunc);
+
+                _gl.ClearColor(
+                    previousClearColor[0],
+                    previousClearColor[1],
+                    previousClearColor[2],
+                    previousClearColor[3]);
+
+                _currentProgram = previousProgram;
+                _gl.UseProgram((uint)previousGlProgram);
+
+                _activeRenderSpace = previousRenderSpace;
+                _activeModelMatrix = previousModel;
+                _activeViewMatrix = previousView;
+                _activeProjectionMatrix = previousProjection;
+
+                _gl.ActiveTexture((TextureUnit)previousActiveTexture);
+                _gl.BindBuffer(BufferTargetARB.ArrayBuffer, (uint)previousArrayBuffer);
+                _gl.BindVertexArray((uint)previousVertexArray);
+            }
+        }
+
+        private void RenderContourMask(List<RenderCommand> commands, in RenderCommand batchAnchor)
+        {
+            _gl.BindFramebuffer(FramebufferTarget.Framebuffer, _contourFramebuffer);
+
+            _gl.Viewport(0, 0, (uint)_contourTargetWidth, (uint)_contourTargetHeight);
+
+            _gl.Enable(GLEnum.ScissorTest);
+            _gl.Scissor(
+                batchAnchor.ViewportX,
+                batchAnchor.ViewportY,
+                (uint)Math.Max(1, batchAnchor.ViewportWidth),
+                (uint)Math.Max(1, batchAnchor.ViewportHeight));
+
+            _gl.ClearColor(0f, 0f, 0f, 0f);
+            _gl.Clear(ClearBufferMask.ColorBufferBit);
+
+            _gl.Disable(GLEnum.DepthTest);
+            _gl.DepthMask(false);
+            _gl.Disable(GLEnum.CullFace);
+            _gl.Disable(GLEnum.Blend);
+
+            _currentProgram = _contourFillProgram;
+            _gl.UseProgram(_contourFillProgram);
+
+            foreach (RenderCommand cmd in commands)
+            {
+                _activeRenderSpace = cmd.RenderSpace;
+                _activeModelMatrix = cmd.Model;
+                _activeViewMatrix = cmd.View;
+                _activeProjectionMatrix = cmd.Projection;
+
+                BindCommandGeometry(cmd);
+
+                if (_contourFillModelLocation != -1)
+                    SetMatrixUniform(_contourFillModelLocation, cmd.Model);
+
+                if (_contourFillViewLocation != -1)
+                    SetMatrixUniform(_contourFillViewLocation, cmd.View);
+
+                if (_contourFillProjectionLocation != -1)
+                    SetMatrixUniform(_contourFillProjectionLocation, cmd.Projection);
+
+                _gl.DrawArrays((GLEnum)cmd.PrimitiveType, 0, (uint)(cmd.Vertices.Length / cmd.VertexStrideFloats));
+            }
+
+            _gl.BindBuffer(BufferTargetARB.ArrayBuffer, 0);
+            _gl.BindVertexArray(0);
+            _gl.Disable(GLEnum.ScissorTest);
+        }
+
+        private void CompositeContourMask(in RenderCommand batchAnchor, ContourStyle style)
+        {
+            _gl.BindFramebuffer(FramebufferTarget.Framebuffer, 0);
+
+            _gl.Viewport(0, 0, (uint)_contourTargetWidth, (uint)_contourTargetHeight);
+
+            _gl.Enable(GLEnum.ScissorTest);
+            _gl.Scissor(
+                batchAnchor.ViewportX,
+                batchAnchor.ViewportY,
+                (uint)Math.Max(1, batchAnchor.ViewportWidth),
+                (uint)Math.Max(1, batchAnchor.ViewportHeight));
+
+            _gl.Disable(GLEnum.DepthTest);
+            _gl.DepthMask(false);
+            _gl.Disable(GLEnum.CullFace);
+            _gl.Disable(GLEnum.Blend);
+
+            _currentProgram = _contourCompositeProgram;
+            _gl.UseProgram(_contourCompositeProgram);
+
+            _gl.ActiveTexture(TextureUnit.Texture0);
+            _gl.BindTexture(TextureTarget.Texture2D, _contourMaskTexture);
+
+            if (_contourCompositeMaskLocation != -1)
+                _gl.Uniform1(_contourCompositeMaskLocation, 0);
+
+            if (_contourCompositeTextureSizeLocation != -1)
+                _gl.Uniform2(_contourCompositeTextureSizeLocation, (float)_contourTargetWidth, (float)_contourTargetHeight);
+
+            if (_contourCompositeColorLocation != -1)
+                _gl.Uniform3(_contourCompositeColorLocation, style.Color.X, style.Color.Y, style.Color.Z);
+
+            if (_contourCompositeThicknessLocation != -1)
+                _gl.Uniform1(_contourCompositeThicknessLocation, style.ThicknessPixels);
+
+            _gl.BindVertexArray(_contourQuadVao);
+            _gl.DrawArrays(GLEnum.Triangles, 0, 6);
+
+            _gl.BindVertexArray(0);
+            _gl.BindTexture(TextureTarget.Texture2D, 0);
+            _gl.Disable(GLEnum.ScissorTest);
+        }
+
+        private void EnsureObjectContourResources(int width, int height)
+        {
+            width = Math.Max(1, width);
+            height = Math.Max(1, height);
+
+            if (_contourFillProgram == 0)
+            {
+                _contourFillProgram = CreateContourFillProgram();
+                _contourFillModelLocation = _gl.GetUniformLocation(_contourFillProgram, "uModel");
+                _contourFillViewLocation = _gl.GetUniformLocation(_contourFillProgram, "uView");
+                _contourFillProjectionLocation = _gl.GetUniformLocation(_contourFillProgram, "uProjection");
+            }
+
+            if (_contourCompositeProgram == 0)
+            {
+                _contourCompositeProgram = CreateContourCompositeProgram();
+                _contourCompositeMaskLocation = _gl.GetUniformLocation(_contourCompositeProgram, "uMask");
+                _contourCompositeTextureSizeLocation = _gl.GetUniformLocation(_contourCompositeProgram, "uTextureSize");
+                _contourCompositeColorLocation = _gl.GetUniformLocation(_contourCompositeProgram, "uColor");
+                _contourCompositeThicknessLocation = _gl.GetUniformLocation(_contourCompositeProgram, "uThicknessPixels");
+            }
+
+            EnsureContourQuad();
+
+            if (_contourFramebuffer != 0 &&
+                _contourMaskTexture != 0 &&
+                _contourTargetWidth == width &&
+                _contourTargetHeight == height)
+            {
+                return;
+            }
+
+            ReleaseContourTarget();
+
+            if (_contourFillProgram != 0)
+            {
+                _gl.DeleteProgram(_contourFillProgram);
+                _contourFillProgram = 0;
+            }
+
+            if (_contourCompositeProgram != 0)
+            {
+                _gl.DeleteProgram(_contourCompositeProgram);
+                _contourCompositeProgram = 0;
+            }
+
+            if (_contourQuadVao != 0)
+            {
+                _gl.DeleteVertexArray(_contourQuadVao);
+                _contourQuadVao = 0;
+            }
+
+            if (_contourQuadVbo != 0)
+            {
+                _gl.DeleteBuffer(_contourQuadVbo);
+                _contourQuadVbo = 0;
+            }
+
+            _contourFillModelLocation = -1;
+            _contourFillViewLocation = -1;
+            _contourFillProjectionLocation = -1;
+
+            _contourCompositeMaskLocation = -1;
+            _contourCompositeTextureSizeLocation = -1;
+            _contourCompositeColorLocation = -1;
+            _contourCompositeThicknessLocation = -1;
+
+            _sceneObjectContours.Clear();
+
+            _contourMaskTexture = _gl.GenTexture();
+            _gl.BindTexture(TextureTarget.Texture2D, _contourMaskTexture);
+
+            byte[] empty = new byte[width * height * 4];
+
+            _gl.TexImage2D(
+                TextureTarget.Texture2D,
+                0,
+                InternalFormat.Rgba8,
+                (uint)width,
+                (uint)height,
+                0,
+                PixelFormat.Rgba,
+                PixelType.UnsignedByte,
+                (ReadOnlySpan<byte>)empty);
+
+            _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.Nearest);
+            _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMagFilter, (int)TextureMagFilter.Nearest);
+            _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapS, (int)TextureWrapMode.ClampToEdge);
+            _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapT, (int)TextureWrapMode.ClampToEdge);
+
+            _contourFramebuffer = _gl.GenFramebuffer();
+            _gl.BindFramebuffer(FramebufferTarget.Framebuffer, _contourFramebuffer);
+
+            _gl.FramebufferTexture2D(
+                FramebufferTarget.Framebuffer,
+                FramebufferAttachment.ColorAttachment0,
+                TextureTarget.Texture2D,
+                _contourMaskTexture,
+                0);
+
+            _gl.DrawBuffer(GLEnum.ColorAttachment0);
+            _gl.ReadBuffer(GLEnum.ColorAttachment0);
+
+            GLEnum status = _gl.CheckFramebufferStatus(FramebufferTarget.Framebuffer);
+            if (status != GLEnum.FramebufferComplete)
+                throw new Exception($"[X] Contour framebuffer incomplete: {status}");
+
+            _gl.BindFramebuffer(FramebufferTarget.Framebuffer, 0);
+            _gl.BindTexture(TextureTarget.Texture2D, 0);
+
+            _contourTargetWidth = width;
+            _contourTargetHeight = height;
+        }
+
+        private void EnsureContourQuad()
+        {
+            if (_contourQuadVao != 0 && _contourQuadVbo != 0)
+                return;
+
+            float[] vertices =
+            {
+                -1f, -1f,
+                 1f, -1f,
+                 1f,  1f,
+
+                 1f,  1f,
+                -1f,  1f,
+                -1f, -1f
+            };
+
+            _contourQuadVao = _gl.GenVertexArray();
+            _contourQuadVbo = _gl.GenBuffer();
+
+            _gl.BindVertexArray(_contourQuadVao);
+            _gl.BindBuffer(BufferTargetARB.ArrayBuffer, _contourQuadVbo);
+
+            _gl.BufferData(BufferTargetARB.ArrayBuffer, (ReadOnlySpan<float>)vertices, BufferUsageARB.StaticDraw);
+
+            _gl.VertexAttribPointer(0, 2, VertexAttribPointerType.Float, false, 2 * sizeof(float), 0);
+            _gl.EnableVertexAttribArray(0);
+
+            _gl.BindBuffer(BufferTargetARB.ArrayBuffer, 0);
+            _gl.BindVertexArray(0);
+        }
+
+        private uint CreateContourFillProgram()
+        {
+            string vertexSource = @"
+                #version 330 core
+                layout(location = 0) in vec3 aPos;
+
+                uniform mat4 uModel;
+                uniform mat4 uView;
+                uniform mat4 uProjection;
+
+                void main()
+                {
+                    gl_Position = uProjection * uView * uModel * vec4(aPos, 1.0);
+                }";
+
+            string fragmentSource = @"
+                #version 330 core
+
+                out vec4 FragColor;
+
+                void main()
+                {
+                    FragColor = vec4(1.0, 1.0, 1.0, 1.0);
+                }";
+
+            uint vertexShader = CompileShader(ShaderType.VertexShader, vertexSource);
+            uint fragmentShader = CompileShader(ShaderType.FragmentShader, fragmentSource);
+
+            uint program = _gl.CreateProgram();
+            _gl.AttachShader(program, vertexShader);
+            _gl.AttachShader(program, fragmentShader);
+            _gl.LinkProgram(program);
+
+            _gl.GetProgram(program, ProgramPropertyARB.LinkStatus, out int success);
+            if (success == 0)
+            {
+                string infoLog = _gl.GetProgramInfoLog(program);
+                throw new Exception($"[X] Contour fill shader link failed: {infoLog}");
+            }
+
+            _gl.DetachShader(program, vertexShader);
+            _gl.DetachShader(program, fragmentShader);
+            _gl.DeleteShader(vertexShader);
+            _gl.DeleteShader(fragmentShader);
+
+            return program;
+        }
+
+        private uint CreateContourCompositeProgram()
+        {
+            string vertexSource = @"
+                #version 330 core
+                layout(location = 0) in vec2 aPos;
+
+                out vec2 vUv;
+
+                void main()
+                {
+                    vUv = aPos * 0.5 + 0.5;
+                    gl_Position = vec4(aPos, 0.0, 1.0);
+                }";
+
+            string fragmentSource = @"
+                #version 330 core
+
+                uniform sampler2D uMask;
+                uniform vec2 uTextureSize;
+                uniform vec3 uColor;
+                uniform int uThicknessPixels;
+
+                in vec2 vUv;
+                out vec4 FragColor;
+
+                void main()
+                {
+                    float center = texture(uMask, vUv).a;
+                    float neighbor = 0.0;
+
+                    int radius = clamp(uThicknessPixels, 1, 16);
+
+                    for (int y = -16; y <= 16; y++)
+                    {
+                        for (int x = -16; x <= 16; x++)
+                        {
+                            if (abs(x) > radius || abs(y) > radius)
+                                continue;
+
+                            if (x * x + y * y > radius * radius)
+                                continue;
+
+                            vec2 offset = vec2(float(x), float(y)) / uTextureSize;
+                            neighbor = max(neighbor, texture(uMask, vUv + offset).a);
+                        }
+                    }
+
+                    if (neighbor <= 0.5 || center > 0.5)
+                        discard;
+
+                    FragColor = vec4(uColor, 1.0);
+                }";
+
+            uint vertexShader = CompileShader(ShaderType.VertexShader, vertexSource);
+            uint fragmentShader = CompileShader(ShaderType.FragmentShader, fragmentSource);
+
+            uint program = _gl.CreateProgram();
+            _gl.AttachShader(program, vertexShader);
+            _gl.AttachShader(program, fragmentShader);
+            _gl.LinkProgram(program);
+
+            _gl.GetProgram(program, ProgramPropertyARB.LinkStatus, out int success);
+            if (success == 0)
+            {
+                string infoLog = _gl.GetProgramInfoLog(program);
+                throw new Exception($"[X] Contour composite shader link failed: {infoLog}");
+            }
+
+            _gl.DetachShader(program, vertexShader);
+            _gl.DetachShader(program, fragmentShader);
+            _gl.DeleteShader(vertexShader);
+            _gl.DeleteShader(fragmentShader);
+
+            return program;
+        }
+
+        private void ReleaseContourTarget()
+        {
+            if (_contourFramebuffer != 0)
+            {
+                _gl.DeleteFramebuffer(_contourFramebuffer);
+                _contourFramebuffer = 0;
+            }
+
+            if (_contourMaskTexture != 0)
+            {
+                _gl.DeleteTexture(_contourMaskTexture);
+                _contourMaskTexture = 0;
+            }
+
+            _contourTargetWidth = 0;
+            _contourTargetHeight = 0;
+        }
+
+        public RenderedMeshRaycastHit RaycastRenderedMeshAtPixel(int screenX, int screenY)
+        {
+            RenderedMeshRaycastHit result = new RenderedMeshRaycastHit
+            {
+                Hit = false,
+                ScreenX = screenX,
+                ScreenY = screenY
+            };
+
+            if (_window == null || _gl == null)
+                return result;
+
+            int windowWidth = _window.Size.X;
+            int windowHeight = _window.Size.Y;
+
+            if (screenX < 0 || screenY < 0 || screenX >= windowWidth || screenY >= windowHeight)
+                return result;
+
+            if (!_isInitialized)
+                Initialize();
+
+            Scene.FlushDirtyToRenderer();
+
+            List<RenderCommand> sceneCommands = BuildSceneMeshPickCommands();
+            if (sceneCommands.Count == 0)
+                return result;
+
+            EnsureMeshPickResources(windowWidth, windowHeight);
+
+            Dictionary<uint, MeshPickEntry> pickMap = new Dictionary<uint, MeshPickEntry>();
+            uint nextPickId = 1;
+
+            uint previousProgram = _currentProgram;
+            RenderSpace previousRenderSpace = _activeRenderSpace;
+            Matrix4x4 previousModel = _activeModelMatrix;
+            Matrix4x4 previousView = _activeViewMatrix;
+            Matrix4x4 previousProjection = _activeProjectionMatrix;
+
+            _gl.GetInteger(GLEnum.FramebufferBinding, out int previousFramebuffer);
+            _gl.GetInteger(GLEnum.DrawFramebufferBinding, out int previousDrawFramebuffer);
+            _gl.GetInteger(GLEnum.ReadFramebufferBinding, out int previousReadFramebuffer);
+            _gl.GetInteger(GLEnum.CurrentProgram, out int previousGlProgram);
+
+            int[] previousViewport = new int[4];
+            int[] previousScissorBox = new int[4];
+            _gl.GetInteger(GLEnum.Viewport, previousViewport);
+            _gl.GetInteger(GLEnum.ScissorBox, previousScissorBox);
+
+            bool previousScissorEnabled = _gl.IsEnabled(GLEnum.ScissorTest);
+            bool previousBlendEnabled = _gl.IsEnabled(GLEnum.Blend);
+            bool previousDepthTestEnabled = _gl.IsEnabled(GLEnum.DepthTest);
+            bool previousCullFaceEnabled = _gl.IsEnabled(GLEnum.CullFace);
+
+            _gl.GetInteger(GLEnum.DepthFunc, out int previousDepthFunc);
+            _gl.GetInteger(GLEnum.CullFaceMode, out int previousCullFaceMode);
+            _gl.GetInteger(GLEnum.FrontFace, out int previousFrontFace);
+
+            bool[] previousColorMask = new bool[4];
+            _gl.GetBoolean(GLEnum.ColorWritemask, previousColorMask);
+
+            _gl.GetBoolean(GLEnum.DepthWritemask, out bool previousDepthMask);
+
+            float[] previousClearColor = new float[4];
+            _gl.GetFloat(GLEnum.ColorClearValue, previousClearColor);
+
+            _gl.GetDouble(GLEnum.DepthClearValue, out double previousClearDepth);
+
+            _gl.GetInteger(GLEnum.ActiveTexture, out int previousActiveTexture);
+            _gl.GetInteger(GLEnum.ArrayBufferBinding, out int previousArrayBuffer);
+            _gl.GetInteger(GLEnum.VertexArrayBinding, out int previousVertexArray);
+
+            _gl.GetInteger(GLEnum.ReadBuffer, out int previousReadBuffer);
+            _gl.GetInteger(GLEnum.DrawBuffer, out int previousDrawBuffer);
+
+            try
+            {
+                _gl.BindFramebuffer(FramebufferTarget.Framebuffer, _meshPickFramebuffer);
+                _gl.Viewport(0, 0, (uint)windowWidth, (uint)windowHeight);
+                _gl.Disable(GLEnum.ScissorTest);
+                _gl.Disable(GLEnum.Blend);
+                _gl.Enable(GLEnum.DepthTest);
+                _gl.ColorMask(true, true, true, true);
+                _gl.DepthMask(true);
+                _gl.ClearColor(0f, 0f, 0f, 0f);
+                _gl.ClearDepth(1.0);
+                _gl.Clear(ClearBufferMask.ColorBufferBit | ClearBufferMask.DepthBufferBit);
+
+                var batches = sceneCommands
+                    .GroupBy(c => c.BatchId)
+                    .OrderBy(g => g.First().BatchSubmissionOrder)
+                    .ToList();
+
+                foreach (var batch in batches)
+                {
+                    List<RenderCommand> batchCommands = batch.ToList();
+                    RenderCommand first = batchCommands.First();
+
+                    _gl.BindFramebuffer(FramebufferTarget.Framebuffer, _meshPickFramebuffer);
+                    _gl.Viewport(
+                        first.ViewportX,
+                        first.ViewportY,
+                        (uint)Math.Max(1, first.ViewportWidth),
+                        (uint)Math.Max(1, first.ViewportHeight));
+
+                    _gl.Enable(GLEnum.ScissorTest);
+                    _gl.Scissor(
+                        first.ViewportX,
+                        first.ViewportY,
+                        (uint)Math.Max(1, first.ViewportWidth),
+                        (uint)Math.Max(1, first.ViewportHeight));
+
+                    _gl.ClearColor(0f, 0f, 0f, 0f);
+                    _gl.ClearDepth(first.UseReverseZ ? 0.0 : 1.0);
+                    _gl.Clear(ClearBufferMask.ColorBufferBit | ClearBufferMask.DepthBufferBit);
+
+                    _gl.Disable(GLEnum.ScissorTest);
+
+                    ExecuteMeshPickSortedCommands(batchCommands, first.UseReverseZ, pickMap, ref nextPickId);
+                }
+
+                byte[] pixel = new byte[4];
+                int readY = windowHeight - 1 - screenY;
+
+                _gl.BindFramebuffer(FramebufferTarget.Framebuffer, _meshPickFramebuffer);
+                _gl.ReadBuffer(GLEnum.ColorAttachment0);
+                _gl.PixelStore(PixelStoreParameter.PackAlignment, 1);
+                _gl.ReadPixels<byte>(
+                    screenX,
+                    readY,
+                    1,
+                    1,
+                    GLEnum.Rgba,
+                    GLEnum.UnsignedByte,
+                    pixel);
+
+                uint pickId = DecodeMeshPickId(pixel);
+
+                if (pickId != 0 && pickMap.TryGetValue(pickId, out MeshPickEntry entry))
+                {
+                    result.Hit = true;
+                    result.SceneId = entry.SceneId;
+                    result.ObjectId = entry.ObjectId;
+                    result.MeshId = entry.MeshId;
+                    result.MeshSurfaceId = entry.MeshSurfaceId;
+                    result.CameraObjectId = entry.CameraObjectId;
+                    result.ViewportX = entry.ViewportX;
+                    result.ViewportY = entry.ViewportY;
+                    result.ViewportWidth = entry.ViewportWidth;
+                    result.ViewportHeight = entry.ViewportHeight;
+                }
+
+                return result;
+            }
+            finally
+            {
+                _gl.BindFramebuffer(FramebufferTarget.DrawFramebuffer, (uint)previousDrawFramebuffer);
+                _gl.BindFramebuffer(FramebufferTarget.ReadFramebuffer, (uint)previousReadFramebuffer);
+
+                if (previousDrawFramebuffer == previousReadFramebuffer)
+                    _gl.BindFramebuffer(FramebufferTarget.Framebuffer, (uint)previousFramebuffer);
+
+                _gl.Viewport(
+                    previousViewport[0],
+                    previousViewport[1],
+                    (uint)Math.Max(1, previousViewport[2]),
+                    (uint)Math.Max(1, previousViewport[3]));
+
+                _gl.Scissor(
+                    previousScissorBox[0],
+                    previousScissorBox[1],
+                    (uint)Math.Max(1, previousScissorBox[2]),
+                    (uint)Math.Max(1, previousScissorBox[3]));
+
+                if (previousScissorEnabled)
+                    _gl.Enable(GLEnum.ScissorTest);
+                else
+                    _gl.Disable(GLEnum.ScissorTest);
+
+                if (previousBlendEnabled)
+                    _gl.Enable(GLEnum.Blend);
+                else
+                    _gl.Disable(GLEnum.Blend);
+
+                if (previousDepthTestEnabled)
+                    _gl.Enable(GLEnum.DepthTest);
+                else
+                    _gl.Disable(GLEnum.DepthTest);
+
+                if (previousCullFaceEnabled)
+                    _gl.Enable(GLEnum.CullFace);
+                else
+                    _gl.Disable(GLEnum.CullFace);
+
+                _gl.DepthFunc((GLEnum)previousDepthFunc);
+                _gl.CullFace((GLEnum)previousCullFaceMode);
+                _gl.FrontFace((GLEnum)previousFrontFace);
+
+                _gl.ColorMask(
+                    previousColorMask[0],
+                    previousColorMask[1],
+                    previousColorMask[2],
+                    previousColorMask[3]);
+
+                _gl.DepthMask(previousDepthMask);
+
+                _gl.ClearColor(
+                    previousClearColor[0],
+                    previousClearColor[1],
+                    previousClearColor[2],
+                    previousClearColor[3]);
+
+                _gl.ClearDepth(previousClearDepth);
+
+                try
+                {
+                    _gl.DrawBuffer((GLEnum)previousDrawBuffer);
+                }
+                catch
+                {
+                }
+
+                try
+                {
+                    _gl.ReadBuffer((GLEnum)previousReadBuffer);
+                }
+                catch
+                {
+                }
+
+                _currentProgram = previousProgram;
+                _gl.UseProgram((uint)previousGlProgram);
+
+                _activeRenderSpace = previousRenderSpace;
+                _activeModelMatrix = previousModel;
+                _activeViewMatrix = previousView;
+                _activeProjectionMatrix = previousProjection;
+
+                _gl.ActiveTexture((TextureUnit)previousActiveTexture);
+                _gl.BindBuffer(BufferTargetARB.ArrayBuffer, (uint)previousArrayBuffer);
+                _gl.BindVertexArray((uint)previousVertexArray);
+            }
+        }
+
+        private List<RenderCommand> BuildSceneMeshPickCommands()
+        {
+            List<RenderCommand> savedRenderQueue = _renderQueue.ToList();
+
+            try
+            {
+                _renderQueue.Clear();
+                QueueLoadedSceneRender();
+
+                return _renderQueue
+                    .Where(c => c.Pass == RenderPass.Scene)
+                    .ToList();
+            }
+            finally
+            {
+                _renderQueue.Clear();
+                _renderQueue.AddRange(savedRenderQueue);
+            }
+        }
+
+        private void ExecuteMeshPickSortedCommands(
+            List<RenderCommand> commands,
+            bool useReverseZ,
+            Dictionary<uint, MeshPickEntry> pickMap,
+            ref uint nextPickId)
+        {
+            var opaque = commands
+                .Where(c => !c.IsSkybox && c.QueueType == RenderQueueType.Opaque && !ShouldCullCommandByCameraFrustum(c))
+                .OrderBy(c => c.SubmissionIndex)
+                .ToList();
+
+            var transparent = commands
+                .Where(c => !c.IsSkybox && c.QueueType == RenderQueueType.Transparent && !ShouldCullCommandByCameraFrustum(c))
+                .OrderByDescending(c => c.SortDepth)
+                .ThenBy(c => c.SubmissionIndex)
+                .ToList();
+
+            GLEnum opaqueDepthFunc = useReverseZ ? GLEnum.Greater : GLEnum.Less;
+            GLEnum transparentDepthFunc = useReverseZ ? GLEnum.Gequal : GLEnum.Lequal;
+
+            _gl.Enable(GLEnum.DepthTest);
+            _gl.DepthFunc(opaqueDepthFunc);
+            _gl.DepthMask(true);
+            _gl.Disable(GLEnum.Blend);
+
+            foreach (RenderCommand cmd in opaque)
+                ExecuteMeshPickCommand(cmd, pickMap, ref nextPickId);
+
+            _gl.Enable(GLEnum.DepthTest);
+            _gl.DepthFunc(transparentDepthFunc);
+            _gl.DepthMask(false);
+            _gl.Disable(GLEnum.Blend);
+
+            foreach (RenderCommand cmd in transparent)
+                ExecuteMeshPickCommand(cmd, pickMap, ref nextPickId);
+
+            _gl.DepthMask(true);
+            _gl.DepthFunc(GLEnum.Less);
+        }
+
+        private void ExecuteMeshPickCommand(
+            RenderCommand cmd,
+            Dictionary<uint, MeshPickEntry> pickMap,
+            ref uint nextPickId)
+        {
+            if (string.IsNullOrWhiteSpace(cmd.ObjectId))
+                return;
+
+            if (string.IsNullOrWhiteSpace(cmd.MeshId))
+                return;
+
+            if (string.IsNullOrWhiteSpace(cmd.MeshSurfaceId))
+                return;
+
+            if (nextPickId == 0)
+                return;
+
+            uint pickId = nextPickId++;
+            pickMap[pickId] = new MeshPickEntry(
+                cmd.SceneId,
+                cmd.ObjectId,
+                cmd.MeshId,
+                cmd.MeshSurfaceId,
+                cmd.CameraObjectId,
+                cmd.ViewportX,
+                cmd.ViewportY,
+                cmd.ViewportWidth,
+                cmd.ViewportHeight);
+
+            _currentProgram = _meshPickProgram;
+            _gl.UseProgram(_meshPickProgram);
+
+            _activeRenderSpace = cmd.RenderSpace;
+            _activeModelMatrix = cmd.Model;
+            _activeViewMatrix = cmd.View;
+            _activeProjectionMatrix = cmd.Projection;
+
+            BindCommandGeometry(cmd);
+            ApplyCullMode(cmd.CullMode);
+
+            if (_meshPickModelLocation != -1)
+                SetMatrixUniform(_meshPickModelLocation, cmd.Model);
+
+            if (_meshPickViewLocation != -1)
+                SetMatrixUniform(_meshPickViewLocation, cmd.View);
+
+            if (_meshPickProjectionLocation != -1)
+                SetMatrixUniform(_meshPickProjectionLocation, cmd.Projection);
+
+            Vector4 pickColor = EncodeMeshPickId(pickId);
+
+            if (_meshPickColorLocation != -1)
+                _gl.Uniform4(_meshPickColorLocation, pickColor.X, pickColor.Y, pickColor.Z, pickColor.W);
+
+            _gl.DrawArrays((GLEnum)cmd.PrimitiveType, 0, (uint)(cmd.Vertices.Length / cmd.VertexStrideFloats));
+
+            _gl.BindBuffer(BufferTargetARB.ArrayBuffer, 0);
+            _gl.BindVertexArray(0);
+        }
+
+        private void EnsureMeshPickResources(int width, int height)
+        {
+            width = Math.Max(1, width);
+            height = Math.Max(1, height);
+
+            if (_meshPickProgram == 0)
+            {
+                _meshPickProgram = CreateMeshPickProgram();
+                _meshPickModelLocation = _gl.GetUniformLocation(_meshPickProgram, "uModel");
+                _meshPickViewLocation = _gl.GetUniformLocation(_meshPickProgram, "uView");
+                _meshPickProjectionLocation = _gl.GetUniformLocation(_meshPickProgram, "uProjection");
+                _meshPickColorLocation = _gl.GetUniformLocation(_meshPickProgram, "uPickColor");
+            }
+
+            if (_meshPickFramebuffer != 0 &&
+                _meshPickFramebufferWidth == width &&
+                _meshPickFramebufferHeight == height)
+            {
+                return;
+            }
+
+            ReleaseMeshPickFramebuffer();
+
+            _meshPickColorTexture = _gl.GenTexture();
+            _gl.BindTexture(TextureTarget.Texture2D, _meshPickColorTexture);
+
+            byte[] emptyColor = new byte[width * height * 4];
+
+            _gl.TexImage2D(
+                TextureTarget.Texture2D,
+                0,
+                InternalFormat.Rgba8,
+                (uint)width,
+                (uint)height,
+                0,
+                PixelFormat.Rgba,
+                PixelType.UnsignedByte,
+                (ReadOnlySpan<byte>)emptyColor);
+
+            _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.Nearest);
+            _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMagFilter, (int)TextureMagFilter.Nearest);
+            _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapS, (int)TextureWrapMode.ClampToEdge);
+            _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapT, (int)TextureWrapMode.ClampToEdge);
+
+            _meshPickDepthTexture = _gl.GenTexture();
+            _gl.BindTexture(TextureTarget.Texture2D, _meshPickDepthTexture);
+
+            float[] emptyDepth = new float[width * height];
+
+            _gl.TexImage2D(
+                TextureTarget.Texture2D,
+                0,
+                InternalFormat.DepthComponent32f,
+                (uint)width,
+                (uint)height,
+                0,
+                PixelFormat.DepthComponent,
+                PixelType.Float,
+                (ReadOnlySpan<float>)emptyDepth);
+
+            _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.Nearest);
+            _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMagFilter, (int)TextureMagFilter.Nearest);
+            _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapS, (int)TextureWrapMode.ClampToEdge);
+            _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapT, (int)TextureWrapMode.ClampToEdge);
+
+            _meshPickFramebuffer = _gl.GenFramebuffer();
+            _gl.BindFramebuffer(FramebufferTarget.Framebuffer, _meshPickFramebuffer);
+
+            _gl.FramebufferTexture2D(
+                FramebufferTarget.Framebuffer,
+                FramebufferAttachment.ColorAttachment0,
+                TextureTarget.Texture2D,
+                _meshPickColorTexture,
+                0);
+
+            _gl.FramebufferTexture2D(
+                FramebufferTarget.Framebuffer,
+                FramebufferAttachment.DepthAttachment,
+                TextureTarget.Texture2D,
+                _meshPickDepthTexture,
+                0);
+
+            _gl.DrawBuffer(GLEnum.ColorAttachment0);
+            _gl.ReadBuffer(GLEnum.ColorAttachment0);
+
+            GLEnum status = _gl.CheckFramebufferStatus(FramebufferTarget.Framebuffer);
+            if (status != GLEnum.FramebufferComplete)
+                throw new Exception($"[X] Rendered mesh pick framebuffer incomplete: {status}");
+
+            _gl.BindFramebuffer(FramebufferTarget.Framebuffer, 0);
+            _gl.BindTexture(TextureTarget.Texture2D, 0);
+
+            _meshPickFramebufferWidth = width;
+            _meshPickFramebufferHeight = height;
+        }
+
+        private uint CreateMeshPickProgram()
+        {
+            string vertexSource = @"
+        #version 430 core
+        layout(location = 0) in vec3 aPos;
+
+        uniform mat4 uModel;
+        uniform mat4 uView;
+        uniform mat4 uProjection;
+
+        void main()
+        {
+            gl_Position = uProjection * uView * uModel * vec4(aPos, 1.0);
+        }";
+
+            string fragmentSource = @"
+        #version 430 core
+
+        uniform vec4 uPickColor;
+        out vec4 FragColor;
+
+        void main()
+        {
+            FragColor = uPickColor;
+        }";
+
+            uint vertexShader = CompileShader(ShaderType.VertexShader, vertexSource);
+            uint fragmentShader = CompileShader(ShaderType.FragmentShader, fragmentSource);
+
+            uint program = _gl.CreateProgram();
+            _gl.AttachShader(program, vertexShader);
+            _gl.AttachShader(program, fragmentShader);
+            _gl.LinkProgram(program);
+
+            _gl.GetProgram(program, ProgramPropertyARB.LinkStatus, out int success);
+            if (success == 0)
+            {
+                string infoLog = _gl.GetProgramInfoLog(program);
+                throw new Exception($"[X] Rendered mesh pick shader link failed: {infoLog}");
+            }
+
+            _gl.DetachShader(program, vertexShader);
+            _gl.DetachShader(program, fragmentShader);
+            _gl.DeleteShader(vertexShader);
+            _gl.DeleteShader(fragmentShader);
+
+            return program;
+        }
+
+        private static Vector4 EncodeMeshPickId(uint id)
+        {
+            return new Vector4(
+                (id & 0xFFu) / 255f,
+                ((id >> 8) & 0xFFu) / 255f,
+                ((id >> 16) & 0xFFu) / 255f,
+                ((id >> 24) & 0xFFu) / 255f);
+        }
+
+        private static uint DecodeMeshPickId(byte[] pixel)
+        {
+            if (pixel == null || pixel.Length < 4)
+                return 0;
+
+            return
+                (uint)pixel[0] |
+                ((uint)pixel[1] << 8) |
+                ((uint)pixel[2] << 16) |
+                ((uint)pixel[3] << 24);
+        }
+
+        private void ReleaseMeshPickFramebuffer()
+        {
+            if (_meshPickFramebuffer != 0)
+            {
+                _gl.DeleteFramebuffer(_meshPickFramebuffer);
+                _meshPickFramebuffer = 0;
+            }
+
+            if (_meshPickColorTexture != 0)
+            {
+                _gl.DeleteTexture(_meshPickColorTexture);
+                _meshPickColorTexture = 0;
+            }
+
+            if (_meshPickDepthTexture != 0)
+            {
+                _gl.DeleteTexture(_meshPickDepthTexture);
+                _meshPickDepthTexture = 0;
+            }
+
+            _meshPickFramebufferWidth = 0;
+            _meshPickFramebufferHeight = 0;
         }
 
         private void ExecuteCanvasPass(List<RenderCommand> canvasCommands)
@@ -9037,6 +10276,19 @@ namespace LimitlessSquareEngine
             _textTextureCache.Clear();
 
             _lightingSupportInitialized = false;
+
+            ReleaseMeshPickFramebuffer();
+
+            if (_meshPickProgram != 0)
+            {
+                _gl.DeleteProgram(_meshPickProgram);
+                _meshPickProgram = 0;
+            }
+
+            _meshPickModelLocation = -1;
+            _meshPickViewLocation = -1;
+            _meshPickProjectionLocation = -1;
+            _meshPickColorLocation = -1;
 
             _uploadedLightingBatchId = long.MinValue;
             _uploadedLightCount = 0;
