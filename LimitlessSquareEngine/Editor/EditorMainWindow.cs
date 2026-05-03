@@ -1648,10 +1648,11 @@ namespace LimitlessSquareEngine.Editor
 
             Grid.SetColumn(rightPanel, 4);
             Grid.SetRow(rightPanel, 0);
+            Grid.SetRowSpan(rightPanel, 3);
             workspace.Children.Add(rightPanel);
 
             Grid.SetColumn(bottomPanel, 0);
-            Grid.SetColumnSpan(bottomPanel, 5);
+            Grid.SetColumnSpan(bottomPanel, 3);
             Grid.SetRow(bottomPanel, 2);
             workspace.Children.Add(bottomPanel);
 
@@ -1677,6 +1678,7 @@ namespace LimitlessSquareEngine.Editor
             };
             Grid.SetColumn(rightSplitter, 3);
             Grid.SetRow(rightSplitter, 0);
+            Grid.SetRowSpan(rightSplitter, 3);
             workspace.Children.Add(rightSplitter);
 
             GridSplitter bottomSplitter = new GridSplitter
@@ -1688,7 +1690,7 @@ namespace LimitlessSquareEngine.Editor
                 VerticalAlignment = VerticalAlignment.Stretch
             };
             Grid.SetColumn(bottomSplitter, 0);
-            Grid.SetColumnSpan(bottomSplitter, 5);
+            Grid.SetColumnSpan(bottomSplitter, 3);
             Grid.SetRow(bottomSplitter, 1);
             workspace.Children.Add(bottomSplitter);
 
