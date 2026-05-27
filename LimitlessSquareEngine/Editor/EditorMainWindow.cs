@@ -466,7 +466,7 @@ namespace LimitlessSquareEngine.Editor
                 Background = Brushes.Black,
                 Content = null,
                 ShowInTaskbar = false,
-                SystemDecorations = SystemDecorations.Full,
+                WindowDecorations = WindowDecorations.Full,
                 CanResize = true
             };
 
@@ -3768,7 +3768,7 @@ namespace LimitlessSquareEngine.Editor
                 CanResize = false,
                 CanMinimize = false,
                 WindowStartupLocation = WindowStartupLocation.CenterOwner,
-                SystemDecorations = SystemDecorations.Full,
+                WindowDecorations = WindowDecorations.Full,
                 ShowInTaskbar = false,
                 Background = new SolidColorBrush(Color.Parse("#111111"))
             };
@@ -4142,7 +4142,7 @@ namespace LimitlessSquareEngine.Editor
                 CanResize = false,
                 CanMinimize = false,
                 WindowStartupLocation = WindowStartupLocation.CenterOwner,
-                SystemDecorations = SystemDecorations.Full,
+                WindowDecorations = WindowDecorations.Full,
                 ShowInTaskbar = false,
                 Background = new SolidColorBrush(Color.Parse("#111111"))
             };
@@ -5001,7 +5001,7 @@ namespace LimitlessSquareEngine.Editor
                 CanResize = false,
                 CanMinimize = false,
                 WindowStartupLocation = WindowStartupLocation.CenterOwner,
-                SystemDecorations = SystemDecorations.Full,
+                WindowDecorations = WindowDecorations.Full,
                 ShowInTaskbar = false,
                 Background = new SolidColorBrush(Color.Parse("#111111"))
             };
@@ -6550,7 +6550,7 @@ void main()
                 CanResize = false,
                 CanMinimize = false,
                 WindowStartupLocation = WindowStartupLocation.CenterOwner,
-                SystemDecorations = SystemDecorations.Full,
+                WindowDecorations = WindowDecorations.Full,
                 ShowInTaskbar = false,
                 Background = new SolidColorBrush(Color.Parse("#111111"))
             };

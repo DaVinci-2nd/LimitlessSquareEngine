@@ -2131,12 +2131,11 @@ namespace LimitlessSquareEngine
             Font font = ResolveUIFont(element);
 
             using Image<Rgba32> image = new Image<Rgba32>(targetWidth, targetHeight);
-            image.Mutate(ctx =>
+            image.Mutate(ctx => ctx.Paint(canvas =>
             {
-                ctx.Clear(Color.Transparent);
+                canvas.Clear(Brushes.Solid(Color.Transparent));
 
-                var rgba = new SixLabors.ImageSharp.Color(
-                    new Rgba32(
+                var rgba = Color.FromPixel(new Rgba32(
                         (byte)Math.Clamp(element.TextColor.X * 255f, 0f, 255f),
                         (byte)Math.Clamp(element.TextColor.Y * 255f, 0f, 255f),
                         (byte)Math.Clamp(element.TextColor.Z * 255f, 0f, 255f),
@@ -2150,13 +2149,8 @@ namespace LimitlessSquareEngine
                     VerticalAlignment = ResolveImageSharpVerticalAlignment(element.TextVerticalAlign)
                 };
 
-                if (element.ClipText)
-                {
-                    ctx.SetDrawingTransform(Matrix3x2.Identity);
-                }
-
-                ctx.DrawText(options, content, rgba);
-            });
+                canvas.DrawText(options, content, Brushes.Solid(rgba), pen: null);
+            }));
 
             Rgba32[] pixels = new Rgba32[targetWidth * targetHeight];
             image.CopyPixelDataTo(pixels);

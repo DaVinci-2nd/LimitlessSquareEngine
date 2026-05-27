@@ -242,7 +242,7 @@ namespace LimitlessSquareEngine.Engine
 
             foreach (TriangleShape triangleShape in TriangleShape.CreateAllShapes(triangleMesh))
             {
-                body.AddShape(triangleShape, setMassInertia: false);
+                body.AddShape(triangleShape, MassInertiaUpdateMode.Preserve);
             }
         }
 
