@@ -370,6 +370,20 @@ namespace LimitlessSquareEngine.Engine
             return scene;
         }
 
+        internal static int GetObjectCount(string sceneId)
+        {
+            if (!_loadedScenes.TryGetValue(sceneId, out SceneData? scene))
+                return 0;
+            return scene.Objects.Count;
+        }
+
+        internal static string[] GetObjectIds(string sceneId)
+        {
+            if (!_loadedScenes.TryGetValue(sceneId, out SceneData? scene))
+                return Array.Empty<string>();
+            return scene.Objects.Select(o => o.Id).ToArray();
+        }
+
         private static SceneRuntimeData BuildRuntimeScene(SceneData scene)
         {
             var runtime = new SceneRuntimeData
@@ -1708,7 +1722,7 @@ namespace LimitlessSquareEngine.Engine
                         break;
 
                     default:
-                        throw new InvalidDataException($"[X] Camera '{objectId}' data contains unknown or wrong-cased property '{prop.Name}'.");
+                        break;
                 }
             }
 

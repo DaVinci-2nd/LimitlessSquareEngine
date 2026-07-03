@@ -357,6 +357,7 @@ namespace LimitlessSquareEngine
                     }
                 }
 
+                Console.WriteLine($"[!] Scene not found: id='{normalizedSceneId}', root='{_assetRootPath}', scanned={jsonFiles.Length} files");
                 return false;
             }
         }
@@ -971,7 +972,11 @@ namespace LimitlessSquareEngine
             if (_isEditorMode)
                 return Path.Combine(AppContext.BaseDirectory, "EditorAssets");
 
-            return Path.Combine(AppContext.BaseDirectory, "Assets");
+            string assetsPath = Path.Combine(_gameStartupFolder, "Assets");
+            if (Directory.Exists(assetsPath))
+                return assetsPath;
+
+            return _gameStartupFolder;
         }
 
         static string NormalizeAssetRootPath(string path)
@@ -2302,6 +2307,24 @@ namespace LimitlessSquareEngine
                                 foreach (string id in ids)
                                     table.Append(DynValue.NewString(id));
 
+                                return table;
+                            });
+
+                        // 注入场景对象计数函数
+                        instance.LuaScript.Globals["get_object_count"] =
+                            (Func<string, int>)((sceneId) =>
+                            {
+                                return Scene.GetObjectCount(sceneId);
+                            });
+
+                        // 注入场景对象ID列表函数
+                        instance.LuaScript.Globals["get_object_ids"] =
+                            (Func<string, Table>)((sceneId) =>
+                            {
+                                string[] ids = Scene.GetObjectIds(sceneId);
+                                Table table = new Table(instance.LuaScript);
+                                foreach (string id in ids)
+                                    table.Append(DynValue.NewString(id));
                                 return table;
                             });
 
