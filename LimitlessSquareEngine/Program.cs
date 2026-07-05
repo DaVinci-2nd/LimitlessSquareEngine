@@ -207,6 +207,8 @@ namespace LimitlessSquareEngine
         static int _nextTaskId = 0;
         // 图形系统实例
         static Graphics? _graphics;
+        // 音频系统实例
+        static Audio? _audio;
         // 纹理路径列表
         internal static List<string> _texturePaths = new List<string>();
         // Shader顶点文件表
@@ -225,6 +227,8 @@ namespace LimitlessSquareEngine
         internal static Dictionary<string, string> _generatedMaterialJsonRegistry = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         // 纹理文件注册表
         internal static Dictionary<string, string> _textureFileRegistry = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        // 音频文件注册表
+        internal static Dictionary<string, string> _audioFileRegistry = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
         // 场景文件显示名表
         static Dictionary<string, string> _sceneFileDisplayName = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
@@ -265,6 +269,7 @@ namespace LimitlessSquareEngine
 
         private static readonly object _assetDiscoveryLock = new object();
         private static readonly HashSet<string> _lazyTextureKeyDiscoveryCompleted = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        private static readonly HashSet<string> _lazyAudioKeyDiscoveryCompleted = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private static readonly JsonSerializerOptions _canvasLayoutJsonReadOptions = new JsonSerializerOptions
         {
             Converters = { new Vector4JsonConverter() },
@@ -468,6 +473,43 @@ namespace LimitlessSquareEngine
                 }
 
                 _lazyTextureKeyDiscoveryCompleted.Add(_assetRootPath);
+            }
+        }
+
+        static void EnsureAllAudioClipKeysDiscovered()
+        {
+            lock (_assetDiscoveryLock)
+            {
+                if (_lazyAudioKeyDiscoveryCompleted.Contains(_assetRootPath))
+                    return;
+
+                if (!Directory.Exists(_assetRootPath))
+                {
+                    _lazyAudioKeyDiscoveryCompleted.Add(_assetRootPath);
+                    return;
+                }
+
+                string[] files = Directory.GetFiles(_assetRootPath, "*.*", SearchOption.AllDirectories);
+                Array.Sort(files, StringComparer.OrdinalIgnoreCase);
+
+                foreach (string file in files)
+                {
+                    string ext = Path.GetExtension(file);
+
+                    bool isAudio =
+                        ext.Equals(".wav", StringComparison.OrdinalIgnoreCase) ||
+                        ext.Equals(".ogg", StringComparison.OrdinalIgnoreCase) ||
+                        ext.Equals(".mp3", StringComparison.OrdinalIgnoreCase);
+
+                    if (!isAudio)
+                        continue;
+
+                    string key = BuildAssetKey(_assetRootPath, file, removeExtension: false);
+                    _audioFileRegistry[key] = file;
+                    _audio?.RegisterAudioFile(key, file);
+                }
+
+                _lazyAudioKeyDiscoveryCompleted.Add(_assetRootPath);
             }
         }
 
@@ -1337,9 +1379,12 @@ namespace LimitlessSquareEngine
             _generatedMaterialJsonRegistry.Clear();
             _textureFileRegistry.Clear();
             _texturePaths.Clear();
+            _audioFileRegistry.Clear();
+            _audio?.ClearFileRegistry();
             _uiLayouts.Clear();
             _shaderVertexFiles.Clear();
             _lazyTextureKeyDiscoveryCompleted.Clear();
+            _lazyAudioKeyDiscoveryCompleted.Clear();
         }
 
         static void PreloadRegisteredAssets(Graphics graphics, string assetsPath)
@@ -1439,6 +1484,19 @@ namespace LimitlessSquareEngine
                     continue;
                 }
 
+                if (ext.Equals(".wav", StringComparison.OrdinalIgnoreCase) ||
+                    ext.Equals(".ogg", StringComparison.OrdinalIgnoreCase) ||
+                    ext.Equals(".mp3", StringComparison.OrdinalIgnoreCase))
+                {
+                    string key = BuildAssetKey(assetsPath, file, removeExtension: false);
+
+                    _audioFileRegistry[key] = file;
+                    _audio?.RegisterAudioFile(key, file);
+
+                    Console.WriteLine($"[i] Registered audio: {key}");
+                    continue;
+                }
+
                 if (ext.Equals(".obj", StringComparison.OrdinalIgnoreCase))
                 {
                     try
@@ -1468,7 +1526,7 @@ namespace LimitlessSquareEngine
                 }
             }
 
-            Console.WriteLine($"[i] Asset scan completed. Scenes={_sceneFileRegistry.Count}, Materials={_materialFileRegistry.Count}, UI={_uiLayouts.Count}, Textures={_textureFileRegistry.Count}");
+            Console.WriteLine($"[i] Asset scan completed. Scenes={_sceneFileRegistry.Count}, Materials={_materialFileRegistry.Count}, UI={_uiLayouts.Count}, Textures={_textureFileRegistry.Count}, Audio={_audioFileRegistry.Count}");
             graphics.LoadShaders(_shaderVertexFiles, assetsPath);
             graphics.ConfigureDefaultMainCameraFog();
         }
@@ -1682,6 +1740,9 @@ namespace LimitlessSquareEngine
                 graphics.Initialize();
                 _graphics = graphics;
                 Scene.BindGraphics(graphics);
+                _audio = new Audio();
+                _audio.Initialize();
+                Scene.BindAudio(_audio);
                 BindEditorHostBridge();
                 AttachWindowToExternalHost();
 
@@ -1786,6 +1847,81 @@ namespace LimitlessSquareEngine
                         foreach (var path in _texturePaths.OrderBy(p => p, StringComparer.OrdinalIgnoreCase))
                             textureTable.Append(DynValue.NewString(path));
                         instance.LuaScript.Globals["texture_paths"] = textureTable;
+
+                        // 注入音频系统
+                        instance.LuaScript.Globals["audio_play"] = (Func<string, float, float, float, string>)((clipId, volume, pitch, pan) =>
+                        {
+                            if (_audio == null) return string.Empty;
+                            return _audio.PlayNonSpatial(clipId, volume, pitch, pan);
+                        });
+                        instance.LuaScript.Globals["audio_play_looping"] = (Func<string, float, float, float, string>)((clipId, volume, pitch, pan) =>
+                        {
+                            if (_audio == null) return string.Empty;
+                            return _audio.PlayNonSpatialLooping(clipId, volume, pitch, pan);
+                        });
+                        instance.LuaScript.Globals["audio_stop"] = (Action<string>)((sourceId) =>
+                        {
+                            _audio?.Stop(sourceId);
+                        });
+                        instance.LuaScript.Globals["audio_pause"] = (Action<string>)((sourceId) =>
+                        {
+                            _audio?.Pause(sourceId);
+                        });
+                        instance.LuaScript.Globals["audio_resume"] = (Action<string>)((sourceId) =>
+                        {
+                            _audio?.Resume(sourceId);
+                        });
+                        instance.LuaScript.Globals["audio_set_volume"] = (Action<string, float>)((sourceId, volume) =>
+                        {
+                            _audio?.SetVolume(sourceId, volume);
+                        });
+                        instance.LuaScript.Globals["audio_set_pitch"] = (Action<string, float>)((sourceId, pitch) =>
+                        {
+                            _audio?.SetPitch(sourceId, pitch);
+                        });
+                        instance.LuaScript.Globals["audio_set_pan"] = (Action<string, float>)((sourceId, pan) =>
+                        {
+                            _audio?.SetPan(sourceId, pan);
+                        });
+                        instance.LuaScript.Globals["audio_play_source"] = (Action<string, string>)((sceneId, objectId) =>
+                        {
+                            _audio?.PlaySceneSource(sceneId, objectId);
+                        });
+                        instance.LuaScript.Globals["audio_stop_source"] = (Action<string, string>)((sceneId, objectId) =>
+                        {
+                            _audio?.StopSceneSource(sceneId, objectId);
+                        });
+                        instance.LuaScript.Globals["audio_set_position"] = (Action<string, float>)((sourceId, seconds) =>
+                        {
+                            _audio?.SetPosition(sourceId, seconds);
+                        });
+                        instance.LuaScript.Globals["audio_get_position"] = (Func<string, float>)((sourceId) =>
+                        {
+                            if (_audio == null) return 0f;
+                            return _audio.GetPosition(sourceId);
+                        });
+                        instance.LuaScript.Globals["audio_is_playing"] = (Func<string, bool>)((sourceId) =>
+                        {
+                            if (_audio == null) return false;
+                            return _audio.IsPlaying(sourceId);
+                        });
+                        instance.LuaScript.Globals["audio_register_clip"] = (Action<string, string>)((clipId, filePath) =>
+                        {
+                            _audio?.RegisterAudioFile(clipId, filePath);
+                        });
+                        instance.LuaScript.Globals["audio_unload_clip"] = (Action<string>)((clipId) =>
+                        {
+                            _audio?.UnloadClip(clipId);
+                        });
+                        instance.LuaScript.Globals["audio_set_master_volume"] = (Action<float>)((volume) =>
+                        {
+                            _audio?.SetMasterVolume(volume);
+                        });
+                        instance.LuaScript.Globals["audio_get_clip_duration"] = (Func<string, float>)((clipId) =>
+                        {
+                            if (_audio == null) return 0f;
+                            return _audio.GetClipDuration(clipId);
+                        });
 
                         // 注入场景加载函数
                         instance.LuaScript.Globals["load_scene"] = (Func<string, SceneData>)((sceneId) =>
@@ -2351,6 +2487,7 @@ namespace LimitlessSquareEngine
 
                 // 扫描资源目录
                 ReloadRegisteredAssetsForCurrentTiming();
+                EnsureAllAudioClipKeysDiscovered();
 
                 // 调用所有脚本的init函数
                 foreach (var instance in _luaScriptInstances)
@@ -2412,6 +2549,8 @@ namespace LimitlessSquareEngine
             _graphics?.ClearBackground();
             // 接收输入更新
             _input?.Update();
+            // 音频引擎更新
+            _audio?.Update(deltaTime);
             if (shouldAdvanceSimulation)
             {
                 // 遍历所有脚本实例

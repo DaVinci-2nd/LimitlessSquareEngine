@@ -501,11 +501,17 @@ namespace LimitlessSquareEngine.Engine
 
         private static readonly ConcurrentDictionary<string, SceneRuntimeData> _runtimeScenes = new();
         private static Graphics? _boundGraphics;
+        private static Audio? _boundAudio;
 
         public static void BindGraphics(Graphics graphics)
         {
             _boundGraphics = graphics;
             Physics.SetMeshColliderTriangleResolver(graphics.TryGetMeshColliderTriangles);
+        }
+
+        public static void BindAudio(Audio audio)
+        {
+            _boundAudio = audio;
         }
 
         internal sealed class SceneRuntimeNode
@@ -1192,6 +1198,37 @@ namespace LimitlessSquareEngine.Engine
                         catch (Exception ex)
                         {
                             Console.WriteLine($"[!] Light '{node.Source.Id}' skipped while flushing to renderer: {ex.Message}");
+                        }
+                    }
+
+                    if (_boundAudio != null)
+                    {
+                        if (string.Equals(node.Source.Type, "AudioListener", StringComparison.Ordinal))
+                        {
+                            try
+                            {
+                                AudioListenerSettings settings = ParseAudioListenerSettings(node.Source.Data, node.Source.Id);
+
+                                _boundAudio.SetListener(sceneId, node.Source.Id, settings,
+                                    node.World.Position, node.World.Rotation, Double3.Zero);
+                            }
+                            catch (Exception ex)
+                            {
+                                Console.WriteLine($"[!] AudioListener '{node.Source.Id}' skipped: {ex.Message}");
+                            }
+                        }
+                        else if (string.Equals(node.Source.Type, "AudioSource", StringComparison.Ordinal))
+                        {
+                            try
+                            {
+                                AudioSourceSettings settings = ParseAudioSourceSettings(node.Source.Data, node.Source.Id);
+                                _boundAudio.RegisterOrUpdateSceneAudioSource(sceneId, node.Source.Id, settings,
+                                    node.World.Position, node.World.Rotation);
+                            }
+                            catch (Exception ex)
+                            {
+                                Console.WriteLine($"[!] AudioSource '{node.Source.Id}' skipped: {ex.Message}");
+                            }
                         }
                     }
                 }
@@ -2075,6 +2112,172 @@ namespace LimitlessSquareEngine.Engine
 
                     default:
                         throw new InvalidDataException($"[X] Light '{objectId}' data contains unknown or wrong-cased property '{prop.Name}'.");
+                }
+            }
+
+            return settings;
+        }
+
+        private static AudioListenerSettings ParseAudioListenerSettings(string? rawData, string objectId)
+        {
+            var settings = new AudioListenerSettings();
+
+            if (string.IsNullOrWhiteSpace(rawData))
+                return settings;
+
+            using JsonDocument doc = JsonDocument.Parse(rawData);
+
+            if (doc.RootElement.ValueKind != JsonValueKind.Object)
+                throw new InvalidDataException($"[X] AudioListener '{objectId}' data must be a JSON object string.");
+
+            foreach (JsonProperty prop in doc.RootElement.EnumerateObject())
+            {
+                switch (prop.Name)
+                {
+                    case "OutputMode":
+                    case "outputMode":
+                        if (prop.Value.ValueKind != JsonValueKind.String)
+                            throw new InvalidDataException($"[X] AudioListener '{objectId}' data.OutputMode must be a string.");
+                        string mode = prop.Value.GetString() ?? "";
+                        if (mode != "Direct" && mode != "AudioSource")
+                            throw new InvalidDataException($"[X] AudioListener '{objectId}' data.OutputMode must be 'Direct' or 'AudioSource'.");
+                        settings.OutputMode = mode;
+                        break;
+
+                    case "TargetSourceId":
+                    case "targetSourceId":
+                        if (prop.Value.ValueKind == JsonValueKind.Null)
+                            settings.TargetSourceId = null;
+                        else if (prop.Value.ValueKind == JsonValueKind.String)
+                            settings.TargetSourceId = prop.Value.GetString();
+                        else
+                            throw new InvalidDataException($"[X] AudioListener '{objectId}' data.TargetSourceId must be a string or null.");
+                        break;
+
+                    case "Mute":
+                    case "mute":
+                        if (prop.Value.ValueKind != JsonValueKind.True && prop.Value.ValueKind != JsonValueKind.False)
+                            throw new InvalidDataException($"[X] AudioListener '{objectId}' data.Mute must be true or false.");
+                        settings.Mute = prop.Value.GetBoolean();
+                        break;
+
+                    default:
+                        throw new InvalidDataException($"[X] AudioListener '{objectId}' data contains unknown property '{prop.Name}'.");
+                }
+            }
+
+            return settings;
+        }
+
+        private static AudioSourceSettings ParseAudioSourceSettings(string? rawData, string objectId)
+        {
+            var settings = new AudioSourceSettings();
+
+            if (string.IsNullOrWhiteSpace(rawData))
+                return settings;
+
+            using JsonDocument doc = JsonDocument.Parse(rawData);
+
+            if (doc.RootElement.ValueKind != JsonValueKind.Object)
+                throw new InvalidDataException($"[X] AudioSource '{objectId}' data must be a JSON object string.");
+
+            foreach (JsonProperty prop in doc.RootElement.EnumerateObject())
+            {
+                switch (prop.Name)
+                {
+                    case "ClipId":
+                    case "clipId":
+                        if (prop.Value.ValueKind != JsonValueKind.String)
+                            throw new InvalidDataException($"[X] AudioSource '{objectId}' data.ClipId must be a string.");
+                        settings.ClipId = prop.Value.GetString() ?? "";
+                        break;
+
+                    case "Volume":
+                    case "volume":
+                        if (prop.Value.ValueKind != JsonValueKind.Number || !prop.Value.TryGetDouble(out double volume) || volume < 0.0)
+                            throw new InvalidDataException($"[X] AudioSource '{objectId}' data.Volume must be >= 0.");
+                        settings.Volume = volume;
+                        break;
+
+                    case "MinDistance":
+                    case "minDistance":
+                        if (prop.Value.ValueKind != JsonValueKind.Number || !prop.Value.TryGetDouble(out double minDist) || minDist <= 0.0)
+                            throw new InvalidDataException($"[X] AudioSource '{objectId}' data.MinDistance must be > 0.");
+                        settings.MinDistance = minDist;
+                        break;
+
+                    case "MaxDistance":
+                    case "maxDistance":
+                        if (prop.Value.ValueKind != JsonValueKind.Number || !prop.Value.TryGetDouble(out double maxDist) || maxDist <= 0.0)
+                            throw new InvalidDataException($"[X] AudioSource '{objectId}' data.MaxDistance must be > 0.");
+                        settings.MaxDistance = maxDist;
+                        break;
+
+                    case "RolloffFactor":
+                    case "rolloffFactor":
+                        if (prop.Value.ValueKind != JsonValueKind.Number || !prop.Value.TryGetDouble(out double rolloff) || rolloff < 0.0)
+                            throw new InvalidDataException($"[X] AudioSource '{objectId}' data.RolloffFactor must be >= 0.");
+                        settings.RolloffFactor = rolloff;
+                        break;
+
+                    case "AttenuationModel":
+                    case "attenuationModel":
+                        if (prop.Value.ValueKind != JsonValueKind.String)
+                            throw new InvalidDataException($"[X] AudioSource '{objectId}' data.AttenuationModel must be a string.");
+                        settings.AttenuationModel = prop.Value.GetString() ?? "InverseDistanceClamped";
+                        break;
+
+                    case "SpatialBlend":
+                    case "spatialBlend":
+                        if (prop.Value.ValueKind != JsonValueKind.Number || !prop.Value.TryGetDouble(out double spatialBlend) || spatialBlend < 0.0 || spatialBlend > 1.0)
+                            throw new InvalidDataException($"[X] AudioSource '{objectId}' data.SpatialBlend must be between 0 and 1.");
+                        settings.SpatialBlend = spatialBlend;
+                        break;
+
+                    case "Loop":
+                    case "loop":
+                        if (prop.Value.ValueKind != JsonValueKind.True && prop.Value.ValueKind != JsonValueKind.False)
+                            throw new InvalidDataException($"[X] AudioSource '{objectId}' data.Loop must be true or false.");
+                        settings.Loop = prop.Value.GetBoolean();
+                        break;
+
+                    case "PlayOnAwake":
+                    case "playOnAwake":
+                        if (prop.Value.ValueKind != JsonValueKind.True && prop.Value.ValueKind != JsonValueKind.False)
+                            throw new InvalidDataException($"[X] AudioSource '{objectId}' data.PlayOnAwake must be true or false.");
+                        settings.PlayOnAwake = prop.Value.GetBoolean();
+                        break;
+
+                    case "DopplerFactor":
+                    case "dopplerFactor":
+                        if (prop.Value.ValueKind != JsonValueKind.Number || !prop.Value.TryGetDouble(out double doppler) || doppler < 0.0)
+                            throw new InvalidDataException($"[X] AudioSource '{objectId}' data.DopplerFactor must be >= 0.");
+                        settings.DopplerFactor = doppler;
+                        break;
+
+                    case "ReferenceDbLevel":
+                    case "referenceDbLevel":
+                        if (prop.Value.ValueKind != JsonValueKind.Number || !prop.Value.TryGetDouble(out double refDb))
+                            throw new InvalidDataException($"[X] AudioSource '{objectId}' data.ReferenceDbLevel must be a number.");
+                        settings.ReferenceDbLevel = refDb;
+                        break;
+
+                    case "CullDbThreshold":
+                    case "cullDbThreshold":
+                        if (prop.Value.ValueKind != JsonValueKind.Number || !prop.Value.TryGetDouble(out double cullDb))
+                            throw new InvalidDataException($"[X] AudioSource '{objectId}' data.CullDbThreshold must be a number.");
+                        settings.CullDbThreshold = cullDb;
+                        break;
+
+                    case "SpeedOfSound":
+                    case "speedOfSound":
+                        if (prop.Value.ValueKind != JsonValueKind.Number || !prop.Value.TryGetDouble(out double sos) || sos <= 0.0)
+                            throw new InvalidDataException($"[X] AudioSource '{objectId}' data.SpeedOfSound must be > 0.");
+                        settings.SpeedOfSound = sos;
+                        break;
+
+                    default:
+                        throw new InvalidDataException($"[X] AudioSource '{objectId}' data contains unknown property '{prop.Name}'.");
                 }
             }
 
