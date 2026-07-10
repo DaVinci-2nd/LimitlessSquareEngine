@@ -352,7 +352,8 @@ namespace LimitlessSquareEngine.Editor
             MaterialJsonFile,
             ImageFile,
             FragFile,
-            VertFile
+            VertFile,
+            AudioFile
         }
 
         private void OnSceneHostResized(PixelSize hostSize)
@@ -1880,6 +1881,9 @@ namespace LimitlessSquareEngine.Editor
             };
             private static readonly IBrush MaterialBrush = new SolidColorBrush(Color.Parse("#226622"));
             private static readonly IBrush ImageBrush = new SolidColorBrush(Color.Parse("#66C8FF"));
+            private static readonly IBrush AudioBrush = new SolidColorBrush(Color.Parse("#7B1FA2"));
+            private static readonly IBrush AudioDiscBrush = new SolidColorBrush(Color.Parse("#555555"));
+            private static readonly IBrush AudioDiscCenterBrush = new SolidColorBrush(Color.Parse("#000000"));
             private static readonly IBrush MountainLightBrush = new SolidColorBrush(Color.Parse("#6DBE57"));
             private static readonly IBrush MountainDarkBrush = new SolidColorBrush(Color.Parse("#4E9C3A"));
             private static readonly IBrush SunBrush = new SolidColorBrush(Color.Parse("#FFD54A"));
@@ -1947,6 +1951,11 @@ namespace LimitlessSquareEngine.Editor
                     case ResourceIconKind.VertFile:
                         DrawFileBase(context, bounds, RainbowBrush, true);
                         DrawCenteredLabel(context, bounds, "V", ScaleFromBoundsY(bounds, 18.0), FontWeight.Bold);
+                        break;
+
+                    case ResourceIconKind.AudioFile:
+                        DrawFileBase(context, bounds, AudioBrush, true);
+                        DrawAudioDisc(context, bounds);
                         break;
 
                     default:
@@ -2126,6 +2135,20 @@ namespace LimitlessSquareEngine.Editor
                 Point sunCenter = new Point(x + size * 0.75, y + size * 0.24);
                 double sunRadius = size * 0.09;
                 context.DrawEllipse(SunBrush, null, sunCenter, sunRadius, sunRadius);
+            }
+
+            private static void DrawAudioDisc(DrawingContext context, Rect bounds)
+            {
+                double outerRadius = bounds.Width * 0.22;
+                Point center = bounds.Center;
+
+                context.DrawEllipse(AudioDiscBrush, null, center, outerRadius, outerRadius);
+
+                double innerRadius = outerRadius * 0.35;
+                context.DrawEllipse(WhiteBrush, null, center, innerRadius, innerRadius);
+
+                double dotRadius = innerRadius * 0.18;
+                context.DrawEllipse(AudioDiscCenterBrush, null, center, dotRadius, dotRadius);
             }
 
             private static void DrawSceneGizmo(DrawingContext context, Rect bounds)
@@ -2980,7 +3003,7 @@ namespace LimitlessSquareEngine.Editor
                 obj.Materials = newValue;
                 return PersistSceneObjectChanges(obj, false);
             }));
-            root.Children.Add(CreateTextPropertyEditor("Data", () => obj.Data ?? "", value =>
+            root.Children.Add(CreateCollapsibleDataEditor("Data", () => obj.Data ?? "", value =>
             {
                 string? newValue = string.IsNullOrWhiteSpace(value) ? null : value;
                 string? oldValue = obj.Data;
@@ -3021,6 +3044,87 @@ namespace LimitlessSquareEngine.Editor
                     VerticalAlignment = VerticalAlignment.Center
                 }
             };
+        }
+
+        private Control CreateCollapsibleDataEditor(
+            string label,
+            Func<string> getter,
+            Func<string, bool> apply)
+        {
+            TextBox textBox = CreateInspectorTextBox(getter());
+            textBox.AcceptsReturn = true;
+            textBox.TextWrapping = TextWrapping.Wrap;
+            textBox.MinHeight = 120;
+            textBox.Height = double.NaN;
+
+            Border contentArea = new Border
+            {
+                Child = textBox,
+                IsVisible = false
+            };
+
+            Button headerButton = new Button
+            {
+                Height = InspectorTextBoxHeight,
+                Background = new SolidColorBrush(Color.Parse("#222222")),
+                BorderBrush = Brushes.Transparent,
+                BorderThickness = new Thickness(0),
+                CornerRadius = new CornerRadius(0),
+                Padding = new Thickness(6, 0, 6, 0),
+                HorizontalContentAlignment = HorizontalAlignment.Left,
+                HorizontalAlignment = HorizontalAlignment.Stretch,
+                Content = "\u25B6 " + label,
+                Foreground = Brushes.White
+            };
+
+            headerButton.Click += (_, _) =>
+            {
+                bool isExpanded = contentArea.IsVisible;
+                contentArea.IsVisible = !isExpanded;
+                headerButton.Content = (isExpanded ? "\u25B6 " : "\u25BC ") + label;
+            };
+
+            void ResetText()
+            {
+                _isUpdatingSceneInspector = true;
+                textBox.Text = getter();
+                _isUpdatingSceneInspector = false;
+            }
+
+            void Commit()
+            {
+                if (_isUpdatingSceneInspector)
+                    return;
+
+                string value = textBox.Text ?? string.Empty;
+
+                if (!apply(value))
+                {
+                    ResetText();
+                    return;
+                }
+
+                ResetText();
+            }
+
+            textBox.LostFocus += (_, _) => Commit();
+            textBox.KeyDown += (_, e) =>
+            {
+                if (e.Key == Key.Enter)
+                    Commit();
+            };
+
+            StackPanel panel = new StackPanel
+            {
+                Orientation = Orientation.Vertical,
+                Spacing = InspectorPropertySpacing,
+                Margin = new Thickness(12, 0, 12, 0)
+            };
+
+            panel.Children.Add(headerButton);
+            panel.Children.Add(contentArea);
+
+            return panel;
         }
 
         private Control CreatePropertyRow(string label, Control editor)
@@ -5526,6 +5630,11 @@ void main()
 
                 case ".vert":
                     return ResourceIconKind.VertFile;
+
+                case ".wav":
+                case ".ogg":
+                case ".mp3":
+                    return ResourceIconKind.AudioFile;
 
                 case ".png":
                 case ".jpg":

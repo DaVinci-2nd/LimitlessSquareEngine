@@ -8968,6 +8968,58 @@ namespace LimitlessSquareEngine
             width = Math.Max(1, width);
             height = Math.Max(1, height);
 
+            if (_contourFramebuffer == 0 ||
+                _contourMaskTexture == 0 ||
+                _contourTargetWidth != width ||
+                _contourTargetHeight != height)
+            {
+                ReleaseContourTarget();
+
+                _contourMaskTexture = _gl.GenTexture();
+                _gl.BindTexture(TextureTarget.Texture2D, _contourMaskTexture);
+
+                byte[] empty = new byte[width * height * 4];
+
+                _gl.TexImage2D(
+                    TextureTarget.Texture2D,
+                    0,
+                    InternalFormat.Rgba8,
+                    (uint)width,
+                    (uint)height,
+                    0,
+                    PixelFormat.Rgba,
+                    PixelType.UnsignedByte,
+                    (ReadOnlySpan<byte>)empty);
+
+                _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.Nearest);
+                _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMagFilter, (int)TextureMagFilter.Nearest);
+                _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapS, (int)TextureWrapMode.ClampToEdge);
+                _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapT, (int)TextureWrapMode.ClampToEdge);
+
+                _contourFramebuffer = _gl.GenFramebuffer();
+                _gl.BindFramebuffer(FramebufferTarget.Framebuffer, _contourFramebuffer);
+
+                _gl.FramebufferTexture2D(
+                    FramebufferTarget.Framebuffer,
+                    FramebufferAttachment.ColorAttachment0,
+                    TextureTarget.Texture2D,
+                    _contourMaskTexture,
+                    0);
+
+                _gl.DrawBuffer(GLEnum.ColorAttachment0);
+                _gl.ReadBuffer(GLEnum.ColorAttachment0);
+
+                GLEnum status = _gl.CheckFramebufferStatus(FramebufferTarget.Framebuffer);
+                if (status != GLEnum.FramebufferComplete)
+                    throw new Exception($"[X] Contour framebuffer incomplete: {status}");
+
+                _gl.BindFramebuffer(FramebufferTarget.Framebuffer, 0);
+                _gl.BindTexture(TextureTarget.Texture2D, 0);
+
+                _contourTargetWidth = width;
+                _contourTargetHeight = height;
+            }
+
             if (_contourFillProgram == 0)
             {
                 _contourFillProgram = CreateContourFillProgram();
@@ -8986,95 +9038,6 @@ namespace LimitlessSquareEngine
             }
 
             EnsureContourQuad();
-
-            if (_contourFramebuffer != 0 &&
-                _contourMaskTexture != 0 &&
-                _contourTargetWidth == width &&
-                _contourTargetHeight == height)
-            {
-                return;
-            }
-
-            ReleaseContourTarget();
-
-            if (_contourFillProgram != 0)
-            {
-                _gl.DeleteProgram(_contourFillProgram);
-                _contourFillProgram = 0;
-            }
-
-            if (_contourCompositeProgram != 0)
-            {
-                _gl.DeleteProgram(_contourCompositeProgram);
-                _contourCompositeProgram = 0;
-            }
-
-            if (_contourQuadVao != 0)
-            {
-                _gl.DeleteVertexArray(_contourQuadVao);
-                _contourQuadVao = 0;
-            }
-
-            if (_contourQuadVbo != 0)
-            {
-                _gl.DeleteBuffer(_contourQuadVbo);
-                _contourQuadVbo = 0;
-            }
-
-            _contourFillModelLocation = -1;
-            _contourFillViewLocation = -1;
-            _contourFillProjectionLocation = -1;
-
-            _contourCompositeMaskLocation = -1;
-            _contourCompositeTextureSizeLocation = -1;
-            _contourCompositeColorLocation = -1;
-            _contourCompositeThicknessLocation = -1;
-
-            _sceneObjectContours.Clear();
-
-            _contourMaskTexture = _gl.GenTexture();
-            _gl.BindTexture(TextureTarget.Texture2D, _contourMaskTexture);
-
-            byte[] empty = new byte[width * height * 4];
-
-            _gl.TexImage2D(
-                TextureTarget.Texture2D,
-                0,
-                InternalFormat.Rgba8,
-                (uint)width,
-                (uint)height,
-                0,
-                PixelFormat.Rgba,
-                PixelType.UnsignedByte,
-                (ReadOnlySpan<byte>)empty);
-
-            _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.Nearest);
-            _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMagFilter, (int)TextureMagFilter.Nearest);
-            _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapS, (int)TextureWrapMode.ClampToEdge);
-            _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapT, (int)TextureWrapMode.ClampToEdge);
-
-            _contourFramebuffer = _gl.GenFramebuffer();
-            _gl.BindFramebuffer(FramebufferTarget.Framebuffer, _contourFramebuffer);
-
-            _gl.FramebufferTexture2D(
-                FramebufferTarget.Framebuffer,
-                FramebufferAttachment.ColorAttachment0,
-                TextureTarget.Texture2D,
-                _contourMaskTexture,
-                0);
-
-            _gl.DrawBuffer(GLEnum.ColorAttachment0);
-            _gl.ReadBuffer(GLEnum.ColorAttachment0);
-
-            GLEnum status = _gl.CheckFramebufferStatus(FramebufferTarget.Framebuffer);
-            if (status != GLEnum.FramebufferComplete)
-                throw new Exception($"[X] Contour framebuffer incomplete: {status}");
-
-            _gl.BindFramebuffer(FramebufferTarget.Framebuffer, 0);
-            _gl.BindTexture(TextureTarget.Texture2D, 0);
-
-            _contourTargetWidth = width;
-            _contourTargetHeight = height;
         }
 
         private void EnsureContourQuad()
