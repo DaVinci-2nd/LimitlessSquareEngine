@@ -1363,7 +1363,17 @@ namespace LimitlessSquareEngine
                 paused => QueueEditorHostAction(() => SetRuntimePausedCore(paused)), GetRuntimePausedCore,
                 () => QueueEditorHostAction(StepRuntimeFrameCore),
                 folderPath => QueueEditorHostAction(() => SetGameStartupFolderCore(folderPath)),
-                GetGameStartupFolderCore);
+                GetGameStartupFolderCore,
+                (worldPos, mode, hoveredAxis, visible) => QueueEditorHostAction(() =>
+                {
+                    _graphics?.SetGizmoState(worldPos, mode, hoveredAxis, visible);
+                }),
+                (sceneId, objectId) => Scene.GetPosition(sceneId, objectId),
+                (sceneId, objectId, worldDelta) => Scene.WorldDeltaToLocalDelta(sceneId, objectId, worldDelta),
+                () => _graphics?.GizmoSceneView ?? System.Numerics.Matrix4x4.Identity,
+                () => _graphics?.GizmoSceneProjection ?? System.Numerics.Matrix4x4.Identity,
+                hoveredAxis => { if (_graphics != null) _graphics.SetGizmoHover(hoveredAxis); },
+                (dragging, activeAxis) => { if (_graphics != null) _graphics.SetGizmoDrag(dragging, activeAxis); });
         }
 
         static void UnbindEditorHostBridge()

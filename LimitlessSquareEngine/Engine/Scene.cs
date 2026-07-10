@@ -983,6 +983,26 @@ namespace LimitlessSquareEngine.Engine
             return node.World.Scale;
         }
 
+        public static Double3 WorldDeltaToLocalDelta(string sceneId, string objectId, Double3 worldDelta)
+        {
+            if (!TryGetNode(sceneId, objectId, out _, out var node))
+                return worldDelta;
+
+            if (node.Parent == null)
+                return worldDelta;
+
+            RecalculateWorld(node.Parent);
+            SceneWorldState parent = node.Parent.World;
+
+            DQuaternion invRot = parent.Rotation.Inverse();
+            Double3 rotated = invRot.Rotate(worldDelta);
+
+            return new Double3(
+                parent.Scale.X != 0.0 ? rotated.X / parent.Scale.X : 0.0,
+                parent.Scale.Y != 0.0 ? rotated.Y / parent.Scale.Y : 0.0,
+                parent.Scale.Z != 0.0 ? rotated.Z / parent.Scale.Z : 0.0);
+        }
+
         private static readonly Double3 RightBasis = new Double3(1.0, 0.0, 0.0);
         private static readonly Double3 UpBasis = new Double3(0.0, 1.0, 0.0);
         private static readonly Double3 ForwardBasis = new Double3(0.0, 0.0, 1.0);

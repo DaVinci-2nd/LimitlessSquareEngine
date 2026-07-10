@@ -1343,6 +1343,29 @@ namespace LimitlessSquareEngine
 
         private readonly Dictionary<string, ContourStyle> _sceneObjectContours = new(StringComparer.Ordinal);
 
+        private bool _gizmoVisible;
+        private Double3 _gizmoWorldPosition;
+        private int _gizmoMode;
+        private int _gizmoHoveredAxis;
+        private bool _gizmoDragging;
+        private int _gizmoActiveAxis;
+
+        private Matrix4x4 _gizmoSceneView;
+        private Matrix4x4 _gizmoSceneProjection;
+        private Double3 _gizmoSceneCameraWorldPos;
+        private bool _gizmoSceneCameraSet;
+
+        public Matrix4x4 GizmoSceneView => _gizmoSceneView;
+        public Matrix4x4 GizmoSceneProjection => _gizmoSceneProjection;
+
+        private uint _gizmoProgram;
+        private uint _gizmoVAO;
+        private uint _gizmoVBO;
+        private int _gizmoLocView;
+        private int _gizmoLocProj;
+        private int _gizmoLocCenter;
+        private int _gizmoLocScale;
+
         private sealed class ContourStyle
         {
             public Vector3 Color { get; set; } = Vector3.One;
@@ -8655,6 +8678,14 @@ namespace LimitlessSquareEngine
                 List<RenderCommand> batchCommands = batch.ToList();
                 RenderCommand first = batchCommands.First();
 
+                if (!_gizmoSceneCameraSet && first.CameraWorldPosition.X != 0.0 || first.CameraWorldPosition.Y != 0.0 || first.CameraWorldPosition.Z != 0.0)
+                {
+                    _gizmoSceneView = first.View;
+                    _gizmoSceneProjection = first.Projection;
+                    _gizmoSceneCameraWorldPos = first.CameraWorldPosition;
+                    _gizmoSceneCameraSet = true;
+                }
+
                 SkyboxData batchSkybox = batchCommands
                     .Where(c => c.IsSkybox && c.Skybox != null)
                     .Select(c => c.Skybox)
@@ -8713,6 +8744,12 @@ namespace LimitlessSquareEngine
                     ExecuteObjectContourPass(batchCommands, first);
                 }
             }
+
+            if (_gizmoVisible)
+            {
+                ExecuteGizmoPass();
+            }
+            _gizmoSceneCameraSet = false;
 
             _gl.BindFramebuffer(FramebufferTarget.Framebuffer, 0);
             _gl.Viewport(0, 0, (uint)_window.Size.X, (uint)_window.Size.Y);
@@ -9193,6 +9230,234 @@ namespace LimitlessSquareEngine
             _gl.DeleteShader(fragmentShader);
 
             return program;
+        }
+
+        public void SetGizmoState(Double3 worldPos, int mode, int hoveredAxis, bool visible)
+        {
+            _gizmoWorldPosition = worldPos;
+            _gizmoMode = mode;
+            _gizmoHoveredAxis = hoveredAxis;
+            _gizmoVisible = visible;
+        }
+
+        public void SetGizmoHover(int hoveredAxis)
+        {
+            _gizmoHoveredAxis = hoveredAxis;
+        }
+
+        public void SetGizmoDrag(bool dragging, int activeAxis)
+        {
+            _gizmoDragging = dragging;
+            _gizmoActiveAxis = activeAxis;
+        }
+
+        private void ExecuteGizmoPass()
+        {
+            if (!_gizmoSceneCameraSet || !_gizmoVisible)
+                return;
+
+            EnsureGizmoProgram();
+            EnsureGizmoBuffers();
+
+            Double3 relative = new Double3(
+                _gizmoWorldPosition.X - _gizmoSceneCameraWorldPos.X,
+                _gizmoWorldPosition.Y - _gizmoSceneCameraWorldPos.Y,
+                _gizmoWorldPosition.Z - _gizmoSceneCameraWorldPos.Z);
+
+            Vector3 floatCenter = new Vector3(
+                (float)relative.X,
+                (float)relative.Y,
+                (float)(-relative.Z));
+
+            double distance = Math.Sqrt(
+                relative.X * relative.X +
+                relative.Y * relative.Y +
+                relative.Z * relative.Z);
+
+            float fovHalfTan = 1.0f / _gizmoSceneProjection.M22;
+            const float ScreenRatio = 0.12f;
+            float worldScale = (float)distance * fovHalfTan * 2.0f * ScreenRatio;
+
+            float[] vertices = BuildGizmoVertices();
+            ReadOnlySpan<float> span = vertices;
+
+            _gl.BindBuffer(BufferTargetARB.ArrayBuffer, _gizmoVBO);
+            _gl.BufferData(BufferTargetARB.ArrayBuffer, (nuint)(vertices.Length * sizeof(float)),
+                span, BufferUsageARB.DynamicDraw);
+
+            _gl.DepthMask(true);
+            _gl.ClearDepth(0.0);
+            _gl.Clear(ClearBufferMask.DepthBufferBit);
+
+            _gl.UseProgram(_gizmoProgram);
+            _gl.BindVertexArray(_gizmoVAO);
+
+            _gl.Enable(EnableCap.DepthTest);
+            _gl.DepthFunc(GLEnum.Gequal);
+            _gl.DepthMask(true);
+            _gl.Enable(EnableCap.Blend);
+            _gl.BlendFunc(BlendingFactor.SrcAlpha, BlendingFactor.OneMinusSrcAlpha);
+
+            SetMatrixUniform(_gizmoLocView, _gizmoSceneView);
+            SetMatrixUniform(_gizmoLocProj, _gizmoSceneProjection);
+            _gl.Uniform3(_gizmoLocCenter, floatCenter.X, floatCenter.Y, floatCenter.Z);
+            _gl.Uniform1(_gizmoLocScale, worldScale);
+
+            _gl.DrawArrays(PrimitiveType.Triangles, 0, (uint)(vertices.Length / 7));
+
+            _gl.BindVertexArray(0);
+        }
+
+        private float[] BuildGizmoVertices()
+        {
+            var list = new List<float>();
+
+            BuildArrow(list, new Double3(1, 0, 0),
+                _gizmoHoveredAxis == 0 && !_gizmoDragging,
+                _gizmoDragging && _gizmoActiveAxis == 0,
+                new Vector4(1f, 0.1f, 0.1f, 1f));
+            BuildArrow(list, new Double3(0, 1, 0),
+                _gizmoHoveredAxis == 1 && !_gizmoDragging,
+                _gizmoDragging && _gizmoActiveAxis == 1,
+                new Vector4(0.1f, 1f, 0.1f, 1f));
+            BuildArrow(list, new Double3(0, 0, -1),
+                _gizmoHoveredAxis == 2 && !_gizmoDragging,
+                _gizmoDragging && _gizmoActiveAxis == 2,
+                new Vector4(0.1f, 0.1f, 1f, 1f));
+
+            return list.ToArray();
+        }
+
+        private static void BuildArrow(List<float> list, Double3 axis, bool hovered, bool active, Vector4 defaultColor)
+        {
+            Vector4 color = active
+                ? new Vector4(1f, 1f, 0f, 1f)
+                : hovered
+                    ? new Vector4(defaultColor.X + 0.25f, defaultColor.Y + 0.25f, defaultColor.Z + 0.25f, 1f)
+                    : defaultColor;
+
+            Vector3 ax = new Vector3((float)axis.X, (float)axis.Y, (float)axis.Z);
+
+            Vector3 perpA = Math.Abs(ax.X) < 0.9f
+                ? Vector3.Normalize(Vector3.Cross(ax, Vector3.UnitX))
+                : Vector3.Normalize(Vector3.Cross(ax, Vector3.UnitY));
+            Vector3 perpB = Vector3.Cross(perpA, ax);
+
+            float gapOffset = 0.5f;
+            float shaftLen = 0.7f;
+            float shaftR = 0.05f;
+            float coneLen = 0.4f;
+            float coneR = 0.22f;
+
+            Vector3 origin = ax * gapOffset;
+
+            Vector3 b0 = origin + (perpA + perpB) * shaftR;
+            Vector3 b1 = origin + (perpA - perpB) * shaftR;
+            Vector3 b2 = origin + (-perpA - perpB) * shaftR;
+            Vector3 b3 = origin + (-perpA + perpB) * shaftR;
+
+            Vector3 shaftEnd = origin + ax * shaftLen;
+            Vector3 t0 = shaftEnd + (perpA + perpB) * shaftR;
+            Vector3 t1 = shaftEnd + (perpA - perpB) * shaftR;
+            Vector3 t2 = shaftEnd + (-perpA - perpB) * shaftR;
+            Vector3 t3 = shaftEnd + (-perpA + perpB) * shaftR;
+
+            AddTri(list, b0, b1, t0, color); AddTri(list, t0, b1, t1, color);
+            AddTri(list, b1, b2, t1, color); AddTri(list, t1, b2, t2, color);
+            AddTri(list, b2, b3, t2, color); AddTri(list, t2, b3, t3, color);
+            AddTri(list, b3, b0, t3, color); AddTri(list, t3, b0, t0, color);
+            AddTri(list, b0, b2, b1, color);
+            AddTri(list, b0, b3, b2, color);
+
+            Vector3 coneBase = shaftEnd;
+            Vector3 coneTip = shaftEnd + ax * coneLen;
+            Vector3 c0 = coneBase + (perpA + perpB) * coneR;
+            Vector3 c1 = coneBase + (perpA - perpB) * coneR;
+            Vector3 c2 = coneBase + (-perpA - perpB) * coneR;
+            Vector3 c3 = coneBase + (-perpA + perpB) * coneR;
+
+            AddTri(list, c0, c1, coneTip, color);
+            AddTri(list, c1, c2, coneTip, color);
+            AddTri(list, c2, c3, coneTip, color);
+            AddTri(list, c3, c0, coneTip, color);
+            AddTri(list, c0, c2, c1, color);
+            AddTri(list, c0, c3, c2, color);
+        }
+
+        private static void AddTri(List<float> list, Vector3 a, Vector3 b, Vector3 c, Vector4 col)
+        {
+            list.Add(a.X); list.Add(a.Y); list.Add(a.Z);
+            list.Add(col.X); list.Add(col.Y); list.Add(col.Z); list.Add(col.W);
+            list.Add(b.X); list.Add(b.Y); list.Add(b.Z);
+            list.Add(col.X); list.Add(col.Y); list.Add(col.Z); list.Add(col.W);
+            list.Add(c.X); list.Add(c.Y); list.Add(c.Z);
+            list.Add(col.X); list.Add(col.Y); list.Add(col.Z); list.Add(col.W);
+        }
+
+        private void EnsureGizmoProgram()
+        {
+            if (_gizmoProgram != 0)
+                return;
+
+            string vertSrc = @"#version 330 core
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec4 aColor;
+uniform mat4 uView;
+uniform mat4 uProjection;
+uniform vec3 uWorldCenter;
+uniform float uScreenScale;
+out vec4 vColor;
+void main()
+{
+    vec3 wp = uWorldCenter + aPos * uScreenScale;
+    gl_Position = uProjection * uView * vec4(wp, 1.0);
+    vColor = aColor;
+}";
+
+            string fragSrc = @"#version 330 core
+in vec4 vColor;
+out vec4 FragColor;
+void main()
+{
+    FragColor = vColor;
+}";
+
+            uint vs = CompileShader(ShaderType.VertexShader, vertSrc);
+            uint fs = CompileShader(ShaderType.FragmentShader, fragSrc);
+            _gizmoProgram = _gl.CreateProgram();
+            _gl.AttachShader(_gizmoProgram, vs);
+            _gl.AttachShader(_gizmoProgram, fs);
+            _gl.LinkProgram(_gizmoProgram);
+            _gl.GetProgram(_gizmoProgram, ProgramPropertyARB.LinkStatus, out int ok);
+            if (ok == 0)
+                throw new Exception($"[X] Gizmo program link failed: {_gl.GetProgramInfoLog(_gizmoProgram)}");
+            _gl.DetachShader(_gizmoProgram, vs);
+            _gl.DeleteShader(vs);
+            _gl.DetachShader(_gizmoProgram, fs);
+            _gl.DeleteShader(fs);
+
+            _gizmoLocView = _gl.GetUniformLocation(_gizmoProgram, "uView");
+            _gizmoLocProj = _gl.GetUniformLocation(_gizmoProgram, "uProjection");
+            _gizmoLocCenter = _gl.GetUniformLocation(_gizmoProgram, "uWorldCenter");
+            _gizmoLocScale = _gl.GetUniformLocation(_gizmoProgram, "uScreenScale");
+        }
+
+        private void EnsureGizmoBuffers()
+        {
+            if (_gizmoVAO != 0)
+                return;
+
+            _gizmoVAO = _gl.GenVertexArray();
+            _gizmoVBO = _gl.GenBuffer();
+
+            _gl.BindVertexArray(_gizmoVAO);
+            _gl.BindBuffer(BufferTargetARB.ArrayBuffer, _gizmoVBO);
+
+            _gl.VertexAttribPointer(0, 3, VertexAttribPointerType.Float, false, 7 * sizeof(float), IntPtr.Zero);
+            _gl.EnableVertexAttribArray(0);
+
+            _gl.VertexAttribPointer(1, 4, VertexAttribPointerType.Float, false, 7 * sizeof(float), (IntPtr)(3 * sizeof(float)));
+            _gl.EnableVertexAttribArray(1);
         }
 
         private void ReleaseContourTarget()

@@ -15,6 +15,10 @@ using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using SNVec2 = System.Numerics.Vector2;
+using SNVec3 = System.Numerics.Vector3;
+using SNVec4 = System.Numerics.Vector4;
+using SNMat4 = System.Numerics.Matrix4x4;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
@@ -95,6 +99,11 @@ namespace LimitlessSquareEngine.Editor
         private Point _sceneHostLastPointerPosition;
         private IPointer? _sceneHostCapturedPointer;
         private double _sceneHostMoveSpeedMultiplier = 1.0;
+
+        private bool _gizmoDragActive;
+        private GizmoHandle _gizmoDragHandle = GizmoHandle.None;
+        private Point _gizmoDragLastMouse;
+        private Double3 _gizmoDragStartLocalPos;
 
         private Button? _playButton;
         private Button? _pauseButton;
@@ -1082,6 +1091,22 @@ namespace LimitlessSquareEngine.Editor
 
             if (point.Properties.PointerUpdateKind == PointerUpdateKind.LeftButtonPressed)
             {
+                if (_selectedSceneObject != null)
+                {
+                    GizmoHandle hit = HitTestGizmo(point.Position);
+                    if (hit != GizmoHandle.None)
+                    {
+                        _gizmoDragActive = true;
+                        _gizmoDragHandle = hit;
+                        _gizmoDragLastMouse = point.Position;
+                        _gizmoDragStartLocalPos = _selectedSceneObject.Transform!.LocalPosition;
+                        EditorHostBridge.SetGizmoDrag(true, (int)hit);
+                        e.Pointer.Capture(_sceneHost);
+                        e.Handled = true;
+                        return;
+                    }
+                }
+
                 if (!_isSceneHostRightDragging && TryHandleSceneHostRenderedMeshSelection(point.Position))
                     e.Handled = true;
 
@@ -1117,6 +1142,20 @@ namespace LimitlessSquareEngine.Editor
         {
             PointerPoint point = e.GetCurrentPoint(_sceneHost);
 
+            if (_gizmoDragActive)
+            {
+                _gizmoDragActive = false;
+                _gizmoDragHandle = GizmoHandle.None;
+                EditorHostBridge.SetGizmoDrag(false, -1);
+                if (_selectedSceneObject != null)
+                {
+                    BeginSceneParameterChange();
+                    PersistSceneObjectChanges(_selectedSceneObject, false);
+                }
+                e.Handled = true;
+                return;
+            }
+
             if (point.Properties.PointerUpdateKind != PointerUpdateKind.RightButtonReleased)
                 return;
 
@@ -1126,6 +1165,24 @@ namespace LimitlessSquareEngine.Editor
 
         private void OnSceneHostPointerMoved(object? sender, PointerEventArgs e)
         {
+            if (_gizmoDragActive)
+            {
+                Point cur = e.GetPosition(_sceneHost);
+                SNVec2 screenDelta = new SNVec2(
+                    (float)(cur.X - _gizmoDragLastMouse.X),
+                    (float)(cur.Y - _gizmoDragLastMouse.Y));
+                ApplyGizmoDrag(screenDelta);
+                _gizmoDragLastMouse = cur;
+                e.Handled = true;
+                return;
+            }
+
+            if (!_isSceneHostRightDragging && _selectedSceneObject != null)
+            {
+                GizmoHandle hovered = HitTestGizmo(e.GetPosition(_sceneHost));
+                EditorHostBridge.SetGizmoHover((int)hovered);
+            }
+
             if (!_isSceneHostRightDragging)
                 return;
 
@@ -1305,10 +1362,15 @@ namespace LimitlessSquareEngine.Editor
 
             if (_sceneTreeDeleteButton != null)
                 _sceneTreeDeleteButton.IsEnabled = true;
+
+            var wp = EditorHostBridge.GetSceneObjectWorldPosition(EditorPreviewSceneId, obj.Id);
+            EditorHostBridge.SetGizmoState(wp, (int)GizmoMode.Translate, (int)GizmoHandle.None, true);
         }
 
         private void ClearSceneHostRenderedMeshSelection()
         {
+            EditorHostBridge.SetGizmoState(Double3.Zero, (int)GizmoMode.Translate, (int)GizmoHandle.None, false);
+
             ClearSelectedSceneObjectState();
             ClearPreviewSelectionContour();
 
@@ -7279,6 +7341,147 @@ void main()
                 : StringComparison.Ordinal;
 
             return string.Equals(leftFullPath, rightFullPath, comparison);
+        }
+
+        private GizmoHandle HitTestGizmo(Point mousePt)
+        {
+            if (_selectedSceneObject == null)
+                return GizmoHandle.None;
+
+            var hostSize = GetSceneHostPixelSize();
+            if (hostSize.Width <= 0 || hostSize.Height <= 0)
+                return GizmoHandle.None;
+
+            double scaling = TopLevel.GetTopLevel(_sceneHost)?.RenderScaling ?? 1.0;
+
+            float mx = (float)(mousePt.X * scaling / hostSize.Width) * 2f - 1f;
+            float my = 1f - (float)(mousePt.Y * scaling / hostSize.Height) * 2f;
+            SNVec2 mouseNdc = new SNVec2(mx, my);
+
+            Double3 wp = EditorHostBridge.GetSceneObjectWorldPosition(
+                EditorPreviewSceneId, _selectedSceneObject.Id);
+
+            SNMat4 viewM = EditorHostBridge.GetCameraView();
+            SNMat4 projM = EditorHostBridge.GetCameraProjection();
+
+            Double3 camPos = _previewCameraEditorPosition;
+            Double3 rel = new Double3(wp.X - camPos.X, wp.Y - camPos.Y, wp.Z - camPos.Z);
+            SNVec3 centerRender = new SNVec3((float)rel.X, (float)rel.Y, (float)(-rel.Z));
+
+            SNVec2 centerNdc = WorldToNdc(centerRender, viewM, projM);
+            if (float.IsNaN(centerNdc.X))
+                return GizmoHandle.None;
+
+            const float HitNdc = 0.04f;
+            SNVec3[] axisRender = {
+                new SNVec3(1f, 0f, 0f),
+                new SNVec3(0f, 1f, 0f),
+                new SNVec3(0f, 0f, -1f)
+            };
+
+            for (int i = 0; i < 3; i++)
+            {
+                SNVec3 tipRender = centerRender + axisRender[i];
+                SNVec2 tipNdc = WorldToNdc(tipRender, viewM, projM);
+                if (float.IsNaN(tipNdc.X))
+                    continue;
+
+                float dist = DistPointToSegment(mouseNdc, centerNdc, tipNdc);
+                if (dist < HitNdc)
+                    return (GizmoHandle)i;
+            }
+
+            return GizmoHandle.None;
+        }
+
+        private void ApplyGizmoDrag(SNVec2 screenDelta)
+        {
+            if (_selectedSceneObject == null)
+                return;
+
+            var hostSize = GetSceneHostPixelSize();
+            if (hostSize.Width <= 0 || hostSize.Height <= 0)
+                return;
+
+            SNMat4 viewM = EditorHostBridge.GetCameraView();
+            SNMat4 projM = EditorHostBridge.GetCameraProjection();
+
+            Double3 wp = EditorHostBridge.GetSceneObjectWorldPosition(
+                EditorPreviewSceneId, _selectedSceneObject.Id);
+            Double3 camPos = _previewCameraEditorPosition;
+            Double3 rel = new Double3(wp.X - camPos.X, wp.Y - camPos.Y, wp.Z - camPos.Z);
+            SNVec3 centerRender = new SNVec3((float)rel.X, (float)rel.Y, (float)(-rel.Z));
+
+            SNVec3 axisRender = _gizmoDragHandle switch
+            {
+                GizmoHandle.X => new SNVec3(1f, 0f, 0f),
+                GizmoHandle.Y => new SNVec3(0f, 1f, 0f),
+                GizmoHandle.Z => new SNVec3(0f, 0f, -1f),
+                _ => SNVec3.Zero
+            };
+
+            SNVec2 centerNdc = WorldToNdc(centerRender, viewM, projM);
+            SNVec2 tipNdc = WorldToNdc(centerRender + axisRender, viewM, projM);
+            SNVec2 axisNdc = tipNdc - centerNdc;
+            float axisLen = axisNdc.Length();
+            if (axisLen < 1e-6f)
+                return;
+
+            SNVec2 axisDir = axisNdc / axisLen;
+
+            double scaling = TopLevel.GetTopLevel(_sceneHost)?.RenderScaling ?? 1.0;
+            SNVec2 ndcDelta = new SNVec2(
+                screenDelta.X * (float)scaling * 2f / (float)hostSize.Width,
+                -screenDelta.Y * (float)scaling * 2f / (float)hostSize.Height);
+
+            float ndcMove = SNVec2.Dot(ndcDelta, axisDir);
+            float worldMove = ndcMove / axisLen;
+
+            Double3 worldAxisWorld = _gizmoDragHandle switch
+            {
+                GizmoHandle.X => new Double3(1, 0, 0),
+                GizmoHandle.Y => new Double3(0, 1, 0),
+                GizmoHandle.Z => new Double3(0, 0, 1),
+                _ => Double3.Zero
+            };
+
+            Double3 worldOffset = new Double3(
+                worldAxisWorld.X * worldMove,
+                worldAxisWorld.Y * worldMove,
+                worldAxisWorld.Z * worldMove);
+
+            Double3 localOffset = EditorHostBridge.WorldDeltaToLocalDelta(
+                EditorPreviewSceneId, _selectedSceneObject.Id, worldOffset);
+            _gizmoDragStartLocalPos += localOffset;
+            Double3 newLocalPos = _gizmoDragStartLocalPos;
+
+            EditorHostBridge.SetSceneObjectLocalPosition(
+                EditorPreviewSceneId, _selectedSceneObject.Id, newLocalPos);
+            _selectedSceneObject.Transform!.LocalPosition = newLocalPos;
+
+            Double3 newWp = EditorHostBridge.GetSceneObjectWorldPosition(
+                EditorPreviewSceneId, _selectedSceneObject.Id);
+            EditorHostBridge.SetGizmoState(newWp, (int)GizmoMode.Translate, (int)_gizmoDragHandle, true);
+        }
+
+        private static SNVec2 WorldToNdc(SNVec3 renderPos, SNMat4 view, SNMat4 proj)
+        {
+            SNVec4 clip = SNVec4.Transform(new SNVec4(renderPos, 1f), view * proj);
+            if (Math.Abs(clip.W) < 1e-6f)
+                return new SNVec2(float.NaN);
+
+            return new SNVec2(clip.X / clip.W, clip.Y / clip.W);
+        }
+
+        private static float DistPointToSegment(SNVec2 p, SNVec2 a, SNVec2 b)
+        {
+            SNVec2 ab = b - a;
+            float lenSq = ab.LengthSquared();
+            if (lenSq < 1e-8f)
+                return SNVec2.Distance(p, a);
+
+            float t = Math.Clamp(SNVec2.Dot(p - a, ab) / lenSq, 0f, 1f);
+            return SNVec2.Distance(p, a + t * ab);
         }
     }
 

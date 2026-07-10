@@ -2,6 +2,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Numerics;
 using System.Text;
 using System.Threading.Tasks;
 
@@ -29,6 +30,13 @@ namespace LimitlessSquareEngine
         private static Action? _stepRuntimeFrame;
         private static Action<string>? _setGameStartupFolder;
         private static Func<string>? _getGameStartupFolder;
+        private static Action<Double3, int, int, bool>? _setGizmoState;
+        private static Func<string, string, Double3>? _getSceneObjectWorldPosition;
+        private static Func<string, string, Double3, Double3>? _worldDeltaToLocalDelta;
+        private static Func<Matrix4x4>? _getCameraView;
+        private static Func<Matrix4x4>? _getCameraProjection;
+        private static Action<int>? _setGizmoHover;
+        private static Action<bool, int>? _setGizmoDrag;
 
         internal static void Bind(
             Func<EditorHostBootstrapInfo> bootstrapInfoProvider,
@@ -50,7 +58,14 @@ namespace LimitlessSquareEngine
             Func<bool> getRuntimePaused,
             Action stepRuntimeFrame,
             Action<string> setGameStartupFolder,
-            Func<string> getGameStartupFolder)
+            Func<string> getGameStartupFolder,
+            Action<Double3, int, int, bool> setGizmoState,
+            Func<string, string, Double3> getSceneObjectWorldPosition,
+            Func<string, string, Double3, Double3> worldDeltaToLocalDelta,
+            Func<Matrix4x4> getCameraView,
+            Func<Matrix4x4> getCameraProjection,
+            Action<int> setGizmoHover,
+            Action<bool, int> setGizmoDrag)
         {
             _bootstrapInfoProvider = bootstrapInfoProvider;
             _setRenderWindowVisible = setRenderWindowVisible;
@@ -72,6 +87,13 @@ namespace LimitlessSquareEngine
             _stepRuntimeFrame = stepRuntimeFrame;
             _setGameStartupFolder = setGameStartupFolder;
             _getGameStartupFolder = getGameStartupFolder;
+            _setGizmoState = setGizmoState;
+            _getSceneObjectWorldPosition = getSceneObjectWorldPosition;
+            _worldDeltaToLocalDelta = worldDeltaToLocalDelta;
+            _getCameraView = getCameraView;
+            _getCameraProjection = getCameraProjection;
+            _setGizmoHover = setGizmoHover;
+            _setGizmoDrag = setGizmoDrag;
         }
 
         internal static void Unbind()
@@ -96,6 +118,13 @@ namespace LimitlessSquareEngine
             _stepRuntimeFrame = null;
             _setGameStartupFolder = null;
             _getGameStartupFolder = null;
+            _setGizmoState = null;
+            _getSceneObjectWorldPosition = null;
+            _worldDeltaToLocalDelta = null;
+            _getCameraView = null;
+            _getCameraProjection = null;
+            _setGizmoHover = null;
+            _setGizmoDrag = null;
         }
 
         public static void SetSceneObjectLocalPosition(string sceneId, string objectId, Double3 value)
@@ -305,6 +334,74 @@ namespace LimitlessSquareEngine
                 throw new InvalidOperationException("Editor host bridge is not bound.");
 
             _removeSceneById(sceneId);
+        }
+
+        public static void SetGizmoState(Double3 worldPos, int mode, int hoveredAxis, bool visible)
+        {
+            if (_setGizmoState == null)
+                throw new InvalidOperationException("Editor host bridge is not bound.");
+
+            _setGizmoState(worldPos, mode, hoveredAxis, visible);
+        }
+
+        public static Double3 GetSceneObjectWorldPosition(string sceneId, string objectId)
+        {
+            if (string.IsNullOrWhiteSpace(sceneId))
+                throw new ArgumentException("Scene ID cannot be null or empty.", nameof(sceneId));
+
+            if (string.IsNullOrWhiteSpace(objectId))
+                throw new ArgumentException("Object ID cannot be null or empty.", nameof(objectId));
+
+            if (_getSceneObjectWorldPosition == null)
+                throw new InvalidOperationException("Editor host bridge is not bound.");
+
+            return _getSceneObjectWorldPosition(sceneId, objectId);
+        }
+
+        public static Double3 WorldDeltaToLocalDelta(string sceneId, string objectId, Double3 worldDelta)
+        {
+            if (string.IsNullOrWhiteSpace(sceneId))
+                throw new ArgumentException("Scene ID cannot be null or empty.", nameof(sceneId));
+
+            if (string.IsNullOrWhiteSpace(objectId))
+                throw new ArgumentException("Object ID cannot be null or empty.", nameof(objectId));
+
+            if (_worldDeltaToLocalDelta == null)
+                throw new InvalidOperationException("Editor host bridge is not bound.");
+
+            return _worldDeltaToLocalDelta(sceneId, objectId, worldDelta);
+        }
+
+        public static Matrix4x4 GetCameraView()
+        {
+            if (_getCameraView == null)
+                throw new InvalidOperationException("Editor host bridge is not bound.");
+
+            return _getCameraView();
+        }
+
+        public static Matrix4x4 GetCameraProjection()
+        {
+            if (_getCameraProjection == null)
+                throw new InvalidOperationException("Editor host bridge is not bound.");
+
+            return _getCameraProjection();
+        }
+
+        public static void SetGizmoHover(int hoveredAxis)
+        {
+            if (_setGizmoHover == null)
+                throw new InvalidOperationException("Editor host bridge is not bound.");
+
+            _setGizmoHover(hoveredAxis);
+        }
+
+        public static void SetGizmoDrag(bool dragging, int activeAxis)
+        {
+            if (_setGizmoDrag == null)
+                throw new InvalidOperationException("Editor host bridge is not bound.");
+
+            _setGizmoDrag(dragging, activeAxis);
         }
     }
 }
