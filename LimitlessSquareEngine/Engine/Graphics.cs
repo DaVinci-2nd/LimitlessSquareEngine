@@ -1,4 +1,5 @@
-﻿using LimitlessSquareEngine.Engine;
+﻿using LimitlessSquareEngine.Editor;
+using LimitlessSquareEngine.Engine;
 using MoonSharp.Interpreter;
 using Silk.NET.OpenGL;
 using Silk.NET.Windowing;
@@ -9312,23 +9313,72 @@ namespace LimitlessSquareEngine
         {
             var list = new List<float>();
 
-            BuildArrow(list, new Double3(1, 0, 0),
-                _gizmoHoveredAxis == 0 && !_gizmoDragging,
-                _gizmoDragging && _gizmoActiveAxis == 0,
-                new Vector4(1f, 0.1f, 0.1f, 1f));
-            BuildArrow(list, new Double3(0, 1, 0),
-                _gizmoHoveredAxis == 1 && !_gizmoDragging,
-                _gizmoDragging && _gizmoActiveAxis == 1,
-                new Vector4(0.1f, 1f, 0.1f, 1f));
-            BuildArrow(list, new Double3(0, 0, -1),
-                _gizmoHoveredAxis == 2 && !_gizmoDragging,
-                _gizmoDragging && _gizmoActiveAxis == 2,
-                new Vector4(0.1f, 0.1f, 1f, 1f));
+            bool isTranslate = _gizmoMode == (int)GizmoMode.Translate || _gizmoMode == (int)GizmoMode.Transform;
+            bool isRotate = _gizmoMode == (int)GizmoMode.Rotate || _gizmoMode == (int)GizmoMode.Transform;
+            bool isScale = _gizmoMode == (int)GizmoMode.Scale || _gizmoMode == (int)GizmoMode.Transform;
+            bool isTransform = _gizmoMode == (int)GizmoMode.Transform;
+
+            if (isTranslate)
+            {
+                float gap = isTransform ? 1.05f : 0.5f;
+                BuildTranslateArrow(list, new Double3(1, 0, 0),
+                    _gizmoHoveredAxis == 0 && !_gizmoDragging,
+                    _gizmoDragging && _gizmoActiveAxis == 0,
+                    new Vector4(1f, 0.1f, 0.1f, 1f), gap);
+                BuildTranslateArrow(list, new Double3(0, 1, 0),
+                    _gizmoHoveredAxis == 1 && !_gizmoDragging,
+                    _gizmoDragging && _gizmoActiveAxis == 1,
+                    new Vector4(0.1f, 1f, 0.1f, 1f), gap);
+                BuildTranslateArrow(list, new Double3(0, 0, -1),
+                    _gizmoHoveredAxis == 2 && !_gizmoDragging,
+                    _gizmoDragging && _gizmoActiveAxis == 2,
+                    new Vector4(0.1f, 0.1f, 1f, 1f), gap);
+            }
+
+            if (isRotate)
+            {
+                float innerR = isTransform ? 0.70f : 0.50f;
+                float outerR = isTransform ? 0.90f : 0.70f;
+                BuildRotationRing(list, new Double3(1, 0, 0),
+                    _gizmoHoveredAxis == 0 && !_gizmoDragging,
+                    _gizmoDragging && _gizmoActiveAxis == 0,
+                    new Vector4(1f, 0.1f, 0.1f, 1f), innerR, outerR);
+                BuildRotationRing(list, new Double3(0, 1, 0),
+                    _gizmoHoveredAxis == 1 && !_gizmoDragging,
+                    _gizmoDragging && _gizmoActiveAxis == 1,
+                    new Vector4(0.1f, 1f, 0.1f, 1f), innerR, outerR);
+                BuildRotationRing(list, new Double3(0, 0, -1),
+                    _gizmoHoveredAxis == 2 && !_gizmoDragging,
+                    _gizmoDragging && _gizmoActiveAxis == 2,
+                    new Vector4(0.1f, 0.1f, 1f, 1f), innerR, outerR);
+            }
+
+            if (isScale)
+            {
+                float scaleGap = isTransform ? 0.30f : 0.5f;
+                float scaleShaftLen = isTransform ? 0.28f : 0.7f;
+                float scaleCubeSize = isTransform ? 0.16f : 0.18f;
+                BuildScaleHandle(list, new Double3(1, 0, 0),
+                    _gizmoHoveredAxis == 0 && !_gizmoDragging,
+                    _gizmoDragging && _gizmoActiveAxis == 0,
+                    new Vector4(1f, 0.1f, 0.1f, 1f), scaleGap, scaleShaftLen, 0.05f, scaleCubeSize);
+                BuildScaleHandle(list, new Double3(0, 1, 0),
+                    _gizmoHoveredAxis == 1 && !_gizmoDragging,
+                    _gizmoDragging && _gizmoActiveAxis == 1,
+                    new Vector4(0.1f, 1f, 0.1f, 1f), scaleGap, scaleShaftLen, 0.05f, scaleCubeSize);
+                BuildScaleHandle(list, new Double3(0, 0, -1),
+                    _gizmoHoveredAxis == 2 && !_gizmoDragging,
+                    _gizmoDragging && _gizmoActiveAxis == 2,
+                    new Vector4(0.1f, 0.1f, 1f, 1f), scaleGap, scaleShaftLen, 0.05f, scaleCubeSize);
+                BuildCentralCube(list,
+                    _gizmoDragging && _gizmoActiveAxis == 3,
+                    scaleCubeSize * 1.2f);
+            }
 
             return list.ToArray();
         }
 
-        private static void BuildArrow(List<float> list, Double3 axis, bool hovered, bool active, Vector4 defaultColor)
+        private static void BuildTranslateArrow(List<float> list, Double3 axis, bool hovered, bool active, Vector4 defaultColor, float gapOffset)
         {
             Vector4 color = active
                 ? new Vector4(1f, 1f, 0f, 1f)
@@ -9343,7 +9393,6 @@ namespace LimitlessSquareEngine
                 : Vector3.Normalize(Vector3.Cross(ax, Vector3.UnitY));
             Vector3 perpB = Vector3.Cross(perpA, ax);
 
-            float gapOffset = 0.5f;
             float shaftLen = 0.7f;
             float shaftR = 0.05f;
             float coneLen = 0.4f;
@@ -9382,6 +9431,131 @@ namespace LimitlessSquareEngine
             AddTri(list, c3, c0, coneTip, color);
             AddTri(list, c0, c2, c1, color);
             AddTri(list, c0, c3, c2, color);
+        }
+
+        private static void BuildRotationRing(List<float> list, Double3 axis, bool hovered, bool active, Vector4 defaultColor, float innerRadius, float outerRadius, int segments = 64)
+        {
+            Vector4 color = active
+                ? new Vector4(1f, 1f, 0f, 1f)
+                : hovered
+                    ? new Vector4(defaultColor.X + 0.25f, defaultColor.Y + 0.25f, defaultColor.Z + 0.25f, 1f)
+                    : defaultColor;
+
+            Vector3 ax = new Vector3((float)axis.X, (float)axis.Y, (float)axis.Z);
+            ax = Vector3.Normalize(ax);
+
+            Vector3 perpA = Math.Abs(ax.X) < 0.9f
+                ? Vector3.Normalize(Vector3.Cross(ax, Vector3.UnitX))
+                : Vector3.Normalize(Vector3.Cross(ax, Vector3.UnitY));
+            Vector3 perpB = Vector3.Cross(perpA, ax);
+
+            float axialHalfThick = (outerRadius - innerRadius) * 0.5f;
+
+            for (int i = 0; i < segments; i++)
+            {
+                float a0 = 2f * MathF.PI * i / segments;
+                float a1 = 2f * MathF.PI * (i + 1) / segments;
+
+                Vector3 d0 = perpA * MathF.Cos(a0) + perpB * MathF.Sin(a0);
+                Vector3 d1 = perpA * MathF.Cos(a1) + perpB * MathF.Sin(a1);
+
+                Vector3 i0f = d0 * innerRadius + ax * axialHalfThick;
+                Vector3 i0b = d0 * innerRadius - ax * axialHalfThick;
+                Vector3 i1f = d1 * innerRadius + ax * axialHalfThick;
+                Vector3 i1b = d1 * innerRadius - ax * axialHalfThick;
+
+                Vector3 o0f = d0 * outerRadius + ax * axialHalfThick;
+                Vector3 o0b = d0 * outerRadius - ax * axialHalfThick;
+                Vector3 o1f = d1 * outerRadius + ax * axialHalfThick;
+                Vector3 o1b = d1 * outerRadius - ax * axialHalfThick;
+
+                AddTri(list, o1f, o0f, i0f, color);
+                AddTri(list, o1f, i0f, i1f, color);
+
+                AddTri(list, o0b, o1b, i1b, color);
+                AddTri(list, o0b, i1b, i0b, color);
+
+                AddTri(list, o0b, o0f, o1f, color);
+                AddTri(list, o0b, o1f, o1b, color);
+
+                AddTri(list, i1f, i0f, i0b, color);
+                AddTri(list, i1f, i0b, i1b, color);
+            }
+        }
+
+        private static void BuildScaleHandle(List<float> list, Double3 axis, bool hovered, bool active, Vector4 defaultColor, float gapOffset, float shaftLen, float shaftR, float cubeSize)
+        {
+            Vector4 color = active
+                ? new Vector4(1f, 1f, 0f, 1f)
+                : hovered
+                    ? new Vector4(defaultColor.X + 0.25f, defaultColor.Y + 0.25f, defaultColor.Z + 0.25f, 1f)
+                    : defaultColor;
+
+            Vector3 ax = new Vector3((float)axis.X, (float)axis.Y, (float)axis.Z);
+
+            Vector3 perpA = Math.Abs(ax.X) < 0.9f
+                ? Vector3.Normalize(Vector3.Cross(ax, Vector3.UnitX))
+                : Vector3.Normalize(Vector3.Cross(ax, Vector3.UnitY));
+            Vector3 perpB = Vector3.Cross(perpA, ax);
+
+            Vector3 origin = ax * gapOffset;
+
+            Vector3 b0 = origin + (perpA + perpB) * shaftR;
+            Vector3 b1 = origin + (perpA - perpB) * shaftR;
+            Vector3 b2 = origin + (-perpA - perpB) * shaftR;
+            Vector3 b3 = origin + (-perpA + perpB) * shaftR;
+
+            Vector3 shaftEnd = origin + ax * shaftLen;
+            Vector3 t0 = shaftEnd + (perpA + perpB) * shaftR;
+            Vector3 t1 = shaftEnd + (perpA - perpB) * shaftR;
+            Vector3 t2 = shaftEnd + (-perpA - perpB) * shaftR;
+            Vector3 t3 = shaftEnd + (-perpA + perpB) * shaftR;
+
+            AddTri(list, b0, b1, t0, color); AddTri(list, t0, b1, t1, color);
+            AddTri(list, b1, b2, t1, color); AddTri(list, t1, b2, t2, color);
+            AddTri(list, b2, b3, t2, color); AddTri(list, t2, b3, t3, color);
+            AddTri(list, b3, b0, t3, color); AddTri(list, t3, b0, t0, color);
+            AddTri(list, b0, b2, b1, color);
+            AddTri(list, b0, b3, b2, color);
+
+            float halfCube = cubeSize * 0.5f;
+            Vector3 cubeCenter = shaftEnd + ax * halfCube;
+            BuildCubeAt(list, cubeCenter, halfCube, color);
+        }
+
+        private static void BuildCentralCube(List<float> list, bool active, float size)
+        {
+            Vector4 color = active
+                ? new Vector4(1f, 1f, 0f, 1f)
+                : new Vector4(1f, 1f, 1f, 1f);
+
+            float half = size * 0.5f;
+            BuildCubeAt(list, Vector3.Zero, half, color);
+        }
+
+        private static void BuildCubeAt(List<float> list, Vector3 center, float halfSize, Vector4 color)
+        {
+            Vector3[] c = new Vector3[8];
+            for (int i = 0; i < 8; i++)
+            {
+                c[i] = new Vector3(
+                    center.X + ((i & 1) != 0 ? halfSize : -halfSize),
+                    center.Y + ((i & 2) != 0 ? halfSize : -halfSize),
+                    center.Z + ((i & 4) != 0 ? halfSize : -halfSize));
+            }
+
+            AddTri(list, c[1], c[3], c[7], color);
+            AddTri(list, c[1], c[7], c[5], color);
+            AddTri(list, c[0], c[4], c[6], color);
+            AddTri(list, c[0], c[6], c[2], color);
+            AddTri(list, c[2], c[6], c[7], color);
+            AddTri(list, c[2], c[7], c[3], color);
+            AddTri(list, c[0], c[1], c[5], color);
+            AddTri(list, c[0], c[5], c[4], color);
+            AddTri(list, c[4], c[5], c[7], color);
+            AddTri(list, c[4], c[7], c[6], color);
+            AddTri(list, c[0], c[2], c[3], color);
+            AddTri(list, c[0], c[3], c[1], color);
         }
 
         private static void AddTri(List<float> list, Vector3 a, Vector3 b, Vector3 c, Vector4 col)

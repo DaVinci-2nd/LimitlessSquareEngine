@@ -27,6 +27,7 @@ namespace LimitlessSquareEngine
         private static Action<string>? _clearSceneContours;
         private static Action<bool>? _setRuntimePaused;
         private static Func<bool>? _getRuntimePaused;
+        private static Action<string, string, Double3>? _setSceneObjectLocalScale;
         private static Action? _stepRuntimeFrame;
         private static Action<string>? _setGameStartupFolder;
         private static Func<string>? _getGameStartupFolder;
@@ -50,6 +51,7 @@ namespace LimitlessSquareEngine
             Action<string> setAssetRootAndReloadAssets,
             Action<string, string, Double3> setSceneObjectLocalPosition,
             Action<string, string, Double3> setSceneObjectLocalRotation,
+            Action<string, string, Double3>? setSceneObjectLocalScale,
             Func<EditorRenderedFrame?> consumeLatestFrame,
             Func<int, int, RenderedMeshRaycastHit> raycastRenderedMeshAtPixel,
             Action<string, string, bool, float, float, float, float> setSceneObjectContour,
@@ -78,6 +80,7 @@ namespace LimitlessSquareEngine
             _setAssetRootAndReloadAssets = setAssetRootAndReloadAssets;
             _setSceneObjectLocalPosition = setSceneObjectLocalPosition;
             _setSceneObjectLocalRotation = setSceneObjectLocalRotation;
+            _setSceneObjectLocalScale = setSceneObjectLocalScale;
             _consumeLatestFrame = consumeLatestFrame;
             _raycastRenderedMeshAtPixel = raycastRenderedMeshAtPixel;
             _setSceneObjectContour = setSceneObjectContour;
@@ -109,6 +112,7 @@ namespace LimitlessSquareEngine
             _setAssetRootAndReloadAssets = null;
             _setSceneObjectLocalPosition = null;
             _setSceneObjectLocalRotation = null;
+            _setSceneObjectLocalScale = null;
             _consumeLatestFrame = null;
             _raycastRenderedMeshAtPixel = null;
             _setSceneObjectContour = null;
@@ -153,6 +157,20 @@ namespace LimitlessSquareEngine
                 throw new InvalidOperationException("Editor host bridge is not bound.");
 
             _setSceneObjectLocalRotation(sceneId, objectId, value);
+        }
+
+        public static void SetSceneObjectLocalScale(string sceneId, string objectId, Double3 value)
+        {
+            if (string.IsNullOrWhiteSpace(sceneId))
+                throw new ArgumentException("Scene ID cannot be null or empty.", nameof(sceneId));
+
+            if (string.IsNullOrWhiteSpace(objectId))
+                throw new ArgumentException("Object ID cannot be null or empty.", nameof(objectId));
+
+            if (_setSceneObjectLocalScale == null)
+                throw new InvalidOperationException("Editor host bridge is not bound.");
+
+            _setSceneObjectLocalScale(sceneId, objectId, value);
         }
 
         public static EditorRenderedFrame? ConsumeLatestFrame()

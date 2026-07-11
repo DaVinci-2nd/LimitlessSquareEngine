@@ -1345,6 +1345,7 @@ namespace LimitlessSquareEngine
                 }),
                 (sceneId, objectId, value) => Scene.SetLocalPosition(sceneId, objectId, value),
                 (sceneId, objectId, value) => Scene.SetLocalRotation(sceneId, objectId, value),
+                (sceneId, objectId, value) => Scene.SetLocalScale(sceneId, objectId, value),
                 ConsumeLatestFrameCore,
                 (screenX, screenY) => _graphics?.RaycastRenderedMeshAtPixel(screenX, screenY) ?? new RenderedMeshRaycastHit
                 {

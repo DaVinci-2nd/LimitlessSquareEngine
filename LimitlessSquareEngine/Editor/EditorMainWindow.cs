@@ -102,8 +102,12 @@ namespace LimitlessSquareEngine.Editor
 
         private bool _gizmoDragActive;
         private GizmoHandle _gizmoDragHandle = GizmoHandle.None;
+        private int _gizmoDragType;
         private Point _gizmoDragLastMouse;
         private Double3 _gizmoDragStartLocalPos;
+        private Double3 _gizmoDragStartLocalRot;
+        private Double3 _gizmoDragStartLocalScale;
+        private GizmoMode _currentGizmoMode = GizmoMode.Translate;
 
         private Button? _playButton;
         private Button? _pauseButton;
@@ -1100,6 +1104,8 @@ namespace LimitlessSquareEngine.Editor
                         _gizmoDragHandle = hit;
                         _gizmoDragLastMouse = point.Position;
                         _gizmoDragStartLocalPos = _selectedSceneObject.Transform!.LocalPosition;
+                        _gizmoDragStartLocalRot = _selectedSceneObject.Transform!.LocalRotation;
+                        _gizmoDragStartLocalScale = _selectedSceneObject.Transform!.LocalScale;
                         EditorHostBridge.SetGizmoDrag(true, (int)hit);
                         e.Pointer.Capture(_sceneHost);
                         e.Handled = true;
@@ -1364,12 +1370,12 @@ namespace LimitlessSquareEngine.Editor
                 _sceneTreeDeleteButton.IsEnabled = true;
 
             var wp = EditorHostBridge.GetSceneObjectWorldPosition(EditorPreviewSceneId, obj.Id);
-            EditorHostBridge.SetGizmoState(wp, (int)GizmoMode.Translate, (int)GizmoHandle.None, true);
+            EditorHostBridge.SetGizmoState(wp, (int)_currentGizmoMode, (int)GizmoHandle.None, true);
         }
 
         private void ClearSceneHostRenderedMeshSelection()
         {
-            EditorHostBridge.SetGizmoState(Double3.Zero, (int)GizmoMode.Translate, (int)GizmoHandle.None, false);
+            EditorHostBridge.SetGizmoState(Double3.Zero, (int)GizmoMode.None, (int)GizmoHandle.None, false);
 
             ClearSelectedSceneObjectState();
             ClearPreviewSelectionContour();
@@ -2663,6 +2669,7 @@ namespace LimitlessSquareEngine.Editor
 
             overlayRoot.Children.Add(hostBorder);
             overlayRoot.Children.Add(_previewOrientationGizmo);
+            overlayRoot.Children.Add(CreateGizmoModeButtons());
 
             return new Border
             {
@@ -2670,6 +2677,98 @@ namespace LimitlessSquareEngine.Editor
                 Padding = new Thickness(0),
                 Child = overlayRoot
             };
+        }
+
+        private Control CreateGizmoModeButtons()
+        {
+            var panel = new StackPanel
+            {
+                Orientation = Orientation.Vertical,
+                Spacing = 4,
+                HorizontalAlignment = HorizontalAlignment.Left,
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(6, 0),
+                ZIndex = 10
+            };
+
+            panel.Children.Add(CreateGizmoModeButton("▸", "选择", GizmoMode.None));
+            panel.Children.Add(CreateGizmoModeButton("↔", "位移", GizmoMode.Translate));
+            panel.Children.Add(CreateGizmoModeButton("⟳", "旋转", GizmoMode.Rotate));
+            panel.Children.Add(CreateGizmoModeButton("◻", "缩放", GizmoMode.Scale));
+            panel.Children.Add(CreateGizmoModeButton("☐", "变换", GizmoMode.Transform));
+
+            RefreshGizmoModeButtonHighlights(panel);
+
+            return panel;
+        }
+
+        private Button CreateGizmoModeButton(string text, string toolTip, GizmoMode mode)
+        {
+            var btn = new Button
+            {
+                Content = new TextBlock
+                {
+                    Text = text,
+                    FontSize = 14,
+                    Foreground = Brushes.White,
+                    HorizontalAlignment = HorizontalAlignment.Center,
+                    VerticalAlignment = VerticalAlignment.Center
+                },
+                Width = 28,
+                Height = 28,
+                Padding = new Thickness(0),
+                Background = new SolidColorBrush(Color.Parse("#333333")),
+                BorderBrush = new SolidColorBrush(Color.Parse("#555555")),
+                BorderThickness = new Thickness(1),
+                Tag = mode
+            };
+
+            ToolTip.SetTip(btn, new TextBlock { Text = toolTip, Foreground = Brushes.White, FontSize = 11 });
+            btn.Click += OnGizmoModeButtonClick;
+
+            return btn;
+        }
+
+        private void OnGizmoModeButtonClick(object? sender, RoutedEventArgs e)
+        {
+            if (sender is not Button btn || btn.Tag is not GizmoMode mode)
+                return;
+
+            _currentGizmoMode = mode;
+
+            var panel = btn.Parent as StackPanel;
+            if (panel != null)
+                RefreshGizmoModeButtonHighlights(panel);
+
+            UpdateGizmoForCurrentMode();
+        }
+
+        private void RefreshGizmoModeButtonHighlights(StackPanel panel)
+        {
+            foreach (var child in panel.Children)
+            {
+                if (child is Button btn && btn.Tag is GizmoMode mode)
+                {
+                    bool selected = mode == _currentGizmoMode;
+                    btn.Background = new SolidColorBrush(Color.Parse(selected ? "#225588" : "#333333"));
+                    btn.BorderBrush = new SolidColorBrush(Color.Parse(selected ? "#4488CC" : "#555555"));
+                }
+            }
+        }
+
+        private void UpdateGizmoForCurrentMode()
+        {
+            if (_selectedSceneObject == null)
+                return;
+
+            if (_currentGizmoMode == GizmoMode.None)
+            {
+                EditorHostBridge.SetGizmoState(Double3.Zero, (int)GizmoMode.None, (int)GizmoHandle.None, false);
+                return;
+            }
+
+            var wp = EditorHostBridge.GetSceneObjectWorldPosition(EditorPreviewSceneId, _selectedSceneObject.Id);
+            EditorHostBridge.SetGizmoState(wp, (int)_currentGizmoMode, (int)GizmoHandle.None, true);
         }
 
         private static Control CreateDockContainer(string title, Control content)
@@ -7268,6 +7367,8 @@ void main()
 
                 if (_sceneTreeDeleteButton != null)
                     _sceneTreeDeleteButton.IsEnabled = true;
+
+                UpdateGizmoForCurrentMode();
             }
             catch (Exception ex)
             {
@@ -7348,6 +7449,9 @@ void main()
             if (_selectedSceneObject == null)
                 return GizmoHandle.None;
 
+            if (_currentGizmoMode == GizmoMode.None)
+                return GizmoHandle.None;
+
             var hostSize = GetSceneHostPixelSize();
             if (hostSize.Width <= 0 || hostSize.Height <= 0)
                 return GizmoHandle.None;
@@ -7372,26 +7476,106 @@ void main()
             if (float.IsNaN(centerNdc.X))
                 return GizmoHandle.None;
 
+            bool checkTranslate = _currentGizmoMode == GizmoMode.Translate || _currentGizmoMode == GizmoMode.Transform;
+            bool checkRotate = _currentGizmoMode == GizmoMode.Rotate || _currentGizmoMode == GizmoMode.Transform;
+            bool checkScale = _currentGizmoMode == GizmoMode.Scale || _currentGizmoMode == GizmoMode.Transform;
+
+            float bestDist = float.MaxValue;
+            int bestType = -1;
+            GizmoHandle bestHandle = GizmoHandle.None;
+
             const float HitNdc = 0.04f;
-            SNVec3[] axisRender = {
-                new SNVec3(1f, 0f, 0f),
-                new SNVec3(0f, 1f, 0f),
-                new SNVec3(0f, 0f, -1f)
-            };
+            SNVec3[] axisRender = { new SNVec3(1f, 0f, 0f), new SNVec3(0f, 1f, 0f), new SNVec3(0f, 0f, -1f) };
 
-            for (int i = 0; i < 3; i++)
+            if (checkRotate)
             {
-                SNVec3 tipRender = centerRender + axisRender[i];
-                SNVec2 tipNdc = WorldToNdc(tipRender, viewM, projM);
-                if (float.IsNaN(tipNdc.X))
-                    continue;
+                float midR = _currentGizmoMode == GizmoMode.Transform ? 0.80f : 0.60f;
+                float halfThick = 0.10f;
+                for (int i = 0; i < 3; i++)
+                {
+                    SNVec3 perpA = Math.Abs(axisRender[i].X) < 0.9f
+                        ? SNVec3.Normalize(System.Numerics.Vector3.Cross(axisRender[i], System.Numerics.Vector3.UnitX))
+                        : SNVec3.Normalize(System.Numerics.Vector3.Cross(axisRender[i], System.Numerics.Vector3.UnitY));
 
-                float dist = DistPointToSegment(mouseNdc, centerNdc, tipNdc);
-                if (dist < HitNdc)
-                    return (GizmoHandle)i;
+                    SNVec3 innerRing = centerRender + perpA * (midR - halfThick);
+                    SNVec3 outerRing = centerRender + perpA * (midR + halfThick);
+                    SNVec2 innerNdc = WorldToNdc(innerRing, viewM, projM);
+                    SNVec2 outerNdc = WorldToNdc(outerRing, viewM, projM);
+                    if (float.IsNaN(innerNdc.X) || float.IsNaN(outerNdc.X))
+                        continue;
+
+                    float innerNdcR = SNVec2.Distance(innerNdc, centerNdc);
+                    float outerNdcR = SNVec2.Distance(outerNdc, centerNdc);
+                    float mouseDist = SNVec2.Distance(mouseNdc, centerNdc);
+
+                    if (mouseDist >= innerNdcR - HitNdc && mouseDist <= outerNdcR + HitNdc)
+                    {
+                        float ringDist = Math.Min(Math.Abs(mouseDist - innerNdcR), Math.Abs(mouseDist - outerNdcR));
+                        if (ringDist < bestDist)
+                        {
+                            bestDist = ringDist;
+                            bestType = 1;
+                            bestHandle = (GizmoHandle)i;
+                        }
+                    }
+                }
             }
 
-            return GizmoHandle.None;
+            if (checkScale)
+            {
+                float centralCubeHalf = (_currentGizmoMode == GizmoMode.Transform ? 0.19f : 0.22f) * 0.5f;
+                SNVec3 cubeCorner = centerRender + new SNVec3(centralCubeHalf, centralCubeHalf, centralCubeHalf);
+                SNVec2 cubeCornerNdc = WorldToNdc(cubeCorner, viewM, projM);
+                if (!float.IsNaN(cubeCornerNdc.X))
+                {
+                    float cubeNdcR = SNVec2.Distance(cubeCornerNdc, centerNdc);
+                    float centerDist = SNVec2.Distance(mouseNdc, centerNdc);
+                    if (centerDist < cubeNdcR + HitNdc && centerDist < bestDist)
+                    {
+                        bestDist = centerDist;
+                        bestType = 2;
+                        bestHandle = (GizmoHandle)3;
+                    }
+                }
+
+                for (int i = 0; i < 3; i++)
+                {
+                    SNVec3 tipRender = centerRender + axisRender[i];
+                    SNVec2 tipNdc = WorldToNdc(tipRender, viewM, projM);
+                    if (float.IsNaN(tipNdc.X))
+                        continue;
+
+                    float dist = DistPointToSegment(mouseNdc, centerNdc, tipNdc);
+                    if (dist < HitNdc && dist < bestDist)
+                    {
+                        bestDist = dist;
+                        bestType = 2;
+                        bestHandle = (GizmoHandle)i;
+                    }
+                }
+            }
+
+            if (checkTranslate)
+            {
+                for (int i = 0; i < 3; i++)
+                {
+                    SNVec3 tipRender = centerRender + axisRender[i];
+                    SNVec2 tipNdc = WorldToNdc(tipRender, viewM, projM);
+                    if (float.IsNaN(tipNdc.X))
+                        continue;
+
+                    float dist = DistPointToSegment(mouseNdc, centerNdc, tipNdc);
+                    if (dist < HitNdc && dist < bestDist)
+                    {
+                        bestDist = dist;
+                        bestType = 0;
+                        bestHandle = (GizmoHandle)i;
+                    }
+                }
+            }
+
+            _gizmoDragType = bestType;
+            return bestHandle;
         }
 
         private void ApplyGizmoDrag(SNVec2 screenDelta)
@@ -7399,6 +7583,32 @@ void main()
             if (_selectedSceneObject == null)
                 return;
 
+            if (_currentGizmoMode == GizmoMode.None)
+                return;
+
+            if (_gizmoDragType == 0)
+            {
+                ApplyTranslateDrag(screenDelta);
+            }
+            else if (_gizmoDragType == 1)
+            {
+                ApplyRotateDrag(screenDelta);
+            }
+            else if (_gizmoDragType == 2)
+            {
+                if ((int)_gizmoDragHandle == 3)
+                    ApplyScaleUniformDrag(screenDelta);
+                else
+                    ApplyScaleAxisDrag(screenDelta);
+            }
+
+            Double3 newWp = EditorHostBridge.GetSceneObjectWorldPosition(
+                EditorPreviewSceneId, _selectedSceneObject.Id);
+            EditorHostBridge.SetGizmoState(newWp, (int)_currentGizmoMode, (int)_gizmoDragHandle, true);
+        }
+
+        private void ApplyTranslateDrag(SNVec2 screenDelta)
+        {
             var hostSize = GetSceneHostPixelSize();
             if (hostSize.Width <= 0 || hostSize.Height <= 0)
                 return;
@@ -7407,7 +7617,7 @@ void main()
             SNMat4 projM = EditorHostBridge.GetCameraProjection();
 
             Double3 wp = EditorHostBridge.GetSceneObjectWorldPosition(
-                EditorPreviewSceneId, _selectedSceneObject.Id);
+                EditorPreviewSceneId, _selectedSceneObject!.Id);
             Double3 camPos = _previewCameraEditorPosition;
             Double3 rel = new Double3(wp.X - camPos.X, wp.Y - camPos.Y, wp.Z - camPos.Z);
             SNVec3 centerRender = new SNVec3((float)rel.X, (float)rel.Y, (float)(-rel.Z));
@@ -7458,10 +7668,168 @@ void main()
             EditorHostBridge.SetSceneObjectLocalPosition(
                 EditorPreviewSceneId, _selectedSceneObject.Id, newLocalPos);
             _selectedSceneObject.Transform!.LocalPosition = newLocalPos;
+        }
 
-            Double3 newWp = EditorHostBridge.GetSceneObjectWorldPosition(
-                EditorPreviewSceneId, _selectedSceneObject.Id);
-            EditorHostBridge.SetGizmoState(newWp, (int)GizmoMode.Translate, (int)_gizmoDragHandle, true);
+        private void ApplyRotateDrag(SNVec2 screenDelta)
+        {
+            var hostSize = GetSceneHostPixelSize();
+            if (hostSize.Width <= 0 || hostSize.Height <= 0)
+                return;
+
+            SNMat4 viewM = EditorHostBridge.GetCameraView();
+            SNMat4 projM = EditorHostBridge.GetCameraProjection();
+
+            Double3 wp = EditorHostBridge.GetSceneObjectWorldPosition(
+                EditorPreviewSceneId, _selectedSceneObject!.Id);
+            Double3 camPos = _previewCameraEditorPosition;
+            Double3 rel = new Double3(wp.X - camPos.X, wp.Y - camPos.Y, wp.Z - camPos.Z);
+            SNVec3 centerRender = new SNVec3((float)rel.X, (float)rel.Y, (float)(-rel.Z));
+
+            SNVec3 axisRender = _gizmoDragHandle switch
+            {
+                GizmoHandle.X => new SNVec3(1f, 0f, 0f),
+                GizmoHandle.Y => new SNVec3(0f, 1f, 0f),
+                GizmoHandle.Z => new SNVec3(0f, 0f, -1f),
+                _ => SNVec3.Zero
+            };
+
+            SNVec2 centerNdc = WorldToNdc(centerRender, viewM, projM);
+            SNVec2 tipNdc = WorldToNdc(centerRender + axisRender, viewM, projM);
+            SNVec2 axisNdc = tipNdc - centerNdc;
+            float axisLen = axisNdc.Length();
+            if (axisLen < 1e-6f)
+                return;
+
+            SNVec2 axisDirNdc = axisNdc / axisLen;
+            SNVec2 tangentNdc = new SNVec2(-axisDirNdc.Y, axisDirNdc.X);
+
+            double scaling = TopLevel.GetTopLevel(_sceneHost)?.RenderScaling ?? 1.0;
+            SNVec2 ndcDelta = new SNVec2(
+                screenDelta.X * (float)scaling * 2f / (float)hostSize.Width,
+                -screenDelta.Y * (float)scaling * 2f / (float)hostSize.Height);
+
+            float ndcMove = SNVec2.Dot(ndcDelta, tangentNdc);
+
+            float midR = _currentGizmoMode == GizmoMode.Transform ? 0.80f : 0.60f;
+            float ringNdcR = axisLen * midR;
+            if (ringNdcR < 1e-4f)
+                return;
+
+            float angleDegrees = ndcMove / ringNdcR * (180f / MathF.PI);
+
+            Double3 rotDelta = _gizmoDragHandle switch
+            {
+                GizmoHandle.X => new Double3(angleDegrees, 0, 0),
+                GizmoHandle.Y => new Double3(0, angleDegrees, 0),
+                GizmoHandle.Z => new Double3(0, 0, angleDegrees),
+                _ => Double3.Zero
+            };
+
+            _gizmoDragStartLocalRot += rotDelta;
+            Double3 newLocalRot = _gizmoDragStartLocalRot;
+
+            EditorHostBridge.SetSceneObjectLocalRotation(
+                EditorPreviewSceneId, _selectedSceneObject.Id, newLocalRot);
+            _selectedSceneObject.Transform!.LocalRotation = newLocalRot;
+        }
+
+        private void ApplyScaleAxisDrag(SNVec2 screenDelta)
+        {
+            var hostSize = GetSceneHostPixelSize();
+            if (hostSize.Width <= 0 || hostSize.Height <= 0)
+                return;
+
+            SNMat4 viewM = EditorHostBridge.GetCameraView();
+            SNMat4 projM = EditorHostBridge.GetCameraProjection();
+
+            Double3 wp = EditorHostBridge.GetSceneObjectWorldPosition(
+                EditorPreviewSceneId, _selectedSceneObject!.Id);
+            Double3 camPos = _previewCameraEditorPosition;
+            Double3 rel = new Double3(wp.X - camPos.X, wp.Y - camPos.Y, wp.Z - camPos.Z);
+            SNVec3 centerRender = new SNVec3((float)rel.X, (float)rel.Y, (float)(-rel.Z));
+
+            SNVec3 axisRender = _gizmoDragHandle switch
+            {
+                GizmoHandle.X => new SNVec3(1f, 0f, 0f),
+                GizmoHandle.Y => new SNVec3(0f, 1f, 0f),
+                GizmoHandle.Z => new SNVec3(0f, 0f, -1f),
+                _ => SNVec3.Zero
+            };
+
+            SNVec2 centerNdc = WorldToNdc(centerRender, viewM, projM);
+            SNVec2 tipNdc = WorldToNdc(centerRender + axisRender, viewM, projM);
+            SNVec2 axisNdc = tipNdc - centerNdc;
+            float axisLen = axisNdc.Length();
+            if (axisLen < 1e-6f)
+                return;
+
+            SNVec2 axisDir = axisNdc / axisLen;
+
+            double scaling = TopLevel.GetTopLevel(_sceneHost)?.RenderScaling ?? 1.0;
+            SNVec2 ndcDelta = new SNVec2(
+                screenDelta.X * (float)scaling * 2f / (float)hostSize.Width,
+                -screenDelta.Y * (float)scaling * 2f / (float)hostSize.Height);
+
+            float ndcMove = SNVec2.Dot(ndcDelta, axisDir);
+            float scaleDelta = ndcMove / axisLen * 2f;
+
+            Double3 scaleOffset = _gizmoDragHandle switch
+            {
+                GizmoHandle.X => new Double3(scaleDelta, 0, 0),
+                GizmoHandle.Y => new Double3(0, scaleDelta, 0),
+                GizmoHandle.Z => new Double3(0, 0, scaleDelta),
+                _ => Double3.Zero
+            };
+
+            _gizmoDragStartLocalScale += scaleOffset;
+            Double3 newLocalScale = new Double3(
+                Math.Max(0.01, _gizmoDragStartLocalScale.X),
+                Math.Max(0.01, _gizmoDragStartLocalScale.Y),
+                Math.Max(0.01, _gizmoDragStartLocalScale.Z));
+
+            EditorHostBridge.SetSceneObjectLocalScale(
+                EditorPreviewSceneId, _selectedSceneObject.Id, newLocalScale);
+            _selectedSceneObject.Transform!.LocalScale = newLocalScale;
+        }
+
+        private void ApplyScaleUniformDrag(SNVec2 screenDelta)
+        {
+            var hostSize = GetSceneHostPixelSize();
+            if (hostSize.Width <= 0 || hostSize.Height <= 0)
+                return;
+
+            SNMat4 viewM = EditorHostBridge.GetCameraView();
+            SNMat4 projM = EditorHostBridge.GetCameraProjection();
+
+            Double3 wp = EditorHostBridge.GetSceneObjectWorldPosition(
+                EditorPreviewSceneId, _selectedSceneObject!.Id);
+            Double3 camPos = _previewCameraEditorPosition;
+            Double3 rel = new Double3(wp.X - camPos.X, wp.Y - camPos.Y, wp.Z - camPos.Z);
+            SNVec3 centerRender = new SNVec3((float)rel.X, (float)rel.Y, (float)(-rel.Z));
+
+            SNVec2 centerNdc = WorldToNdc(centerRender, viewM, projM);
+
+            double scaling = TopLevel.GetTopLevel(_sceneHost)?.RenderScaling ?? 1.0;
+            SNVec2 ndcDelta = new SNVec2(
+                screenDelta.X * (float)scaling * 2f / (float)hostSize.Width,
+                -screenDelta.Y * (float)scaling * 2f / (float)hostSize.Height);
+
+            float ndcMove = (ndcDelta.X + ndcDelta.Y) * 0.5f;
+            float scaleFactor = 1f + ndcMove * 3f;
+
+            _gizmoDragStartLocalScale = new Double3(
+                _gizmoDragStartLocalScale.X * scaleFactor,
+                _gizmoDragStartLocalScale.Y * scaleFactor,
+                _gizmoDragStartLocalScale.Z * scaleFactor);
+
+            Double3 newLocalScale = new Double3(
+                Math.Max(0.01, _gizmoDragStartLocalScale.X),
+                Math.Max(0.01, _gizmoDragStartLocalScale.Y),
+                Math.Max(0.01, _gizmoDragStartLocalScale.Z));
+
+            EditorHostBridge.SetSceneObjectLocalScale(
+                EditorPreviewSceneId, _selectedSceneObject.Id, newLocalScale);
+            _selectedSceneObject.Transform!.LocalScale = newLocalScale;
         }
 
         private static SNVec2 WorldToNdc(SNVec3 renderPos, SNMat4 view, SNMat4 proj)
