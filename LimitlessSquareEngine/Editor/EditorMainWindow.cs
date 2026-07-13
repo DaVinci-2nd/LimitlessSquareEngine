@@ -25,10 +25,13 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Threading.Tasks;
+using AvaloniaEdit;
+using AvaloniaEdit.TextMate;
+using TextMateSharp.Grammars;
 
 namespace LimitlessSquareEngine.Editor
 {
-    public sealed class EditorMainWindow : Window
+    public sealed partial class EditorMainWindow : Window
     {
         private readonly EmbeddedGameHost _sceneHost;
 
@@ -124,6 +127,8 @@ namespace LimitlessSquareEngine.Editor
         private DateTime _playbackSuppressFocusUntilUtc = DateTime.MinValue;
         private DispatcherTimer? _playbackDeferredFocusTimer;
         private DispatcherTimer? _playbackTitlePollTimer;
+
+        private readonly List<Window> _openLuaViewers = new List<Window>();
 
         private const string EditorPreviewSceneId = "__editor_preview_scene__";
         private const string EditorPreviewDirectoryName = "EditorPreview";
@@ -5706,6 +5711,12 @@ void main()
             if (TryHandleSpecialFileOpen(path, analyzedFileType))
                 return;
 
+            if (string.Equals(analyzedFileType, ".lua", StringComparison.OrdinalIgnoreCase))
+            {
+                ShowLuaViewerWindow(path);
+                return;
+            }
+
             TryOpenFileWithSystem(path);
         }
 
@@ -6287,10 +6298,10 @@ void main()
                         projectionElement.ValueKind == JsonValueKind.Number)
                         projectionType = projectionElement.GetInt32();
                 }
-                catch
-                {
-                }
+            catch
+            {
             }
+        }
 
             return JsonSerializer.Serialize(new
             {
@@ -7429,6 +7440,317 @@ void main()
             catch
             {
             }
+        }
+
+        private void ShowLuaViewerWindow(string filePath)
+        {
+            string originalContent = File.ReadAllText(filePath);
+            string fileName = Path.GetFileName(filePath);
+            bool isDirty = false;
+            bool isClosing = false;
+            TextEditor? sourceEditor = null;
+            Window window = null!;
+
+            void RefreshTitle()
+            {
+                window.Title = isDirty ? fileName + " *" : fileName;
+            }
+
+            void SaveFile()
+            {
+                if (sourceEditor == null)
+                    return;
+                string newContent = sourceEditor.Text;
+                File.WriteAllText(filePath, newContent, Encoding.UTF8);
+                originalContent = newContent;
+                isDirty = false;
+                RefreshTitle();
+            }
+
+            void OnEditorTextChanged()
+            {
+                if (sourceEditor == null)
+                    return;
+                if (IsLuaSyncingToSource())
+                    return;
+                bool changed = sourceEditor.Text != originalContent;
+                if (changed == isDirty)
+                    return;
+                isDirty = changed;
+                RefreshTitle();
+            }
+
+            void OnClosing(object? sender, WindowClosingEventArgs e)
+            {
+                if (!isDirty || isClosing)
+                    return;
+                e.Cancel = true;
+                Dispatcher.UIThread.Post(async () =>
+                {
+                    bool confirmed = await ShowLuaExitConfirmDialog(window);
+                    if (confirmed)
+                    {
+                        isClosing = true;
+                        _openLuaViewers.Remove(window);
+                        window.Close();
+                    }
+                });
+            }
+
+            window = new Window
+            {
+                Title = fileName,
+                Width = 900,
+                Height = 650,
+                CanMinimize = false,
+                WindowStartupLocation = WindowStartupLocation.CenterOwner,
+                WindowDecorations = WindowDecorations.Full,
+                ShowInTaskbar = false,
+                Background = new SolidColorBrush(Color.Parse("#111111")),
+                Content = BuildLuaViewerContent(filePath, SaveFile, OnEditorTextChanged, editor => { sourceEditor = editor; })
+            };
+
+            window.Closing += OnClosing;
+            window.Closed += (_, _) => _openLuaViewers.Remove(window);
+            _openLuaViewers.Add(window);
+            window.Show(this);
+        }
+
+        private Control BuildLuaViewerContent(string filePath, Action onSave, Action onTextChanged, Action<TextEditor> onEditorCreated)
+        {
+            var contentHost = new ContentControl();
+
+            var visualButton = new Button
+            {
+                Content = "可视化",
+                Width = 80,
+                Height = 30,
+                FontSize = 13,
+                Padding = new Thickness(0),
+                Tag = "visual",
+                Background = new SolidColorBrush(Color.Parse("#225588")),
+                BorderBrush = new SolidColorBrush(Color.Parse("#4488CC")),
+                BorderThickness = new Thickness(1),
+                HorizontalContentAlignment = HorizontalAlignment.Center,
+                VerticalContentAlignment = VerticalAlignment.Center
+            };
+
+            var sourceButton = new Button
+            {
+                Content = "源代码",
+                Width = 80,
+                Height = 30,
+                FontSize = 13,
+                Padding = new Thickness(0),
+                Tag = "source",
+                Background = new SolidColorBrush(Color.Parse("#333333")),
+                BorderBrush = new SolidColorBrush(Color.Parse("#555555")),
+                BorderThickness = new Thickness(1),
+                HorizontalContentAlignment = HorizontalAlignment.Center,
+                VerticalContentAlignment = VerticalAlignment.Center
+            };
+
+            var visualRoot = BuildLuaVisualEditor(filePath);
+            var sourcePage = BuildLuaSourceEditor(filePath, onTextChanged, out var ed);
+            onEditorCreated(ed);
+            _luaSourceEditor = ed;
+
+            void RefreshButtons()
+            {
+                bool isVisual = contentHost.Content == null || ReferenceEquals(contentHost.Content, _luaVisualScrollViewer);
+                visualButton.Background = new SolidColorBrush(Color.Parse(isVisual ? "#225588" : "#333333"));
+                visualButton.BorderBrush = new SolidColorBrush(Color.Parse(isVisual ? "#4488CC" : "#555555"));
+                sourceButton.Background = new SolidColorBrush(Color.Parse(isVisual ? "#333333" : "#225588"));
+                sourceButton.BorderBrush = new SolidColorBrush(Color.Parse(isVisual ? "#555555" : "#4488CC"));
+            }
+
+            visualButton.Click += (_, _) =>
+            {
+                if (_luaSourceEditor != null)
+                {
+                    _luaVisualBlocks = ParseLuaToBlocks(_luaSourceEditor.Text);
+                    RebuildLuaVisualView();
+                }
+                contentHost.Content = _luaVisualScrollViewer;
+                RefreshButtons();
+            };
+
+            sourceButton.Click += (_, _) =>
+            {
+                SyncVisualToSourceSilent();
+                contentHost.Content = sourcePage;
+                RefreshButtons();
+            };
+
+            contentHost.Content = _luaVisualScrollViewer;
+
+            var tabBar = new StackPanel
+            {
+                Orientation = Orientation.Horizontal,
+                Spacing = 2,
+                Height = 38,
+                Margin = new Thickness(10, 6, 10, 0),
+                Children = { visualButton, sourceButton }
+            };
+
+            var saveButton = new Button
+            {
+                Content = "保存",
+                Width = 80,
+                Height = 30,
+                FontSize = 13,
+                Padding = new Thickness(0),
+                HorizontalContentAlignment = HorizontalAlignment.Center,
+                VerticalContentAlignment = VerticalAlignment.Center
+            };
+            saveButton.Click += (_, _) => onSave();
+
+            var bottomBar = new StackPanel
+            {
+                Orientation = Orientation.Horizontal,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                Height = 38,
+                Margin = new Thickness(10, 0, 10, 6),
+                Children = { saveButton }
+            };
+
+            return new DockPanel
+            {
+                Children =
+                {
+                    new Border
+                    {
+                        [DockPanel.DockProperty] = Dock.Top,
+                        Child = tabBar
+                    },
+                    new Border
+                    {
+                        [DockPanel.DockProperty] = Dock.Bottom,
+                        Child = bottomBar
+                    },
+                    contentHost
+                }
+            };
+        }
+
+
+
+        private Control BuildLuaSourceEditor(string filePath, Action onTextChanged, out TextEditor? editorRef)
+        {
+            var editor = new TextEditor
+            {
+                IsReadOnly = false,
+                FontFamily = new FontFamily("Consolas, Courier New, monospace"),
+                FontSize = 14,
+                ShowLineNumbers = true,
+                WordWrap = false,
+                Background = new SolidColorBrush(Color.Parse("#1E1E1E")),
+                Foreground = new SolidColorBrush(Color.Parse("#D4D4D4")),
+                LineNumbersForeground = new SolidColorBrush(Color.Parse("#858585")),
+                Text = File.ReadAllText(filePath)
+            };
+
+            editor.TextChanged += (_, _) => onTextChanged();
+
+            var registryOptions = new RegistryOptions(ThemeName.DarkPlus);
+            var textMate = editor.InstallTextMate(registryOptions);
+            textMate.SetGrammar(registryOptions.GetScopeByLanguageId(
+                registryOptions.GetLanguageByExtension(".lua").Id));
+
+            editorRef = editor;
+            return editor;
+        }
+
+        private async Task<bool> ShowLuaExitConfirmDialog(Window owner)
+        {
+            bool confirmed = false;
+
+            Window dialog = new Window
+            {
+                Title = "警告",
+                Width = 360,
+                Height = 120,
+                CanResize = false,
+                CanMinimize = false,
+                WindowStartupLocation = WindowStartupLocation.CenterOwner,
+                WindowDecorations = WindowDecorations.Full,
+                ShowInTaskbar = false,
+                Background = new SolidColorBrush(Color.Parse("#111111"))
+            };
+
+            TextBlock messageText = new TextBlock
+            {
+                Text = "文件未保存，继续退出吗？",
+                Foreground = Brushes.White,
+                FontWeight = FontWeight.Bold,
+                TextWrapping = TextWrapping.Wrap,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                TextAlignment = TextAlignment.Center,
+                Margin = new Thickness(0, 0, 0, 18)
+            };
+
+            Button confirmButton = new Button
+            {
+                Content = "确定",
+                Width = 88,
+                Height = 32,
+                MinWidth = 88,
+                MinHeight = 32,
+                Padding = new Thickness(0, 0, 0, 1),
+                HorizontalContentAlignment = HorizontalAlignment.Center,
+                VerticalContentAlignment = VerticalAlignment.Center
+            };
+
+            Button cancelButton = new Button
+            {
+                Content = "取消",
+                Width = 88,
+                Height = 32,
+                MinWidth = 88,
+                MinHeight = 32,
+                Padding = new Thickness(0, 0, 0, 1),
+                HorizontalContentAlignment = HorizontalAlignment.Center,
+                VerticalContentAlignment = VerticalAlignment.Center
+            };
+
+            confirmButton.Click += (_, _) =>
+            {
+                confirmed = true;
+                dialog.Close();
+            };
+
+            cancelButton.Click += (_, _) =>
+            {
+                dialog.Close();
+            };
+
+            StackPanel buttons = new StackPanel
+            {
+                Orientation = Orientation.Horizontal,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                Spacing = 12,
+                Children =
+                {
+                    confirmButton,
+                    cancelButton
+                }
+            };
+
+            StackPanel content = new StackPanel
+            {
+                Margin = new Thickness(16),
+                VerticalAlignment = VerticalAlignment.Center,
+                Children =
+                {
+                    messageText,
+                    buttons
+                }
+            };
+
+            dialog.Content = content;
+
+            await dialog.ShowDialog(owner);
+            return confirmed;
         }
 
         private bool PathsEqual(string leftPath, string rightPath)

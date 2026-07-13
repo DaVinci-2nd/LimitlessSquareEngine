@@ -28,8 +28,10 @@
   <ItemGroup>
     <PackageReference Include="AssimpNet" Version="4.1.0" />
     <PackageReference Include="Avalonia" Version="12.0.3" />
+    <PackageReference Include="Avalonia.AvaloniaEdit" Version="12.0.0" />
     <PackageReference Include="Avalonia.Desktop" Version="12.0.3" />
     <PackageReference Include="Avalonia.Themes.Fluent" Version="12.0.3" />
+    <PackageReference Include="AvaloniaEdit.TextMate" Version="12.0.0" />
     <PackageReference Include="Jitter2.Double" Version="2.8.8" />
     <PackageReference Include="MoonSharp" Version="2.0.0" />
     <PackageReference Include="NLayer" Version="2.0.0" />
@@ -73,6 +75,7 @@
     <Compile Include="Editor\EditorApp.cs" />
     <Compile Include="Editor\EditorEntry.cs" />
     <Compile Include="Editor\EditorMainWindow.cs" />
+    <Compile Include="Editor\EditorMainWindow.LuaVisualEditor.cs" />
     <Compile Include="Editor\EditorRuntimeState.cs" />
     <Compile Include="Editor\EmbeddedGameHost.cs" />
   </ItemGroup>

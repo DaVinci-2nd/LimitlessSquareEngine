@@ -1,4 +1,5 @@
 ﻿using Avalonia;
+using Avalonia.Markup.Xaml;
 using Avalonia.Media;
 using Avalonia.Styling;
 using Avalonia.Themes.Fluent;
@@ -29,6 +30,9 @@ namespace LimitlessSquareEngine.Editor
             };
 
             Styles.Add(theme);
+            Styles.Add((IStyle)AvaloniaXamlLoader.Load(
+                new Uri("avares://AvaloniaEdit/Themes/Fluent/AvaloniaEdit.xaml"),
+                new Uri("avares://AvaloniaEdit/")));
 
             Resources["TextControlBorderBrushFocused"] = new SolidColorBrush(accent);
             Resources["TextControlSelectionHighlightColor"] = new SolidColorBrush(accent);
