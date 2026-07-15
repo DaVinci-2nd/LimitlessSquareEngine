@@ -9320,7 +9320,7 @@ namespace LimitlessSquareEngine
 
             if (isTranslate)
             {
-                float gap = isTransform ? 1.05f : 0.5f;
+                float gap = isTransform ? 1.95f : 0.5f;
                 BuildTranslateArrow(list, new Double3(1, 0, 0),
                     _gizmoHoveredAxis == 0 && !_gizmoDragging,
                     _gizmoDragging && _gizmoActiveAxis == 0,
@@ -9337,8 +9337,8 @@ namespace LimitlessSquareEngine
 
             if (isRotate)
             {
-                float innerR = isTransform ? 0.70f : 0.50f;
-                float outerR = isTransform ? 0.90f : 0.70f;
+                float innerR = isTransform ? 1.70f : 1.30f;
+                float outerR = isTransform ? 1.80f : 1.40f;
                 BuildRotationRing(list, new Double3(1, 0, 0),
                     _gizmoHoveredAxis == 0 && !_gizmoDragging,
                     _gizmoDragging && _gizmoActiveAxis == 0,
@@ -9357,7 +9357,7 @@ namespace LimitlessSquareEngine
             {
                 float scaleGap = isTransform ? 0.30f : 0.5f;
                 float scaleShaftLen = isTransform ? 0.28f : 0.7f;
-                float scaleCubeSize = isTransform ? 0.16f : 0.18f;
+                float scaleCubeSize = 0.44f;
                 BuildScaleHandle(list, new Double3(1, 0, 0),
                     _gizmoHoveredAxis == 0 && !_gizmoDragging,
                     _gizmoDragging && _gizmoActiveAxis == 0,
@@ -9372,7 +9372,7 @@ namespace LimitlessSquareEngine
                     new Vector4(0.1f, 0.1f, 1f, 1f), scaleGap, scaleShaftLen, 0.05f, scaleCubeSize);
                 BuildCentralCube(list,
                     _gizmoDragging && _gizmoActiveAxis == 3,
-                    scaleCubeSize * 1.2f);
+                    scaleCubeSize);
             }
 
             return list.ToArray();

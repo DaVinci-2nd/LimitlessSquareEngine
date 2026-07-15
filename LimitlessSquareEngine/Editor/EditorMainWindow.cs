@@ -7794,6 +7794,11 @@ void main()
             Double3 rel = new Double3(wp.X - camPos.X, wp.Y - camPos.Y, wp.Z - camPos.Z);
             SNVec3 centerRender = new SNVec3((float)rel.X, (float)rel.Y, (float)(-rel.Z));
 
+            float fovHalfTan = 1f / projM.M22;
+            const float ScreenRatio = 0.12f;
+            double distance = System.Math.Sqrt(rel.X * rel.X + rel.Y * rel.Y + rel.Z * rel.Z);
+            float worldScale = (float)distance * fovHalfTan * 2f * ScreenRatio;
+
             SNVec2 centerNdc = WorldToNdc(centerRender, viewM, projM);
             if (float.IsNaN(centerNdc.X))
                 return GizmoHandle.None;
@@ -7811,41 +7816,55 @@ void main()
 
             if (checkRotate)
             {
-                float midR = _currentGizmoMode == GizmoMode.Transform ? 0.80f : 0.60f;
-                float halfThick = 0.10f;
+                float midR = _currentGizmoMode == GizmoMode.Transform ? 1.75f : 1.35f;
+                float halfThick = 0.05f;
+                const int RingSamples = 32;
                 for (int i = 0; i < 3; i++)
                 {
                     SNVec3 perpA = Math.Abs(axisRender[i].X) < 0.9f
                         ? SNVec3.Normalize(System.Numerics.Vector3.Cross(axisRender[i], System.Numerics.Vector3.UnitX))
                         : SNVec3.Normalize(System.Numerics.Vector3.Cross(axisRender[i], System.Numerics.Vector3.UnitY));
+                    SNVec3 perpB = System.Numerics.Vector3.Cross(perpA, axisRender[i]);
 
-                    SNVec3 innerRing = centerRender + perpA * (midR - halfThick);
-                    SNVec3 outerRing = centerRender + perpA * (midR + halfThick);
-                    SNVec2 innerNdc = WorldToNdc(innerRing, viewM, projM);
-                    SNVec2 outerNdc = WorldToNdc(outerRing, viewM, projM);
-                    if (float.IsNaN(innerNdc.X) || float.IsNaN(outerNdc.X))
-                        continue;
+                    SNVec2 refInner = WorldToNdc(centerRender + perpA * ((midR - halfThick) * worldScale), viewM, projM);
+                    SNVec2 refOuter = WorldToNdc(centerRender + perpA * ((midR + halfThick) * worldScale), viewM, projM);
+                    float ringHalfThickNdc = float.IsNaN(refInner.X) || float.IsNaN(refOuter.X)
+                        ? HitNdc
+                        : SNVec2.Distance(refInner, refOuter) * 0.5f;
+                    float tolerance = ringHalfThickNdc + HitNdc;
 
-                    float innerNdcR = SNVec2.Distance(innerNdc, centerNdc);
-                    float outerNdcR = SNVec2.Distance(outerNdc, centerNdc);
-                    float mouseDist = SNVec2.Distance(mouseNdc, centerNdc);
-
-                    if (mouseDist >= innerNdcR - HitNdc && mouseDist <= outerNdcR + HitNdc)
+                    float closestDist = float.MaxValue;
+                    int closestIdx = -1;
+                    for (int s = 0; s < RingSamples; s++)
                     {
-                        float ringDist = Math.Min(Math.Abs(mouseDist - innerNdcR), Math.Abs(mouseDist - outerNdcR));
-                        if (ringDist < bestDist)
+                        float ang = MathF.PI * 2f * s / RingSamples;
+                        SNVec3 d = perpA * MathF.Cos(ang) + perpB * MathF.Sin(ang);
+                        SNVec3 ringPt = centerRender + d * (midR * worldScale);
+                        SNVec2 ringNdc = WorldToNdc(ringPt, viewM, projM);
+                        if (float.IsNaN(ringNdc.X))
+                            continue;
+
+                        float dist = SNVec2.Distance(mouseNdc, ringNdc);
+                        if (dist < closestDist)
                         {
-                            bestDist = ringDist;
-                            bestType = 1;
-                            bestHandle = (GizmoHandle)i;
+                            closestDist = dist;
+                            closestIdx = s;
                         }
+                    }
+
+                    if (closestIdx >= 0 && closestDist < tolerance && closestDist < bestDist)
+                    {
+                        bestDist = closestDist;
+                        bestType = 1;
+                        bestHandle = (GizmoHandle)i;
                     }
                 }
             }
 
             if (checkScale)
             {
-                float centralCubeHalf = (_currentGizmoMode == GizmoMode.Transform ? 0.19f : 0.22f) * 0.5f;
+                float scaleCubeSize = (_currentGizmoMode == GizmoMode.Transform) ? 0.16f : 0.18f;
+                float centralCubeHalf = scaleCubeSize * 1.2f * 0.5f * worldScale;
                 SNVec3 cubeCorner = centerRender + new SNVec3(centralCubeHalf, centralCubeHalf, centralCubeHalf);
                 SNVec2 cubeCornerNdc = WorldToNdc(cubeCorner, viewM, projM);
                 if (!float.IsNaN(cubeCornerNdc.X))
@@ -7860,14 +7879,21 @@ void main()
                     }
                 }
 
+                float scGap = (_currentGizmoMode == GizmoMode.Transform) ? 0.30f : 0.5f;
+                float scShaftLen = (_currentGizmoMode == GizmoMode.Transform) ? 0.28f : 0.7f;
+                float scTipTotal = (scGap + scShaftLen + 0.05f) * worldScale;
+                float scBase = (scGap - 0.05f) * worldScale;
+
                 for (int i = 0; i < 3; i++)
                 {
-                    SNVec3 tipRender = centerRender + axisRender[i];
+                    SNVec3 tipRender = centerRender + axisRender[i] * scTipTotal;
+                    SNVec3 baseRender = centerRender + axisRender[i] * scBase;
                     SNVec2 tipNdc = WorldToNdc(tipRender, viewM, projM);
-                    if (float.IsNaN(tipNdc.X))
+                    SNVec2 baseNdc = WorldToNdc(baseRender, viewM, projM);
+                    if (float.IsNaN(tipNdc.X) || float.IsNaN(baseNdc.X))
                         continue;
 
-                    float dist = DistPointToSegment(mouseNdc, centerNdc, tipNdc);
+                    float dist = DistPointToSegment(mouseNdc, baseNdc, tipNdc);
                     if (dist < HitNdc && dist < bestDist)
                     {
                         bestDist = dist;
@@ -7879,14 +7905,20 @@ void main()
 
             if (checkTranslate)
             {
+                float trGap = (_currentGizmoMode == GizmoMode.Transform) ? 1.95f : 0.5f;
+                float trTotal = (trGap + 0.7f + 0.4f + 0.05f) * worldScale;
+                float trBase = (trGap - 0.05f) * worldScale;
+
                 for (int i = 0; i < 3; i++)
                 {
-                    SNVec3 tipRender = centerRender + axisRender[i];
+                    SNVec3 tipRender = centerRender + axisRender[i] * trTotal;
+                    SNVec3 baseRender = centerRender + axisRender[i] * trBase;
                     SNVec2 tipNdc = WorldToNdc(tipRender, viewM, projM);
-                    if (float.IsNaN(tipNdc.X))
+                    SNVec2 baseNdc = WorldToNdc(baseRender, viewM, projM);
+                    if (float.IsNaN(tipNdc.X) || float.IsNaN(baseNdc.X))
                         continue;
 
-                    float dist = DistPointToSegment(mouseNdc, centerNdc, tipNdc);
+                    float dist = DistPointToSegment(mouseNdc, baseNdc, tipNdc);
                     if (dist < HitNdc && dist < bestDist)
                     {
                         bestDist = dist;
@@ -8032,7 +8064,7 @@ void main()
 
             float ndcMove = SNVec2.Dot(ndcDelta, tangentNdc);
 
-            float midR = _currentGizmoMode == GizmoMode.Transform ? 0.80f : 0.60f;
+            float midR = _currentGizmoMode == GizmoMode.Transform ? 1.75f : 1.35f;
             float ringNdcR = axisLen * midR;
             if (ringNdcR < 1e-4f)
                 return;
