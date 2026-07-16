@@ -76,6 +76,7 @@ namespace LimitlessSquareEngine.Editor
 
         private SceneObject? _selectedSceneObject;
         private bool _isUpdatingSceneInspector;
+        private readonly List<Action> _inspectorVector3RefreshActions = new();
         private bool _isProgrammaticSceneTreeSelection;
         private TreeView? _sceneTreeView;
         private SceneTreeDragOverlay? _sceneTreeDragOverlay;
@@ -1383,7 +1384,6 @@ namespace LimitlessSquareEngine.Editor
             EditorHostBridge.SetGizmoState(Double3.Zero, (int)GizmoMode.None, (int)GizmoHandle.None, false);
 
             ClearSelectedSceneObjectState();
-            ClearPreviewSelectionContour();
 
             if (_sceneTreeView?.ItemsSource is System.Collections.IEnumerable items)
                 ClearSceneTreeSelection(items);
@@ -3025,6 +3025,8 @@ namespace LimitlessSquareEngine.Editor
         {
             obj.Transform ??= CloneTransform(null);
 
+            _inspectorVector3RefreshActions.Clear();
+
             StackPanel root = new StackPanel
             {
                 Spacing = 4
@@ -3699,6 +3701,8 @@ namespace LimitlessSquareEngine.Editor
                 zBox.Text = FormatDouble(value.Z);
                 _isUpdatingSceneInspector = false;
             }
+
+            _inspectorVector3RefreshActions.Add(ResetFromCurrent);
 
             void Commit()
             {
@@ -6171,6 +6175,8 @@ void main()
 
         private void ClearSelectedSceneObjectState()
         {
+            EditorHostBridge.SetGizmoState(Double3.Zero, (int)GizmoMode.None, (int)GizmoHandle.None, false);
+
             _selectedSceneObject = null;
             ClearPreviewSelectionContour();
 
@@ -6942,11 +6948,8 @@ void main()
             foreach (SceneObject obj in toRemove)
                 _currentTreeScene.Objects.Remove(obj);
 
-            _selectedSceneObject = null;
+            ClearSelectedSceneObjectState();
             RightDockSlot.Content = CreatePlaceholder("未选中文件或节点");
-
-            if (_sceneTreeDeleteButton != null)
-                _sceneTreeDeleteButton.IsEnabled = false;
 
             PersistSceneObjectChanges(target, true);
         }
@@ -7959,6 +7962,27 @@ void main()
             Double3 newWp = EditorHostBridge.GetSceneObjectWorldPosition(
                 EditorPreviewSceneId, _selectedSceneObject.Id);
             EditorHostBridge.SetGizmoState(newWp, (int)_currentGizmoMode, (int)_gizmoDragHandle, true);
+
+            RefreshInspectorTransformValues();
+        }
+
+        private void RefreshInspectorTransformValues()
+        {
+            if (_isUpdatingSceneInspector)
+                return;
+            if (_selectedSceneObject == null)
+                return;
+
+            _isUpdatingSceneInspector = true;
+            try
+            {
+                foreach (var action in _inspectorVector3RefreshActions)
+                    action();
+            }
+            finally
+            {
+                _isUpdatingSceneInspector = false;
+            }
         }
 
         private void ApplyTranslateDrag(SNVec2 screenDelta)
