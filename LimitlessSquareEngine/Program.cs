@@ -157,7 +157,7 @@ namespace LimitlessSquareEngine
     /// <summary>
     /// 入口类
     /// </summary>
-    internal class Program
+    internal partial class Program
     {
         // 编辑器程序集文件名
         private const string EditorAssemblyFileName = "Limitless Square Editor.dll";
@@ -194,6 +194,46 @@ namespace LimitlessSquareEngine
 
         // Lua脚本实例列表
         static List<LuaScriptInstance> _luaScriptInstances = new List<LuaScriptInstance>();
+        static Script _syntaxCheckScript = new Script(CoreModules.None);
+        static List<EditorHostBridge.LuaApiMetadata> _luaApiMeta = new List<EditorHostBridge.LuaApiMetadata>();
+
+        static void RecordLuaApi(string name, string signature, string description, string category)
+        {
+            _luaApiMeta.Add(new EditorHostBridge.LuaApiMetadata
+            {
+                Name = name,
+                Signature = signature,
+                Description = description,
+                Category = category
+            });
+        }
+
+        static void ParseLineColumnFromDecoratedMessage(string decoratedMessage, out int line, out int column)
+        {
+            line = 1;
+            column = 1;
+            if (string.IsNullOrEmpty(decoratedMessage))
+                return;
+
+            int firstColon = decoratedMessage.IndexOf(':');
+            if (firstColon < 0)
+                return;
+
+            int secondColon = decoratedMessage.IndexOf(':', firstColon + 1);
+            if (secondColon < 0)
+                return;
+
+            int thirdColon = decoratedMessage.IndexOf(':', secondColon + 1);
+            if (thirdColon < 0)
+                return;
+
+            string lineStr = decoratedMessage.Substring(secondColon + 1, thirdColon - secondColon - 1);
+            string colStr = decoratedMessage.Substring(thirdColon + 1).Split(':')[0];
+
+            int.TryParse(lineStr, out line);
+            int.TryParse(colStr, out column);
+        }
+
         // 主窗口实例
         static IWindow? _window;
         // OpenGL实例
@@ -1374,7 +1414,34 @@ namespace LimitlessSquareEngine
                 () => _graphics?.GizmoSceneView ?? System.Numerics.Matrix4x4.Identity,
                 () => _graphics?.GizmoSceneProjection ?? System.Numerics.Matrix4x4.Identity,
                 hoveredAxis => { if (_graphics != null) _graphics.SetGizmoHover(hoveredAxis); },
-                (dragging, activeAxis) => { if (_graphics != null) _graphics.SetGizmoDrag(dragging, activeAxis); });
+                (dragging, activeAxis) => { if (_graphics != null) _graphics.SetGizmoDrag(dragging, activeAxis); },
+                sourceCode =>
+                {
+                    var errors = new List<EditorHostBridge.LuaSyntaxError>();
+                    try
+                    {
+                        _syntaxCheckScript.LoadString(sourceCode);
+                    }
+                    catch (SyntaxErrorException ex)
+                    {
+                        if (!ex.IsPrematureStreamTermination)
+                        {
+                            int line = 1;
+                            int col = 1;
+                            string msg = ex.DecoratedMessage ?? ex.Message;
+                            ParseLineColumnFromDecoratedMessage(msg, out line, out col);
+                            errors.Add(new EditorHostBridge.LuaSyntaxError
+                            {
+                                Line = line,
+                                Column = col,
+                                Message = msg,
+                                IsPrematureStreamTermination = false
+                            });
+                        }
+                    }
+                    return errors.ToArray();
+                },
+                () => _luaApiMeta.ToArray());
         }
 
         static void UnbindEditorHostBridge()
@@ -1835,29 +1902,37 @@ namespace LimitlessSquareEngine
 
                         // 注入数据
                         instance.LuaScript.Globals["game_data"] = gameData;
+                        RecordLuaApi("game_data", "game_data", "游戏数据对象", "Data");
+                        instance.LuaScript.Globals["graphics"] = graphics;
+                        RecordLuaApi("graphics", "graphics", "图形系统对象", "Graphics");
                         // 注入后台任务函数
                         instance.LuaScript.Globals["submit_task"] = submitTaskFunc;
+                        RecordLuaApi("submit_task", "submit_task(luaCode) -> taskId", "提交后台任务", "Task");
                         instance.LuaScript.Globals["get_task_result"] = getTaskResultFunc;
+                        RecordLuaApi("get_task_result", "get_task_result(taskId) -> result", "获取后台任务结果", "Task");
                         // 注入图形系统
-                        instance.LuaScript.Globals["graphics"] = graphics;
                         // 注入打印函数
                         instance.LuaScript.Globals["print"] = (Action<object>)((obj) => Console.Write(obj));
+                        RecordLuaApi("print", "print(object)", "输出文本到控制台", "Core");
                         // 注入UI设置函数
                         instance.LuaScript.Globals["set_ui"] = (Action<string>)((layoutKey) =>
                         {
                             SetActiveUILayout(layoutKey);
                         });
+                        RecordLuaApi("set_ui", "set_ui(layoutKey)", "设置激活的UI布局", "UI");
                         // 注入UI清空函数
                         instance.LuaScript.Globals["clear_ui"] = (Action)(() =>
                         {
                             ClearActiveUILayout();
                         });
+                        RecordLuaApi("clear_ui", "clear_ui()", "清空当前UI布局", "UI");
                         // 注入纹理路径表
                         EnsureAllTextureKeysDiscovered();
                         Table textureTable = new Table(instance.LuaScript);
                         foreach (var path in _texturePaths.OrderBy(p => p, StringComparer.OrdinalIgnoreCase))
                             textureTable.Append(DynValue.NewString(path));
                         instance.LuaScript.Globals["texture_paths"] = textureTable;
+                        RecordLuaApi("texture_paths", "texture_paths", "纹理路径数组", "Graphics");
 
                         // 注入音频系统
                         instance.LuaScript.Globals["audio_play"] = (Func<string, float, float, float, string>)((clipId, volume, pitch, pan) =>
@@ -1865,162 +1940,196 @@ namespace LimitlessSquareEngine
                             if (_audio == null) return string.Empty;
                             return _audio.PlayNonSpatial(clipId, volume, pitch, pan);
                         });
+                        RecordLuaApi("audio_play", "audio_play(clipId, volume, pitch, pan) -> sourceId", "播放非空间化音频", "Audio");
                         instance.LuaScript.Globals["audio_play_looping"] = (Func<string, float, float, float, string>)((clipId, volume, pitch, pan) =>
                         {
                             if (_audio == null) return string.Empty;
                             return _audio.PlayNonSpatialLooping(clipId, volume, pitch, pan);
                         });
+                        RecordLuaApi("audio_play_looping", "audio_play_looping(clipId, volume, pitch, pan) -> sourceId", "播放循环非空间化音频", "Audio");
                         instance.LuaScript.Globals["audio_stop"] = (Action<string>)((sourceId) =>
                         {
                             _audio?.Stop(sourceId);
                         });
+                        RecordLuaApi("audio_stop", "audio_stop(sourceId)", "停止音频播放", "Audio");
                         instance.LuaScript.Globals["audio_pause"] = (Action<string>)((sourceId) =>
                         {
                             _audio?.Pause(sourceId);
                         });
+                        RecordLuaApi("audio_pause", "audio_pause(sourceId)", "暂停音频播放", "Audio");
                         instance.LuaScript.Globals["audio_resume"] = (Action<string>)((sourceId) =>
                         {
                             _audio?.Resume(sourceId);
                         });
+                        RecordLuaApi("audio_resume", "audio_resume(sourceId)", "恢复音频播放", "Audio");
                         instance.LuaScript.Globals["audio_set_volume"] = (Action<string, float>)((sourceId, volume) =>
                         {
                             _audio?.SetVolume(sourceId, volume);
                         });
+                        RecordLuaApi("audio_set_volume", "audio_set_volume(sourceId, volume)", "设置音频音量", "Audio");
                         instance.LuaScript.Globals["audio_set_pitch"] = (Action<string, float>)((sourceId, pitch) =>
                         {
                             _audio?.SetPitch(sourceId, pitch);
                         });
+                        RecordLuaApi("audio_set_pitch", "audio_set_pitch(sourceId, pitch)", "设置音频音调", "Audio");
                         instance.LuaScript.Globals["audio_set_pan"] = (Action<string, float>)((sourceId, pan) =>
                         {
                             _audio?.SetPan(sourceId, pan);
                         });
+                        RecordLuaApi("audio_set_pan", "audio_set_pan(sourceId, pan)", "设置音频声道平衡", "Audio");
                         instance.LuaScript.Globals["audio_play_source"] = (Action<string, string>)((sceneId, objectId) =>
                         {
                             _audio?.PlaySceneSource(sceneId, objectId);
                         });
+                        RecordLuaApi("audio_play_source", "audio_play_source(sceneId, objectId)", "播放场景音频源", "Audio");
                         instance.LuaScript.Globals["audio_stop_source"] = (Action<string, string>)((sceneId, objectId) =>
                         {
                             _audio?.StopSceneSource(sceneId, objectId);
                         });
+                        RecordLuaApi("audio_stop_source", "audio_stop_source(sceneId, objectId)", "停止场景音频源", "Audio");
                         instance.LuaScript.Globals["audio_set_position"] = (Action<string, float>)((sourceId, seconds) =>
                         {
                             _audio?.SetPosition(sourceId, seconds);
                         });
+                        RecordLuaApi("audio_set_position", "audio_set_position(sourceId, seconds)", "设置音频播放位置", "Audio");
                         instance.LuaScript.Globals["audio_get_position"] = (Func<string, float>)((sourceId) =>
                         {
                             if (_audio == null) return 0f;
                             return _audio.GetPosition(sourceId);
                         });
+                        RecordLuaApi("audio_get_position", "audio_get_position(sourceId) -> seconds", "获取音频播放位置", "Audio");
                         instance.LuaScript.Globals["audio_is_playing"] = (Func<string, bool>)((sourceId) =>
                         {
                             if (_audio == null) return false;
                             return _audio.IsPlaying(sourceId);
                         });
+                        RecordLuaApi("audio_is_playing", "audio_is_playing(sourceId) -> bool", "检查音频是否正在播放", "Audio");
                         instance.LuaScript.Globals["audio_register_clip"] = (Action<string, string>)((clipId, filePath) =>
                         {
                             _audio?.RegisterAudioFile(clipId, filePath);
                         });
+                        RecordLuaApi("audio_register_clip", "audio_register_clip(clipId, filePath)", "注册音频文件", "Audio");
                         instance.LuaScript.Globals["audio_unload_clip"] = (Action<string>)((clipId) =>
                         {
                             _audio?.UnloadClip(clipId);
                         });
+                        RecordLuaApi("audio_unload_clip", "audio_unload_clip(clipId)", "卸载音频剪辑", "Audio");
                         instance.LuaScript.Globals["audio_set_master_volume"] = (Action<float>)((volume) =>
                         {
                             _audio?.SetMasterVolume(volume);
                         });
+                        RecordLuaApi("audio_set_master_volume", "audio_set_master_volume(volume)", "设置主音量", "Audio");
                         instance.LuaScript.Globals["audio_get_clip_duration"] = (Func<string, float>)((clipId) =>
                         {
                             if (_audio == null) return 0f;
                             return _audio.GetClipDuration(clipId);
                         });
+                        RecordLuaApi("audio_get_clip_duration", "audio_get_clip_duration(clipId) -> duration", "获取音频剪辑时长", "Audio");
 
                         // 注入场景加载函数
                         instance.LuaScript.Globals["load_scene"] = (Func<string, SceneData>)((sceneId) =>
                         {
                             return Scene.LoadScene(sceneId);
                         });
+                        RecordLuaApi("load_scene", "load_scene(sceneId) -> sceneData", "加载场景", "Scene");
 
                         // 注入场景移除函数
                         instance.LuaScript.Globals["remove_scene"] = (Action<string>)((sceneId) =>
                         {
                             Scene.RemoveScene(sceneId);
                         });
+                        RecordLuaApi("remove_scene", "remove_scene(sceneId)", "移除场景", "Scene");
 
                         // 注入雾设置函数
                         instance.LuaScript.Globals["set_camera_fog_enabled"] = (Action<string, bool>)((cameraObjectId, enabled) =>
                         {
                             graphics.SetCameraFogEnabled(cameraObjectId, enabled);
                         });
+                        RecordLuaApi("set_camera_fog_enabled", "set_camera_fog_enabled(cameraObjectId, enabled)", "设置相机雾效开关", "CameraFog");
 
                         instance.LuaScript.Globals["set_main_camera_fog_enabled"] = (Action<bool>)((enabled) =>
                         {
                             graphics.SetMainCameraFogEnabled(enabled);
                         });
+                        RecordLuaApi("set_main_camera_fog_enabled", "set_main_camera_fog_enabled(enabled)", "设置主相机雾效开关", "CameraFog");
 
                         instance.LuaScript.Globals["set_camera_fog_mode"] = (Action<string, string>)((cameraObjectId, mode) =>
                         {
                             graphics.SetCameraFogMode(cameraObjectId, mode);
                         });
+                        RecordLuaApi("set_camera_fog_mode", "set_camera_fog_mode(cameraObjectId, mode)", "设置相机雾效模式", "CameraFog");
 
                         instance.LuaScript.Globals["set_main_camera_fog_mode"] = (Action<string>)((mode) =>
                         {
                             graphics.SetMainCameraFogMode(mode);
                         });
+                        RecordLuaApi("set_main_camera_fog_mode", "set_main_camera_fog_mode(mode)", "设置主相机雾效模式", "CameraFog");
 
                         instance.LuaScript.Globals["set_camera_fog_color"] = (Action<string, double, double, double, double>)((cameraObjectId, r, g, b, a) =>
                         {
                             graphics.SetCameraFogColor(cameraObjectId, (float)r, (float)g, (float)b, (float)a);
                         });
+                        RecordLuaApi("set_camera_fog_color", "set_camera_fog_color(cameraObjectId, r, g, b, a)", "设置相机雾效颜色", "CameraFog");
 
                         instance.LuaScript.Globals["set_camera_fog_color_rgb"] = (Action<string, int, int, int, int>)((cameraObjectId, r, g, b, a) =>
                         {
                             graphics.SetCameraFogColorRGB(cameraObjectId, r, g, b, a);
                         });
+                        RecordLuaApi("set_camera_fog_color_rgb", "set_camera_fog_color_rgb(cameraObjectId, r, g, b, a)", "设置相机雾效颜色(RGB 0-255)", "CameraFog");
 
                         instance.LuaScript.Globals["set_main_camera_fog_color"] = (Action<double, double, double, double>)((r, g, b, a) =>
                         {
                             graphics.SetMainCameraFogColor((float)r, (float)g, (float)b, (float)a);
                         });
+                        RecordLuaApi("set_main_camera_fog_color", "set_main_camera_fog_color(r, g, b, a)", "设置主相机雾效颜色", "CameraFog");
 
                         instance.LuaScript.Globals["set_main_camera_fog_color_rgb"] = (Action<int, int, int, int>)((r, g, b, a) =>
                         {
                             graphics.SetMainCameraFogColorRGB(r, g, b, a);
                         });
+                        RecordLuaApi("set_main_camera_fog_color_rgb", "set_main_camera_fog_color_rgb(r, g, b, a)", "设置主相机雾效颜色(RGB 0-255)", "CameraFog");
 
                         instance.LuaScript.Globals["set_camera_fog_texture"] = (Action<string, string>)((cameraObjectId, texturePath) =>
                         {
                             graphics.SetCameraFogCylindricalTexture(cameraObjectId, texturePath);
                         });
+                        RecordLuaApi("set_camera_fog_texture", "set_camera_fog_texture(cameraObjectId, texturePath)", "设置相机雾效纹理", "CameraFog");
 
                         instance.LuaScript.Globals["set_main_camera_fog_texture"] = (Action<string>)((texturePath) =>
                         {
                             graphics.SetMainCameraFogCylindricalTexture(texturePath);
                         });
+                        RecordLuaApi("set_main_camera_fog_texture", "set_main_camera_fog_texture(texturePath)", "设置主相机雾效纹理", "CameraFog");
 
                         instance.LuaScript.Globals["set_camera_fog_edge_transition_to_skybox"] = (Action<string, bool>)((cameraObjectId, enabled) =>
                         {
                             graphics.SetCameraFogEdgeTransitionToSkybox(cameraObjectId, enabled);
                         });
+                        RecordLuaApi("set_camera_fog_edge_transition_to_skybox", "set_camera_fog_edge_transition_to_skybox(cameraObjectId, enabled)", "设置雾效边缘过渡到天空盒", "CameraFog");
 
                         instance.LuaScript.Globals["set_main_camera_fog_edge_transition_to_skybox"] = (Action<bool>)((enabled) =>
                         {
                             graphics.SetMainCameraFogEdgeTransitionToSkybox(enabled);
                         });
+                        RecordLuaApi("set_main_camera_fog_edge_transition_to_skybox", "set_main_camera_fog_edge_transition_to_skybox(enabled)", "设置主相机雾效边缘过渡", "CameraFog");
 
                         instance.LuaScript.Globals["set_camera_fog_range"] = (Action<string, double, double>)((cameraObjectId, start, end) =>
                         {
                             graphics.SetCameraFogRange(cameraObjectId, (float)start, (float)end);
                         });
+                        RecordLuaApi("set_camera_fog_range", "set_camera_fog_range(cameraObjectId, start, end)", "设置相机雾效范围", "CameraFog");
 
                         instance.LuaScript.Globals["set_main_camera_fog_range"] = (Action<double, double>)((start, end) =>
                         {
                             graphics.SetMainCameraFogRange((float)start, (float)end);
                         });
+                        RecordLuaApi("set_main_camera_fog_range", "set_main_camera_fog_range(start, end)", "设置主相机雾效范围", "CameraFog");
 
                         instance.LuaScript.Globals["clear_camera_fog"] = (Action<string>)((cameraObjectId) =>
                         {
                             graphics.ClearCameraFog(cameraObjectId);
                         });
+                        RecordLuaApi("clear_camera_fog", "clear_camera_fog(cameraObjectId)", "清除相机雾效", "CameraFog");
 
                         // 注入刚体速度读取函数
                         instance.LuaScript.Globals["get_rigidbody_velocity"] =
@@ -2028,6 +2137,7 @@ namespace LimitlessSquareEngine
                             {
                                 return Physics.GetVelocity(sceneId, objectId);
                             });
+                        RecordLuaApi("get_rigidbody_velocity", "get_rigidbody_velocity(sceneId, objectId) -> Double3", "获取刚体速度", "Physics");
 
                         // 注入刚体速度设置函数
                         instance.LuaScript.Globals["set_rigidbody_velocity"] =
@@ -2035,6 +2145,7 @@ namespace LimitlessSquareEngine
                             {
                                 Physics.SetVelocity(sceneId, objectId, new Double3(x, y, z));
                             });
+                        RecordLuaApi("set_rigidbody_velocity", "set_rigidbody_velocity(sceneId, objectId, x, y, z)", "设置刚体速度", "Physics");
 
                         // 注入刚体角速度读取函数
                         instance.LuaScript.Globals["get_rigidbody_angular_velocity"] =
@@ -2042,6 +2153,7 @@ namespace LimitlessSquareEngine
                             {
                                 return Physics.GetAngularVelocity(sceneId, objectId);
                             });
+                        RecordLuaApi("get_rigidbody_angular_velocity", "get_rigidbody_angular_velocity(sceneId, objectId) -> Double3", "获取刚体角速度", "Physics");
 
                         // 注入刚体角速度设置函数
                         instance.LuaScript.Globals["set_rigidbody_angular_velocity"] =
@@ -2049,6 +2161,7 @@ namespace LimitlessSquareEngine
                             {
                                 Physics.SetAngularVelocity(sceneId, objectId, new Double3(x, y, z));
                             });
+                        RecordLuaApi("set_rigidbody_angular_velocity", "set_rigidbody_angular_velocity(sceneId, objectId, x, y, z)", "设置刚体角速度", "Physics");
 
                         // 注入力函数
                         instance.LuaScript.Globals["add_rigidbody_force"] =
@@ -2056,6 +2169,7 @@ namespace LimitlessSquareEngine
                             {
                                 Physics.AddForce(sceneId, objectId, new Double3(x, y, z));
                             });
+                        RecordLuaApi("add_rigidbody_force", "add_rigidbody_force(sceneId, objectId, x, y, z)", "对刚体施加力", "Physics");
 
                         // 注入作用点力函数
                         instance.LuaScript.Globals["add_rigidbody_force_at_position"] =
@@ -2067,6 +2181,7 @@ namespace LimitlessSquareEngine
                                     new Double3(fx, fy, fz),
                                     new Double3(px, py, pz));
                             });
+                        RecordLuaApi("add_rigidbody_force_at_position", "add_rigidbody_force_at_position(sceneId, objectId, fx, fy, fz, px, py, pz)", "在指定位置对刚体施加力", "Physics");
 
                         // 注入冲量函数
                         instance.LuaScript.Globals["add_rigidbody_impulse"] =
@@ -2074,6 +2189,7 @@ namespace LimitlessSquareEngine
                             {
                                 Physics.ApplyImpulse(sceneId, objectId, new Double3(x, y, z));
                             });
+                        RecordLuaApi("add_rigidbody_impulse", "add_rigidbody_impulse(sceneId, objectId, x, y, z)", "对刚体施加冲量", "Physics");
 
                         // 注入作用点冲量函数
                         instance.LuaScript.Globals["add_rigidbody_impulse_at_position"] =
@@ -2085,6 +2201,7 @@ namespace LimitlessSquareEngine
                                     new Double3(ix, iy, iz),
                                     new Double3(px, py, pz));
                             });
+                        RecordLuaApi("add_rigidbody_impulse_at_position", "add_rigidbody_impulse_at_position(sceneId, objectId, ix, iy, iz, px, py, pz)", "在指定位置对刚体施加冲量", "Physics");
 
                         // 注入刚体激活设置函数
                         instance.LuaScript.Globals["set_rigidbody_active"] =
@@ -2092,6 +2209,7 @@ namespace LimitlessSquareEngine
                             {
                                 Physics.SetActivationState(sceneId, objectId, active);
                             });
+                        RecordLuaApi("set_rigidbody_active", "set_rigidbody_active(sceneId, objectId, active)", "设置刚体激活状态", "Physics");
 
                         // 注入射线检测函数
                         instance.LuaScript.Globals["raycast"] =
@@ -2103,12 +2221,14 @@ namespace LimitlessSquareEngine
                                     new Double3(dx, dy, dz),
                                     maxDistance);
                             });
+                        RecordLuaApi("raycast", "raycast(sceneId, ox, oy, oz, dx, dy, dz, maxDistance) -> hit", "射线检测", "Physics");
 
                         // 注入重建摄像机队列函数
                         instance.LuaScript.Globals["rescan_scene_cameras"] = (Action<string>)((sceneId) =>
                         {
                             Scene.RebuildCameraQueue(sceneId);
                         });
+                        RecordLuaApi("rescan_scene_cameras", "rescan_scene_cameras(sceneId)", "重建场景摄像机队列", "Camera");
 
                         // 注入相机渲染模式设置函数
                         instance.LuaScript.Globals["set_camera_render_mode"] =
@@ -2116,6 +2236,7 @@ namespace LimitlessSquareEngine
                             {
                                 Scene.SetCameraRenderMode(sceneId, objectId, renderMode);
                             });
+                        RecordLuaApi("set_camera_render_mode", "set_camera_render_mode(sceneId, objectId, renderMode)", "设置相机渲染模式", "Camera");
 
                         // 注入相机视角或正交尺寸设置函数
                         instance.LuaScript.Globals["set_camera_fov_or_size"] =
@@ -2123,6 +2244,7 @@ namespace LimitlessSquareEngine
                             {
                                 Scene.SetCameraFovOrSize(sceneId, objectId, fovOrSize);
                             });
+                        RecordLuaApi("set_camera_fov_or_size", "set_camera_fov_or_size(sceneId, objectId, fovOrSize)", "设置相机FOV或正交尺寸", "Camera");
 
                         // 注入相机渲染面偏移设置函数
                         instance.LuaScript.Globals["set_camera_render_plane_offset"] =
@@ -2130,6 +2252,7 @@ namespace LimitlessSquareEngine
                             {
                                 Scene.SetCameraRenderPlaneOffset(sceneId, objectId, x, y);
                             });
+                        RecordLuaApi("set_camera_render_plane_offset", "set_camera_render_plane_offset(sceneId, objectId, x, y)", "设置相机渲染面偏移", "Camera");
 
                         // 注入相机近裁剪面设置函数
                         instance.LuaScript.Globals["set_camera_near_clip"] =
@@ -2137,6 +2260,7 @@ namespace LimitlessSquareEngine
                             {
                                 Scene.SetCameraNearClip(sceneId, objectId, nearClip);
                             });
+                        RecordLuaApi("set_camera_near_clip", "set_camera_near_clip(sceneId, objectId, nearClip)", "设置相机近裁剪面", "Camera");
 
                         // 注入相机远裁剪面设置函数
                         instance.LuaScript.Globals["set_camera_far_clip"] =
@@ -2144,6 +2268,7 @@ namespace LimitlessSquareEngine
                             {
                                 Scene.SetCameraFarClip(sceneId, objectId, farClip);
                             });
+                        RecordLuaApi("set_camera_far_clip", "set_camera_far_clip(sceneId, objectId, farClip)", "设置相机远裁剪面", "Camera");
 
                         // 注入相机裁剪范围设置函数
                         instance.LuaScript.Globals["set_camera_clip_range"] =
@@ -2151,6 +2276,7 @@ namespace LimitlessSquareEngine
                             {
                                 Scene.SetCameraClipRange(sceneId, objectId, nearClip, farClip);
                             });
+                        RecordLuaApi("set_camera_clip_range", "set_camera_clip_range(sceneId, objectId, nearClip, farClip)", "设置相机裁剪范围", "Camera");
 
                         // 注入相机投影类型设置函数
                         instance.LuaScript.Globals["set_camera_projection_type"] =
@@ -2158,6 +2284,7 @@ namespace LimitlessSquareEngine
                             {
                                 Scene.SetCameraProjectionType(sceneId, objectId, projectionType);
                             });
+                        RecordLuaApi("set_camera_projection_type", "set_camera_projection_type(sceneId, objectId, projectionType)", "设置相机投影类型", "Camera");
 
                         // 注入主相机标记设置函数
                         instance.LuaScript.Globals["set_camera_main"] =
@@ -2165,6 +2292,7 @@ namespace LimitlessSquareEngine
                             {
                                 Scene.SetCameraMain(sceneId, objectId, isMainCamera);
                             });
+                        RecordLuaApi("set_camera_main", "set_camera_main(sceneId, objectId, isMainCamera)", "设置主相机标记", "Camera");
 
                         // 注入相机后处理总开关设置函数
                         instance.LuaScript.Globals["set_camera_post_process_enabled"] =
@@ -2172,6 +2300,7 @@ namespace LimitlessSquareEngine
                             {
                                 Scene.SetCameraPostProcessEnabled(sceneId, objectId, enabled);
                             });
+                        RecordLuaApi("set_camera_post_process_enabled", "set_camera_post_process_enabled(sceneId, objectId, enabled)", "设置相机后处理开关", "PostProcess");
 
                         // 注入相机亮度后处理设置函数
                         instance.LuaScript.Globals["set_camera_post_brightness"] =
@@ -2179,6 +2308,7 @@ namespace LimitlessSquareEngine
                             {
                                 Scene.SetCameraPostBrightness(sceneId, objectId, enabled, value);
                             });
+                        RecordLuaApi("set_camera_post_brightness", "set_camera_post_brightness(sceneId, objectId, enabled, value)", "设置相机后处理亮度", "PostProcess");
 
                         // 注入相机对比度后处理设置函数
                         instance.LuaScript.Globals["set_camera_post_contrast"] =
@@ -2186,6 +2316,7 @@ namespace LimitlessSquareEngine
                             {
                                 Scene.SetCameraPostContrast(sceneId, objectId, enabled, value);
                             });
+                        RecordLuaApi("set_camera_post_contrast", "set_camera_post_contrast(sceneId, objectId, enabled, value)", "设置相机后处理对比度", "PostProcess");
 
                         // 注入相机饱和度后处理设置函数
                         instance.LuaScript.Globals["set_camera_post_saturation"] =
@@ -2193,6 +2324,7 @@ namespace LimitlessSquareEngine
                             {
                                 Scene.SetCameraPostSaturation(sceneId, objectId, enabled, value);
                             });
+                        RecordLuaApi("set_camera_post_saturation", "set_camera_post_saturation(sceneId, objectId, enabled, value)", "设置相机后处理饱和度", "PostProcess");
 
                         // 注入相机色相后处理设置函数
                         instance.LuaScript.Globals["set_camera_post_hue"] =
@@ -2200,6 +2332,7 @@ namespace LimitlessSquareEngine
                             {
                                 Scene.SetCameraPostHue(sceneId, objectId, enabled, degrees);
                             });
+                        RecordLuaApi("set_camera_post_hue", "set_camera_post_hue(sceneId, objectId, enabled, degrees)", "设置相机后处理色相", "PostProcess");
 
                         // 注入相机色温后处理设置函数
                         instance.LuaScript.Globals["set_camera_post_temperature"] =
@@ -2207,6 +2340,7 @@ namespace LimitlessSquareEngine
                             {
                                 Scene.SetCameraPostTemperature(sceneId, objectId, enabled, value);
                             });
+                        RecordLuaApi("set_camera_post_temperature", "set_camera_post_temperature(sceneId, objectId, enabled, value)", "设置相机后处理色温", "PostProcess");
 
                         // 注入相机泛光后处理设置函数
                         instance.LuaScript.Globals["set_camera_bloom"] =
@@ -2214,237 +2348,244 @@ namespace LimitlessSquareEngine
                             {
                                 Scene.SetCameraBloom(sceneId, objectId, enabled, threshold, softKnee, intensity, iterations, downsample, range);
                             });
+                        RecordLuaApi("set_camera_bloom", "set_camera_bloom(sceneId, objectId, enabled, threshold, softKnee, intensity, iterations, downsample, range)", "设置相机泛光效果", "PostProcess");
 
                         // 注入天空盒设置函数
                         instance.LuaScript.Globals["set_skybox"] = (Action<string, string>)((shaderName, parametersJson) =>
                         {
                             graphics.SetScreenSkybox(shaderName, parametersJson);
                         });
+                        RecordLuaApi("set_skybox", "set_skybox(shaderName, parametersJson)", "设置天空盒", "Graphics");
 
                         // 注入天空盒清除函数
                         instance.LuaScript.Globals["clear_skybox"] = (Action)(() =>
                         {
                             graphics.ClearScreenSkybox();
                         });
+                        RecordLuaApi("clear_skybox", "clear_skybox()", "清除天空盒", "Graphics");
 
-                        // 注入局部位置设置函数
+                        // Transform: set position
                         instance.LuaScript.Globals["set_local_position"] =
                             (Action<string, string, double, double, double>)((sceneId, objectId, x, y, z) =>
                             {
                                 Scene.SetLocalPosition(sceneId, objectId, new Double3(x, y, z));
                             });
+                        RecordLuaApi("set_local_position", "set_local_position(sceneId, objectId, x, y, z)", "设置局部坐标", "Transform");
 
-                        // 注入世界位置设置函数
                         instance.LuaScript.Globals["set_position"] =
                             (Action<string, string, double, double, double>)((sceneId, objectId, x, y, z) =>
                             {
                                 Scene.SetPosition(sceneId, objectId, new Double3(x, y, z));
                             });
+                        RecordLuaApi("set_position", "set_position(sceneId, objectId, x, y, z)", "设置世界坐标", "Transform");
 
-                        // 注入局部位置增量函数
                         instance.LuaScript.Globals["alter_local_position"] =
                             (Action<string, string, double, double, double>)((sceneId, objectId, x, y, z) =>
                             {
                                 Scene.AlterLocalPosition(sceneId, objectId, new Double3(x, y, z));
                             });
+                        RecordLuaApi("alter_local_position", "alter_local_position(sceneId, objectId, x, y, z)", "增量修改局部坐标", "Transform");
 
-                        // 注入世界位置增量函数
                         instance.LuaScript.Globals["alter_position"] =
                             (Action<string, string, double, double, double>)((sceneId, objectId, x, y, z) =>
                             {
                                 Scene.AlterPosition(sceneId, objectId, new Double3(x, y, z));
                             });
+                        RecordLuaApi("alter_position", "alter_position(sceneId, objectId, x, y, z)", "增量修改世界坐标", "Transform");
 
-                        // 注入局部旋转设置函数
+                        // Transform: set rotation
                         instance.LuaScript.Globals["set_local_rotation"] =
                             (Action<string, string, double, double, double>)((sceneId, objectId, x, y, z) =>
                             {
                                 Scene.SetLocalRotation(sceneId, objectId, new Double3(x, y, z));
                             });
+                        RecordLuaApi("set_local_rotation", "set_local_rotation(sceneId, objectId, x, y, z)", "设置局部旋转(欧拉角)", "Transform");
 
-                        // 注入世界旋转设置函数
                         instance.LuaScript.Globals["set_rotation"] =
                             (Action<string, string, double, double, double>)((sceneId, objectId, x, y, z) =>
                             {
                                 Scene.SetRotation(sceneId, objectId, new Double3(x, y, z));
                             });
+                        RecordLuaApi("set_rotation", "set_rotation(sceneId, objectId, x, y, z)", "设置世界旋转(欧拉角)", "Transform");
 
-                        // 注入局部旋转增量函数
                         instance.LuaScript.Globals["alter_local_rotation"] =
                             (Action<string, string, double, double, double>)((sceneId, objectId, x, y, z) =>
                             {
                                 Scene.AlterLocalRotate(sceneId, objectId, new Double3(x, y, z));
                             });
+                        RecordLuaApi("alter_local_rotation", "alter_local_rotation(sceneId, objectId, x, y, z)", "增量修改局部旋转", "Transform");
 
-                        // 注入世界旋转增量函数
                         instance.LuaScript.Globals["alter_rotation"] =
                             (Action<string, string, double, double, double>)((sceneId, objectId, x, y, z) =>
                             {
                                 Scene.AlterRotate(sceneId, objectId, new Double3(x, y, z));
                             });
+                        RecordLuaApi("alter_rotation", "alter_rotation(sceneId, objectId, x, y, z)", "增量修改世界旋转", "Transform");
 
-                        // 注入局部缩放设置函数
+                        // Transform: set scale
                         instance.LuaScript.Globals["set_local_scale"] =
                             (Action<string, string, double, double, double>)((sceneId, objectId, x, y, z) =>
                             {
                                 Scene.SetLocalScale(sceneId, objectId, new Double3(x, y, z));
                             });
+                        RecordLuaApi("set_local_scale", "set_local_scale(sceneId, objectId, x, y, z)", "设置局部缩放", "Transform");
 
-                        // 注入世界缩放设置函数
                         instance.LuaScript.Globals["set_scale"] =
                             (Action<string, string, double, double, double>)((sceneId, objectId, x, y, z) =>
                             {
                                 Scene.SetScale(sceneId, objectId, new Double3(x, y, z));
                             });
+                        RecordLuaApi("set_scale", "set_scale(sceneId, objectId, x, y, z)", "设置世界缩放", "Transform");
 
-                        // 注入局部缩放增量函数
                         instance.LuaScript.Globals["alter_local_scale"] =
                             (Action<string, string, double, double, double>)((sceneId, objectId, x, y, z) =>
                             {
                                 Scene.AlterLocalScale(sceneId, objectId, new Double3(x, y, z));
                             });
+                        RecordLuaApi("alter_local_scale", "alter_local_scale(sceneId, objectId, x, y, z)", "增量修改局部缩放", "Transform");
 
-                        // 注入世界缩放增量函数
                         instance.LuaScript.Globals["alter_scale"] =
                             (Action<string, string, double, double, double>)((sceneId, objectId, x, y, z) =>
                             {
                                 Scene.AlterScale(sceneId, objectId, new Double3(x, y, z));
                             });
+                        RecordLuaApi("alter_scale", "alter_scale(sceneId, objectId, x, y, z)", "增量修改世界缩放", "Transform");
 
-                        // 注入局部位置读取函数
+                        // Transform: get position
                         instance.LuaScript.Globals["get_local_position"] =
                             (Func<string, string, Double3>)((sceneId, objectId) =>
                             {
                                 return Scene.GetLocalPosition(sceneId, objectId);
                             });
+                        RecordLuaApi("get_local_position", "get_local_position(sceneId, objectId) -> Double3", "获取局部坐标", "Transform");
 
-                        // 注入世界位置读取函数
                         instance.LuaScript.Globals["get_position"] =
                             (Func<string, string, Double3>)((sceneId, objectId) =>
                             {
                                 return Scene.GetPosition(sceneId, objectId);
                             });
+                        RecordLuaApi("get_position", "get_position(sceneId, objectId) -> Double3", "获取世界坐标", "Transform");
 
-                        // 注入局部旋转读取函数
                         instance.LuaScript.Globals["get_local_rotation"] =
                             (Func<string, string, Double3>)((sceneId, objectId) =>
                             {
                                 return Scene.GetLocalRotation(sceneId, objectId);
                             });
+                        RecordLuaApi("get_local_rotation", "get_local_rotation(sceneId, objectId) -> Double3", "获取局部旋转", "Transform");
 
-                        // 注入世界旋转读取函数
                         instance.LuaScript.Globals["get_rotation"] =
                             (Func<string, string, Double3>)((sceneId, objectId) =>
                             {
                                 return Scene.GetRotation(sceneId, objectId);
                             });
+                        RecordLuaApi("get_rotation", "get_rotation(sceneId, objectId) -> Double3", "获取世界旋转", "Transform");
 
-                        // 注入局部缩放读取函数
                         instance.LuaScript.Globals["get_local_scale"] =
                             (Func<string, string, Double3>)((sceneId, objectId) =>
                             {
                                 return Scene.GetLocalScale(sceneId, objectId);
                             });
+                        RecordLuaApi("get_local_scale", "get_local_scale(sceneId, objectId) -> Double3", "获取局部缩放", "Transform");
 
-                        // 注入世界缩放读取函数
                         instance.LuaScript.Globals["get_scale"] =
                             (Func<string, string, Double3>)((sceneId, objectId) =>
                             {
                                 return Scene.GetScale(sceneId, objectId);
                             });
+                        RecordLuaApi("get_scale", "get_scale(sceneId, objectId) -> Double3", "获取世界缩放", "Transform");
 
-                        // 注入局部右方向读取函数
+                        // Transform: direction getters
                         instance.LuaScript.Globals["get_local_right"] =
                             (Func<string, string, Double3>)((sceneId, objectId) =>
                             {
                                 return Scene.GetLocalRight(sceneId, objectId);
                             });
+                        RecordLuaApi("get_local_right", "get_local_right(sceneId, objectId) -> Double3", "获取局部右方向", "Transform");
 
-                        // 注入局部左方向读取函数
                         instance.LuaScript.Globals["get_local_left"] =
                             (Func<string, string, Double3>)((sceneId, objectId) =>
                             {
                                 return Scene.GetLocalLeft(sceneId, objectId);
                             });
+                        RecordLuaApi("get_local_left", "get_local_left(sceneId, objectId) -> Double3", "获取局部左方向", "Transform");
 
-                        // 注入局部上方向读取函数
                         instance.LuaScript.Globals["get_local_up"] =
                             (Func<string, string, Double3>)((sceneId, objectId) =>
                             {
                                 return Scene.GetLocalUp(sceneId, objectId);
                             });
+                        RecordLuaApi("get_local_up", "get_local_up(sceneId, objectId) -> Double3", "获取局部上方向", "Transform");
 
-                        // 注入局部下方向读取函数
                         instance.LuaScript.Globals["get_local_down"] =
                             (Func<string, string, Double3>)((sceneId, objectId) =>
                             {
                                 return Scene.GetLocalDown(sceneId, objectId);
                             });
+                        RecordLuaApi("get_local_down", "get_local_down(sceneId, objectId) -> Double3", "获取局部下方向", "Transform");
 
-                        // 注入局部前方向读取函数
                         instance.LuaScript.Globals["get_local_forward"] =
                             (Func<string, string, Double3>)((sceneId, objectId) =>
                             {
                                 return Scene.GetLocalForward(sceneId, objectId);
                             });
+                        RecordLuaApi("get_local_forward", "get_local_forward(sceneId, objectId) -> Double3", "获取局部前方向", "Transform");
 
-                        // 注入局部后方向读取函数
                         instance.LuaScript.Globals["get_local_back"] =
                             (Func<string, string, Double3>)((sceneId, objectId) =>
                             {
                                 return Scene.GetLocalBack(sceneId, objectId);
                             });
+                        RecordLuaApi("get_local_back", "get_local_back(sceneId, objectId) -> Double3", "获取局部后方向", "Transform");
 
-                        // 注入世界右方向读取函数
                         instance.LuaScript.Globals["get_right"] =
                             (Func<string, string, Double3>)((sceneId, objectId) =>
                             {
                                 return Scene.GetRight(sceneId, objectId);
                             });
+                        RecordLuaApi("get_right", "get_right(sceneId, objectId) -> Double3", "获取世界右方向", "Transform");
 
-                        // 注入世界左方向读取函数
                         instance.LuaScript.Globals["get_left"] =
                             (Func<string, string, Double3>)((sceneId, objectId) =>
                             {
                                 return Scene.GetLeft(sceneId, objectId);
                             });
+                        RecordLuaApi("get_left", "get_left(sceneId, objectId) -> Double3", "获取世界左方向", "Transform");
 
-                        // 注入世界上方向读取函数
                         instance.LuaScript.Globals["get_up"] =
                             (Func<string, string, Double3>)((sceneId, objectId) =>
                             {
                                 return Scene.GetUp(sceneId, objectId);
                             });
+                        RecordLuaApi("get_up", "get_up(sceneId, objectId) -> Double3", "获取世界上方向", "Transform");
 
-                        // 注入世界下方向读取函数
                         instance.LuaScript.Globals["get_down"] =
                             (Func<string, string, Double3>)((sceneId, objectId) =>
                             {
                                 return Scene.GetDown(sceneId, objectId);
                             });
+                        RecordLuaApi("get_down", "get_down(sceneId, objectId) -> Double3", "获取世界下方向", "Transform");
 
-                        // 注入世界前方向读取函数
                         instance.LuaScript.Globals["get_forward"] =
                             (Func<string, string, Double3>)((sceneId, objectId) =>
                             {
                                 return Scene.GetForward(sceneId, objectId);
                             });
+                        RecordLuaApi("get_forward", "get_forward(sceneId, objectId) -> Double3", "获取世界前方向", "Transform");
 
-                        // 注入世界后方向读取函数
                         instance.LuaScript.Globals["get_back"] =
                             (Func<string, string, Double3>)((sceneId, objectId) =>
                             {
                                 return Scene.GetBack(sceneId, objectId);
                             });
+                        RecordLuaApi("get_back", "get_back(sceneId, objectId) -> Double3", "获取世界后方向", "Transform");
 
-                        // 注入父节点读取函数
                         instance.LuaScript.Globals["get_parent_id"] =
                             (Func<string, string, string?>)((sceneId, objectId) =>
                             {
                                 return Scene.GetParentId(sceneId, objectId);
                             });
+                        RecordLuaApi("get_parent_id", "get_parent_id(sceneId, objectId) -> string", "获取父节点ID", "Scene");
 
-                        // 注入子节点读取函数
                         instance.LuaScript.Globals["get_child_ids"] =
                             (Func<string, string, Table>)((sceneId, objectId) =>
                             {
@@ -2456,15 +2597,15 @@ namespace LimitlessSquareEngine
 
                                 return table;
                             });
+                        RecordLuaApi("get_child_ids", "get_child_ids(sceneId, objectId) -> table", "获取子节点ID列表", "Scene");
 
-                        // 注入场景对象计数函数
                         instance.LuaScript.Globals["get_object_count"] =
                             (Func<string, int>)((sceneId) =>
                             {
                                 return Scene.GetObjectCount(sceneId);
                             });
+                        RecordLuaApi("get_object_count", "get_object_count(sceneId) -> int", "获取场景对象数量", "Scene");
 
-                        // 注入场景对象ID列表函数
                         instance.LuaScript.Globals["get_object_ids"] =
                             (Func<string, Table>)((sceneId) =>
                             {
@@ -2474,9 +2615,11 @@ namespace LimitlessSquareEngine
                                     table.Append(DynValue.NewString(id));
                                 return table;
                             });
+                        RecordLuaApi("get_object_ids", "get_object_ids(sceneId) -> table", "获取场景对象ID列表", "Scene");
 
                         // 注入输入系统
                         instance.LuaScript.Globals["input"] = _input;
+                        RecordLuaApi("input", "input", "输入系统对象", "Input");
 
                         // 执行脚本文件
                         instance.LuaScript.DoFile(file);

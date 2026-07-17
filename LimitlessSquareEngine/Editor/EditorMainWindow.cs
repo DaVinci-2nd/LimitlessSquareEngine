@@ -7660,6 +7660,9 @@ void main()
             textMate.SetGrammar(registryOptions.GetScopeByLanguageId(
                 registryOptions.GetLanguageByExtension(".lua").Id));
 
+            InitLuaCompletion(editor);
+            InitLuaDiagnostics(editor);
+
             editorRef = editor;
             return editor;
         }

@@ -4,7 +4,12 @@ using Avalonia.Controls.Primitives;
 using Avalonia.Input;
 using Avalonia.Layout;
 using Avalonia.Media;
+using Avalonia.Threading;
 using AvaloniaEdit;
+using AvaloniaEdit.CodeCompletion;
+using AvaloniaEdit.Document;
+using AvaloniaEdit.Editing;
+using AvaloniaEdit.Rendering;
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -1110,6 +1115,336 @@ namespace LimitlessSquareEngine.Editor
         private bool IsLuaSyncingToSource()
         {
             return _luaIsSyncingToSource;
+        }
+
+        // ========================================
+        // Lua Code Completion
+        // ========================================
+
+        private CompletionWindow? _luaCompletionWindow;
+        private EditorHostBridge.LuaApiMetadata[] _luaApiMetaCache = Array.Empty<EditorHostBridge.LuaApiMetadata>();
+        private static readonly string[] LuaKeywords =
+        {
+            "and", "break", "do", "else", "elseif", "end",
+            "false", "for", "function", "goto", "if", "in",
+            "local", "nil", "not", "or", "repeat", "return",
+            "then", "true", "until", "while"
+        };
+
+        private void InitLuaCompletion(TextEditor editor)
+        {
+            _luaApiMetaCache = EditorHostBridge.GetLuaApiMetadata();
+
+            editor.TextArea.TextEntered += OnLuaTextEntered;
+            editor.TextArea.KeyDown += OnLuaKeyDown;
+        }
+
+        private void OnLuaKeyDown(object? sender, KeyEventArgs e)
+        {
+            if (e.Key == Key.Space && e.KeyModifiers.HasFlag(KeyModifiers.Control))
+            {
+                e.Handled = true;
+                ShowLuaCompletionWindow();
+            }
+        }
+
+        private void OnLuaTextEntered(object? sender, TextInputEventArgs e)
+        {
+            if (string.IsNullOrEmpty(e.Text))
+                return;
+
+            if (char.IsLetterOrDigit(e.Text[0]) || e.Text[0] == '_')
+            {
+                if (_luaCompletionWindow != null)
+                    return;
+
+                TextArea? textArea = sender as TextArea;
+                if (textArea == null)
+                    return;
+
+                string currentWord = GetCurrentWord(textArea);
+                if (currentWord.Length >= 2)
+                {
+                    ShowLuaCompletionWindow();
+                }
+            }
+        }
+
+        private void ShowLuaCompletionWindow()
+        {
+            TextArea? textArea = _luaSourceEditor?.TextArea;
+            if (textArea == null)
+                return;
+
+            _luaCompletionWindow = new CompletionWindow(textArea);
+            _luaCompletionWindow.CloseWhenCaretAtBeginning = true;
+            _luaCompletionWindow.Closed += (_, _) => _luaCompletionWindow = null;
+
+            var data = _luaCompletionWindow.CompletionList.CompletionData;
+            foreach (var item in BuildLuaCompletionItems())
+                data.Add(item);
+
+            if (data.Count > 0)
+                _luaCompletionWindow.Show();
+            else
+                _luaCompletionWindow = null;
+        }
+
+        private List<LuaCompletionItem> BuildLuaCompletionItems()
+        {
+            var items = new List<LuaCompletionItem>();
+
+            foreach (string kw in LuaKeywords)
+                items.Add(new LuaCompletionItem(kw, kw, "Lua关键字", "Keyword", 10));
+
+            foreach (var meta in _luaApiMetaCache)
+            {
+                int priority = 5;
+                items.Add(new LuaCompletionItem(meta.Name, meta.Signature, meta.Description, meta.Category, priority));
+            }
+
+            return items;
+        }
+
+        private static string GetCurrentWord(TextArea textArea)
+        {
+            int caretOffset = textArea.Caret.Offset;
+            TextDocument document = textArea.Document;
+            if (document == null || caretOffset <= 0)
+                return string.Empty;
+
+            int start = caretOffset;
+            while (start > 0)
+            {
+                char c = document.GetCharAt(start - 1);
+                if (!char.IsLetterOrDigit(c) && c != '_')
+                    break;
+                start--;
+            }
+
+            if (start >= caretOffset)
+                return string.Empty;
+
+            return document.GetText(start, caretOffset - start);
+        }
+
+        private sealed class LuaCompletionItem : ICompletionData
+        {
+            public string Text { get; }
+            public object Content { get; }
+            public object Description { get; }
+            public IImage? Image => null;
+            public double Priority { get; }
+
+            private readonly string _insertText;
+
+            public LuaCompletionItem(string name, string signature, string description, string category, double priority)
+            {
+                Text = name;
+                _insertText = name;
+                Priority = priority;
+                Description = $"{signature}\n{category}\n{description}";
+
+                var stack = new StackPanel { Orientation = Orientation.Horizontal };
+                var nameBlock = new TextBlock
+                {
+                    Text = name,
+                    FontWeight = FontWeight.Bold,
+                    Foreground = Brushes.White
+                };
+                var sigBlock = new TextBlock
+                {
+                    Text = "  " + signature,
+                    Foreground = Brushes.Gray,
+                    FontSize = 12
+                };
+                stack.Children.Add(nameBlock);
+                stack.Children.Add(sigBlock);
+                Content = stack;
+            }
+
+            public void Complete(TextArea textArea, ISegment completionSegment, EventArgs insertionRequestEventArgs)
+            {
+                textArea.Document.Replace(completionSegment, _insertText);
+            }
+        }
+
+        // ========================================
+        // Lua Diagnostics (Error Squiggly Lines)
+        // ========================================
+
+        private sealed class LuaDiagnosticsState
+        {
+            public TextEditor Editor = null!;
+            public SquiggleRenderer Renderer = null!;
+            public System.Timers.Timer? DebounceTimer;
+            public string LastCheckedText = string.Empty;
+        }
+
+        private readonly Dictionary<TextEditor, LuaDiagnosticsState> _luaDiagnosticsStates = new();
+
+        private void InitLuaDiagnostics(TextEditor editor)
+        {
+            var state = new LuaDiagnosticsState
+            {
+                Editor = editor,
+                Renderer = new SquiggleRenderer()
+            };
+
+            editor.TextArea.TextView.BackgroundRenderers.Add(state.Renderer);
+
+            state.DebounceTimer = new System.Timers.Timer(400);
+            state.DebounceTimer.AutoReset = false;
+            state.DebounceTimer.Elapsed += (_, _) =>
+            {
+                Avalonia.Threading.Dispatcher.UIThread.Post(() => CheckLuaSyntaxForEditor(editor));
+            };
+
+            editor.TextChanged += (_, _) =>
+            {
+                if (_luaDiagnosticsStates.TryGetValue(editor, out var s))
+                {
+                    s.DebounceTimer?.Stop();
+                    s.DebounceTimer?.Start();
+                }
+            };
+
+            _luaDiagnosticsStates[editor] = state;
+            CheckLuaSyntaxForEditor(editor);
+        }
+
+        private void CheckLuaSyntaxForEditor(TextEditor editor)
+        {
+            if (!_luaDiagnosticsStates.TryGetValue(editor, out var state))
+                return;
+
+            string text = editor.Text;
+            if (text == state.LastCheckedText)
+                return;
+
+            state.LastCheckedText = text;
+
+            var errors = EditorHostBridge.CheckLuaSyntax(text);
+            state.Renderer.SetErrors(errors);
+            editor.TextArea.TextView.InvalidateLayer(KnownLayer.Selection);
+        }
+
+        private sealed class SquiggleRenderer : IBackgroundRenderer
+        {
+            public KnownLayer Layer => KnownLayer.Selection;
+
+            private readonly List<ErrorMarker> _errors = new();
+
+            public void SetErrors(EditorHostBridge.LuaSyntaxError[] errors)
+            {
+                _errors.Clear();
+                foreach (var e in errors)
+                {
+                    _errors.Add(new ErrorMarker
+                    {
+                        Line = e.Line,
+                        Column = e.Column,
+                        Message = e.Message
+                    });
+                }
+            }
+
+            public void Draw(TextView textView, DrawingContext drawingContext)
+            {
+                if (_errors.Count == 0)
+                    return;
+
+                var document = textView.Document;
+                if (document == null)
+                    return;
+
+                var pen = new Pen(Brushes.Red, 1.2, null, PenLineCap.Round, PenLineJoin.Round);
+
+                foreach (var error in _errors)
+                {
+                    var line = document.GetLineByNumber(Math.Max(1, error.Line));
+                    if (line == null)
+                        continue;
+
+                    int startOffset = line.Offset + Math.Min(error.Column - 1, line.Length - 1);
+                    int endOffset = startOffset;
+
+                    char c = document.GetCharAt(startOffset);
+                    while (endOffset + 1 < line.EndOffset && IsWordChar(document.GetCharAt(endOffset + 1)))
+                        endOffset++;
+
+                    if (!IsWordChar(c) && startOffset < line.EndOffset - 1)
+                    {
+                        startOffset++;
+                        endOffset = startOffset;
+                        while (endOffset + 1 < line.EndOffset && IsWordChar(document.GetCharAt(endOffset + 1)))
+                            endOffset++;
+                    }
+
+                    if (endOffset < startOffset)
+                        endOffset = startOffset;
+
+                    if (endOffset - startOffset < 1)
+                    {
+                        if (endOffset + 1 < line.EndOffset)
+                            endOffset++;
+                        else if (startOffset > line.Offset)
+                            startOffset--;
+                    }
+
+                    var segment = new SimpleSegment(startOffset, Math.Max(1, endOffset - startOffset + 1));
+                    var builder = new BackgroundGeometryBuilder
+                    {
+                        CornerRadius = 0,
+                        AlignToWholePixels = true
+                    };
+                    builder.AddSegment(textView, segment);
+
+                    var geometry = builder.CreateGeometry();
+                    if (geometry != null)
+                    {
+                        double offsetY = 1.5;
+                        double amplitude = 1.5;
+                        double period = 3.0;
+
+                        foreach (var rect in BackgroundGeometryBuilder.GetRectsForSegment(textView, segment))
+                        {
+                            double y = rect.Bottom + offsetY;
+                            double startX = rect.Left;
+                            double endX = rect.Right;
+
+                            var streamGeometry = new StreamGeometry();
+                            using (var ctx = streamGeometry.Open())
+                            {
+                                ctx.BeginFigure(new Point(startX, y), false);
+                                double x = startX;
+                                bool up = true;
+                                while (x < endX)
+                                {
+                                    double nextX = Math.Min(x + period / 2.0, endX);
+                                    double waveY = y + (up ? amplitude : -amplitude);
+                                    ctx.LineTo(new Point(nextX, waveY));
+                                    up = !up;
+                                    x = nextX;
+                                }
+                            }
+                            drawingContext.DrawGeometry(null, pen, streamGeometry);
+                        }
+                    }
+                }
+            }
+
+            private static bool IsWordChar(char c)
+            {
+                return char.IsLetterOrDigit(c) || c == '_';
+            }
+
+            private sealed class ErrorMarker
+            {
+                public int Line;
+                public int Column;
+                public string Message = string.Empty;
+            }
         }
     }
 }

@@ -1,0 +1,10 @@
+{
+  "plugin": [
+    [
+      "opencode-visual-cache@latest",
+      {
+        "enabled": true
+      }
+    ]
+  ]
+}

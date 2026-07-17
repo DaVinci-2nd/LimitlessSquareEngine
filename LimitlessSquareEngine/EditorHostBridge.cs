@@ -38,6 +38,8 @@ namespace LimitlessSquareEngine
         private static Func<Matrix4x4>? _getCameraProjection;
         private static Action<int>? _setGizmoHover;
         private static Action<bool, int>? _setGizmoDrag;
+        private static Func<string, LuaSyntaxError[]>? _checkLuaSyntax;
+        private static Func<LuaApiMetadata[]>? _getLuaApiMetadata;
 
         internal static void Bind(
             Func<EditorHostBootstrapInfo> bootstrapInfoProvider,
@@ -67,7 +69,9 @@ namespace LimitlessSquareEngine
             Func<Matrix4x4> getCameraView,
             Func<Matrix4x4> getCameraProjection,
             Action<int> setGizmoHover,
-            Action<bool, int> setGizmoDrag)
+            Action<bool, int> setGizmoDrag,
+            Func<string, LuaSyntaxError[]> checkLuaSyntax,
+            Func<LuaApiMetadata[]> getLuaApiMetadata)
         {
             _bootstrapInfoProvider = bootstrapInfoProvider;
             _setRenderWindowVisible = setRenderWindowVisible;
@@ -97,6 +101,8 @@ namespace LimitlessSquareEngine
             _getCameraProjection = getCameraProjection;
             _setGizmoHover = setGizmoHover;
             _setGizmoDrag = setGizmoDrag;
+            _checkLuaSyntax = checkLuaSyntax;
+            _getLuaApiMetadata = getLuaApiMetadata;
         }
 
         internal static void Unbind()
@@ -129,6 +135,8 @@ namespace LimitlessSquareEngine
             _getCameraProjection = null;
             _setGizmoHover = null;
             _setGizmoDrag = null;
+            _checkLuaSyntax = null;
+            _getLuaApiMetadata = null;
         }
 
         public static void SetSceneObjectLocalPosition(string sceneId, string objectId, Double3 value)
@@ -420,6 +428,38 @@ namespace LimitlessSquareEngine
                 throw new InvalidOperationException("Editor host bridge is not bound.");
 
             _setGizmoDrag(dragging, activeAxis);
+        }
+
+        public static LuaSyntaxError[] CheckLuaSyntax(string sourceCode)
+        {
+            if (_checkLuaSyntax == null)
+                return Array.Empty<LuaSyntaxError>();
+
+            return _checkLuaSyntax(sourceCode);
+        }
+
+        public static LuaApiMetadata[] GetLuaApiMetadata()
+        {
+            if (_getLuaApiMetadata == null)
+                return Array.Empty<LuaApiMetadata>();
+
+            return _getLuaApiMetadata();
+        }
+
+        public readonly struct LuaApiMetadata
+        {
+            public string Name { get; init; }
+            public string Signature { get; init; }
+            public string Description { get; init; }
+            public string Category { get; init; }
+        }
+
+        public readonly struct LuaSyntaxError
+        {
+            public int Line { get; init; }
+            public int Column { get; init; }
+            public string Message { get; init; }
+            public bool IsPrematureStreamTermination { get; init; }
         }
     }
 }
