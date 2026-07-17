@@ -15,6 +15,7 @@ using System.Numerics;
 using System.Reflection;
 using System.Runtime.Loader;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using System.Text.Json.Serialization;
 
 namespace LimitlessSquareEngine
@@ -215,6 +216,14 @@ namespace LimitlessSquareEngine
             if (string.IsNullOrEmpty(decoratedMessage))
                 return;
 
+            var match = Regex.Match(decoratedMessage, @"\((\d+),(\d+)(?:-(\d+))?\)");
+            if (match.Success)
+            {
+                int.TryParse(match.Groups[1].Value, out line);
+                int.TryParse(match.Groups[2].Value, out column);
+                return;
+            }
+
             int firstColon = decoratedMessage.IndexOf(':');
             if (firstColon < 0)
                 return;
@@ -223,15 +232,8 @@ namespace LimitlessSquareEngine
             if (secondColon < 0)
                 return;
 
-            int thirdColon = decoratedMessage.IndexOf(':', secondColon + 1);
-            if (thirdColon < 0)
-                return;
-
-            string lineStr = decoratedMessage.Substring(secondColon + 1, thirdColon - secondColon - 1);
-            string colStr = decoratedMessage.Substring(thirdColon + 1).Split(':')[0];
-
+            string lineStr = decoratedMessage.Substring(firstColon + 1, secondColon - firstColon - 1);
             int.TryParse(lineStr, out line);
-            int.TryParse(colStr, out column);
         }
 
         // 主窗口实例

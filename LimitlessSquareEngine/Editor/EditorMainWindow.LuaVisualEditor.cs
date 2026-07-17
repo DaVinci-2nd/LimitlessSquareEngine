@@ -1122,7 +1122,7 @@ namespace LimitlessSquareEngine.Editor
         // ========================================
 
         private CompletionWindow? _luaCompletionWindow;
-        private EditorHostBridge.LuaApiMetadata[] _luaApiMetaCache = Array.Empty<EditorHostBridge.LuaApiMetadata>();
+
         private static readonly string[] LuaKeywords =
         {
             "and", "break", "do", "else", "elseif", "end",
@@ -1131,10 +1131,134 @@ namespace LimitlessSquareEngine.Editor
             "then", "true", "until", "while"
         };
 
+        private static readonly (string Name, string Signature, string Description, string Category)[] LuaStdLibEntries =
+        {
+            // Basic
+            ("assert", "assert(v [, message])", "断言，失败则报错", "Basic"),
+            ("error", "error(message [, level])", "抛出错误", "Basic"),
+            ("getmetatable", "getmetatable(obj) -> table", "获取元表", "Basic"),
+            ("setmetatable", "setmetatable(table, metatable) -> table", "设置元表", "Basic"),
+            ("ipairs", "ipairs(t) -> iter", "有序遍历数组", "Basic"),
+            ("pairs", "pairs(t) -> iter", "遍历表", "Basic"),
+            ("next", "next(table [, index]) -> key, value", "获取表下一个键值对", "Basic"),
+            ("pcall", "pcall(func, ...) -> ok, ...", "受保护调用", "Basic"),
+            ("xpcall", "xpcall(func, msgh, ...) -> ok, ...", "带错误处理的受保护调用", "Basic"),
+            ("rawequal", "rawequal(v1, v2) -> bool", "原始相等比较", "Basic"),
+            ("rawget", "rawget(table, index) -> value", "原始表读取", "Basic"),
+            ("rawset", "rawset(table, index, value)", "原始表写入", "Basic"),
+            ("rawlen", "rawlen(obj) -> number", "原始长度", "Basic"),
+            ("select", "select(index, ...) -> ...", "选择可变参数", "Basic"),
+            ("tonumber", "tonumber(e [, base]) -> number", "转换为数字", "Basic"),
+            ("tostring", "tostring(v) -> string", "转换为字符串", "Basic"),
+            ("type", "type(v) -> string", "获取值类型", "Basic"),
+            ("print", "print(...)", "输出文本", "Basic"),
+            ("_G", "_G", "全局表", "Basic"),
+            ("_VERSION", "_VERSION", "Lua版本字符串", "Basic"),
+
+            // table
+            ("table.insert", "table.insert(t, [pos,] value)", "插入元素", "Table"),
+            ("table.remove", "table.remove(t [, pos]) -> value", "移除元素", "Table"),
+            ("table.sort", "table.sort(t [, comp])", "排序", "Table"),
+            ("table.concat", "table.concat(t [, sep [, i [, j]]]) -> string", "连接为字符串", "Table"),
+            ("table.pack", "table.pack(...) -> table", "打包为表", "Table"),
+            ("table.unpack", "table.unpack(t [, i [, j]]) -> ...", "解包表", "Table"),
+
+            // math
+            ("math.abs", "math.abs(x) -> number", "绝对值", "Math"),
+            ("math.acos", "math.acos(x) -> number", "反余弦", "Math"),
+            ("math.asin", "math.asin(x) -> number", "反正弦", "Math"),
+            ("math.atan", "math.atan(y [, x]) -> number", "反正切", "Math"),
+            ("math.ceil", "math.ceil(x) -> number", "向上取整", "Math"),
+            ("math.cos", "math.cos(x) -> number", "余弦", "Math"),
+            ("math.cosh", "math.cosh(x) -> number", "双曲余弦", "Math"),
+            ("math.deg", "math.deg(x) -> number", "弧度转角度", "Math"),
+            ("math.exp", "math.exp(x) -> number", "指数函数", "Math"),
+            ("math.floor", "math.floor(x) -> number", "向下取整", "Math"),
+            ("math.fmod", "math.fmod(x, y) -> number", "取模(浮点)", "Math"),
+            ("math.huge", "math.huge", "无穷大", "Math"),
+            ("math.log", "math.log(x [, base]) -> number", "对数", "Math"),
+            ("math.max", "math.max(x, ...) -> number", "最大值", "Math"),
+            ("math.min", "math.min(x, ...) -> number", "最小值", "Math"),
+            ("math.modf", "math.modf(x) -> int, frac", "取整和小数部分", "Math"),
+            ("math.pi", "math.pi", "圆周率", "Math"),
+            ("math.pow", "math.pow(x, y) -> number", "幂运算", "Math"),
+            ("math.rad", "math.rad(x) -> number", "角度转弧度", "Math"),
+            ("math.random", "math.random([m [, n]]) -> number", "随机数", "Math"),
+            ("math.randomseed", "math.randomseed(x)", "设置随机种子", "Math"),
+            ("math.sin", "math.sin(x) -> number", "正弦", "Math"),
+            ("math.sinh", "math.sinh(x) -> number", "双曲正弦", "Math"),
+            ("math.sqrt", "math.sqrt(x) -> number", "平方根", "Math"),
+            ("math.tan", "math.tan(x) -> number", "正切", "Math"),
+            ("math.tanh", "math.tanh(x) -> number", "双曲正切", "Math"),
+
+            // string
+            ("string.byte", "string.byte(s [, i [, j]]) -> ...", "字符转字节码", "String"),
+            ("string.char", "string.char(...) -> string", "字节码转字符", "String"),
+            ("string.find", "string.find(s, pattern [, init [, plain]]) -> start, end", "查找模式", "String"),
+            ("string.format", "string.format(formatstring, ...) -> string", "格式化字符串", "String"),
+            ("string.gmatch", "string.gmatch(s, pattern) -> iter", "全局模式匹配迭代器", "String"),
+            ("string.gsub", "string.gsub(s, pattern, repl [, n]) -> string, count", "全局替换", "String"),
+            ("string.len", "string.len(s) -> number", "字符串长度", "String"),
+            ("string.lower", "string.lower(s) -> string", "转小写", "String"),
+            ("string.match", "string.match(s, pattern [, init]) -> ...", "模式匹配", "String"),
+            ("string.rep", "string.rep(s, n [, sep]) -> string", "重复字符串", "String"),
+            ("string.reverse", "string.reverse(s) -> string", "反转字符串", "String"),
+            ("string.sub", "string.sub(s, i [, j]) -> string", "截取子串", "String"),
+            ("string.upper", "string.upper(s) -> string", "转大写", "String"),
+
+            // coroutine
+            ("coroutine.create", "coroutine.create(func) -> thread", "创建协程", "Coroutine"),
+            ("coroutine.resume", "coroutine.resume(co, ...) -> ok, ...", "恢复协程", "Coroutine"),
+            ("coroutine.running", "coroutine.running() -> thread, ismain", "获取当前协程", "Coroutine"),
+            ("coroutine.status", "coroutine.status(co) -> string", "获取协程状态", "Coroutine"),
+            ("coroutine.wrap", "coroutine.wrap(func) -> func", "包装函数为协程", "Coroutine"),
+            ("coroutine.yield", "coroutine.yield(...)", "挂起协程", "Coroutine"),
+
+            // bit32
+            ("bit32.band", "bit32.band(...) -> number", "按位与", "Bit32"),
+            ("bit32.bor", "bit32.bor(...) -> number", "按位或", "Bit32"),
+            ("bit32.bxor", "bit32.bxor(...) -> number", "按位异或", "Bit32"),
+            ("bit32.bnot", "bit32.bnot(a) -> number", "按位取反", "Bit32"),
+            ("bit32.lshift", "bit32.lshift(a, b) -> number", "左移", "Bit32"),
+            ("bit32.rshift", "bit32.rshift(a, b) -> number", "逻辑右移", "Bit32"),
+            ("bit32.arshift", "bit32.arshift(a, b) -> number", "算术右移", "Bit32"),
+            ("bit32.lrotate", "bit32.lrotate(a, b) -> number", "循环左移", "Bit32"),
+            ("bit32.rrotate", "bit32.rrotate(a, b) -> number", "循环右移", "Bit32"),
+            ("bit32.extract", "bit32.extract(a, field [, width]) -> number", "提取位字段", "Bit32"),
+            ("bit32.replace", "bit32.replace(a, v, field [, width]) -> number", "替换位字段", "Bit32"),
+            ("bit32.btest", "bit32.btest(...) -> bool", "按位测试", "Bit32"),
+        };
+
+        private static readonly (string Name, string Signature, string Description, string Category, string InsertText)[] LuaSnippetEntries =
+        {
+            ("if", "if ... then ... end", "条件语句", "Snippet",
+                "if ${1:condition} then\n\t$0\nend"),
+            ("ife", "if ... then ... else ... end", "条件+否则语句", "Snippet",
+                "if ${1:condition} then\n\t$2\nelse\n\t$0\nend"),
+            ("ifeif", "if ... then ... elseif ... end", "条件+否则如果语句", "Snippet",
+                "if ${1:condition} then\n\t$2\nelseif ${3:condition} then\n\t$0\nend"),
+            ("fori", "for i = start, end do ... end", "数值循环", "Snippet",
+                "for ${1:i} = ${2:1}, ${3:10} do\n\t$0\nend"),
+            ("forp", "for k, v in pairs(t) do ... end", "键值遍历", "Snippet",
+                "for ${1:k}, ${2:v} in pairs(${3:t}) do\n\t$0\nend"),
+            ("forip", "for i, v in ipairs(t) do ... end", "数组遍历", "Snippet",
+                "for ${1:i}, ${2:v} in ipairs(${3:t}) do\n\t$0\nend"),
+            ("while", "while ... do ... end", "while 循环", "Snippet",
+                "while ${1:condition} do\n\t$0\nend"),
+            ("repeat", "repeat ... until ...", "repeat 循环", "Snippet",
+                "repeat\n\t$0\nuntil ${1:condition}"),
+            ("func", "function name(...) ... end", "函数定义", "Snippet",
+                "function ${1:name}(${2:...})\n\t$0\nend"),
+            ("lfunc", "local function name(...) ... end", "局部函数", "Snippet",
+                "local function ${1:name}(${2:...})\n\t$0\nend"),
+            ("lt", "local t = {}", "局部空表", "Snippet",
+                "local ${1:t} = {}"),
+            ("co", "coroutine.create(func)", "创建协程", "Snippet",
+                "local ${1:co} = coroutine.create(function()\n\t$0\nend)"),
+        };
+
         private void InitLuaCompletion(TextEditor editor)
         {
-            _luaApiMetaCache = EditorHostBridge.GetLuaApiMetadata();
-
             editor.TextArea.TextEntered += OnLuaTextEntered;
             editor.TextArea.KeyDown += OnLuaKeyDown;
         }
@@ -1162,8 +1286,8 @@ namespace LimitlessSquareEngine.Editor
                 if (textArea == null)
                     return;
 
-                string currentWord = GetCurrentWord(textArea);
-                if (currentWord.Length >= 2)
+                var (currentWord, _) = GetCurrentWord(textArea);
+                if (currentWord.Length >= 1)
                 {
                     ShowLuaCompletionWindow();
                 }
@@ -1176,9 +1300,13 @@ namespace LimitlessSquareEngine.Editor
             if (textArea == null)
                 return;
 
+            var (_, wordStartOffset) = GetCurrentWord(textArea);
+
             _luaCompletionWindow = new CompletionWindow(textArea);
             _luaCompletionWindow.CloseWhenCaretAtBeginning = true;
             _luaCompletionWindow.Closed += (_, _) => _luaCompletionWindow = null;
+            _luaCompletionWindow.StartOffset = wordStartOffset;
+            _luaCompletionWindow.EndOffset = textArea.Caret.Offset;
 
             var data = _luaCompletionWindow.CompletionList.CompletionData;
             foreach (var item in BuildLuaCompletionItems())
@@ -1193,25 +1321,81 @@ namespace LimitlessSquareEngine.Editor
         private List<LuaCompletionItem> BuildLuaCompletionItems()
         {
             var items = new List<LuaCompletionItem>();
+            var seen = new HashSet<string>();
 
+            // 1. Lua keywords (priority 10)
             foreach (string kw in LuaKeywords)
-                items.Add(new LuaCompletionItem(kw, kw, "Lua关键字", "Keyword", 10));
-
-            foreach (var meta in _luaApiMetaCache)
             {
-                int priority = 5;
-                items.Add(new LuaCompletionItem(meta.Name, meta.Signature, meta.Description, meta.Category, priority));
+                if (seen.Add(kw))
+                    items.Add(new LuaCompletionItem(kw, kw, "Lua关键字", "Keyword", 10));
+            }
+
+            // 2. Built-in engine APIs - dynamically synced from EditorHostBridge (priority 5)
+            EditorHostBridge.LuaApiMetadata[] apiMeta = EditorHostBridge.GetLuaApiMetadata();
+            foreach (var meta in apiMeta)
+            {
+                if (seen.Add(meta.Name))
+                    items.Add(new LuaCompletionItem(meta.Name, meta.Signature, meta.Description, meta.Category, 5));
+            }
+
+            // 3. Lua standard library (priority 8)
+            foreach (var (name, signature, description, category) in LuaStdLibEntries)
+            {
+                if (seen.Add(name))
+                    items.Add(new LuaCompletionItem(name, signature, description, category, 8));
+            }
+
+            // 4. Code snippets (priority 9)
+            foreach (var (name, signature, description, category, insertText) in LuaSnippetEntries)
+            {
+                if (seen.Add(name))
+                    items.Add(new LuaCompletionItem(name, signature, description, category, 9, insertText));
+            }
+
+            // 5. Document-local variables and functions (priority 6)
+            string documentText = _luaSourceEditor?.Text ?? "";
+            foreach (var (name, kind) in ParseDocumentLocals(documentText))
+            {
+                if (seen.Add(name))
+                {
+                    string sig = kind == "function" ? $"local {name}(...)" : $"local {name}";
+                    items.Add(new LuaCompletionItem(name, sig, kind == "function" ? "本地函数" : "本地变量", "Local", 6));
+                }
             }
 
             return items;
         }
 
-        private static string GetCurrentWord(TextArea textArea)
+        private static List<(string Name, string Kind)> ParseDocumentLocals(string text)
+        {
+            var result = new List<(string Name, string Kind)>();
+            if (string.IsNullOrWhiteSpace(text))
+                return result;
+
+            foreach (string line in text.Split('\n'))
+            {
+                string trimmed = line.Trim();
+                var funcMatch = Regex.Match(trimmed, @"^local\s+function\s+(\w+)");
+                if (funcMatch.Success)
+                {
+                    result.Add((funcMatch.Groups[1].Value, "function"));
+                    continue;
+                }
+
+                var varMatch = Regex.Match(trimmed, @"^local\s+(\w+)");
+                if (varMatch.Success)
+                    result.Add((varMatch.Groups[1].Value, "variable"));
+            }
+
+            return result;
+        }
+
+        private static (string Word, int StartOffset) GetCurrentWord(TextArea textArea)
         {
             int caretOffset = textArea.Caret.Offset;
             TextDocument document = textArea.Document;
             if (document == null || caretOffset <= 0)
-                return string.Empty;
+                return (string.Empty, caretOffset);
 
             int start = caretOffset;
             while (start > 0)
@@ -1223,9 +1407,9 @@ namespace LimitlessSquareEngine.Editor
             }
 
             if (start >= caretOffset)
-                return string.Empty;
+                return (string.Empty, caretOffset);
 
-            return document.GetText(start, caretOffset - start);
+            return (document.GetText(start, caretOffset - start), start);
         }
 
         private sealed class LuaCompletionItem : ICompletionData
@@ -1238,10 +1422,10 @@ namespace LimitlessSquareEngine.Editor
 
             private readonly string _insertText;
 
-            public LuaCompletionItem(string name, string signature, string description, string category, double priority)
+            public LuaCompletionItem(string name, string signature, string description, string category, double priority, string? insertText = null)
             {
                 Text = name;
-                _insertText = name;
+                _insertText = insertText ?? name;
                 Priority = priority;
                 Description = $"{signature}\n{category}\n{description}";
 
@@ -1366,7 +1550,7 @@ namespace LimitlessSquareEngine.Editor
                     if (line == null)
                         continue;
 
-                    int startOffset = line.Offset + Math.Min(error.Column - 1, line.Length - 1);
+                    int startOffset = line.Offset + Math.Max(0, Math.Min(error.Column - 1, line.Length - 1));
                     int endOffset = startOffset;
 
                     char c = document.GetCharAt(startOffset);
