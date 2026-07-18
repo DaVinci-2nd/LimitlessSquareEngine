@@ -2624,20 +2624,27 @@ namespace LimitlessSquareEngine
                         RecordLuaApi("input", "input", "输入系统对象", "Input");
 
                         // 执行脚本文件
-                        instance.LuaScript.DoFile(file);
+                        try
+                        {
+                            instance.LuaScript.DoFile(file);
 
-                        // 缓存init
-                        DynValue initFunc = instance.LuaScript.Globals.Get("init");
-                        if (initFunc?.Type == DataType.Function)
-                            instance.InitFunction = initFunc;
+                            // 缓存init
+                            DynValue initFunc = instance.LuaScript.Globals.Get("init");
+                            if (initFunc?.Type == DataType.Function)
+                                instance.InitFunction = initFunc;
 
-                        // 缓存loop函数
-                        DynValue loopFunc = instance.LuaScript.Globals.Get("loop");
-                        if (loopFunc?.Type == DataType.Function)
-                            instance.LoopFunction = loopFunc;
+                            // 缓存loop函数
+                            DynValue loopFunc = instance.LuaScript.Globals.Get("loop");
+                            if (loopFunc?.Type == DataType.Function)
+                                instance.LoopFunction = loopFunc;
 
-                        _luaScriptInstances.Add(instance);
-                        Console.WriteLine($"[i] Loaded script: {file}");
+                            _luaScriptInstances.Add(instance);
+                            Console.WriteLine($"[i] Loaded script: {file}");
+                        }
+                        catch (MoonSharp.Interpreter.InterpreterException ex)
+                        {
+                            Console.WriteLine($"[X] Failed to load script '{file}': {ex.DecoratedMessage}");
+                        }
                     }
                 }
 

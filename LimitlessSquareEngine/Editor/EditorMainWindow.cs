@@ -3948,11 +3948,13 @@ namespace LimitlessSquareEngine.Editor
             MenuItem newItem = new MenuItem { Header = "新建" };
             MenuItem openItem = new MenuItem { Header = "打开" };
             _saveSceneMenuItem = new MenuItem { Header = "保存", IsEnabled = false };
+            MenuItem distributeItem = new MenuItem { Header = "分发" };
             MenuItem exitItem = new MenuItem { Header = "退出" };
 
             newItem.Click += async (_, _) => await ShowCreateProjectDialogAsync();
             openItem.Click += async (_, _) => await OpenProjectFolderAsync();
             _saveSceneMenuItem.Click += (_, _) => TrySaveCurrentSceneToOriginalFile();
+            distributeItem.Click += async (_, _) => await ShowDistributionDialogAsync();
             exitItem.Click += (_, _) => Close();
 
             return new[]
@@ -3960,6 +3962,8 @@ namespace LimitlessSquareEngine.Editor
                 newItem,
                 openItem,
                 _saveSceneMenuItem,
+                new MenuItem { Header = "-" },
+                distributeItem,
                 new MenuItem { Header = "-" },
                 exitItem
             };

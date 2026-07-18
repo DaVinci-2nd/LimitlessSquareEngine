@@ -75,6 +75,7 @@
     <Compile Include="Editor\EditorApp.cs" />
     <Compile Include="Editor\EditorEntry.cs" />
     <Compile Include="Editor\EditorMainWindow.cs" />
+    <Compile Include="Editor\EditorMainWindow.Distribution.cs" />
     <Compile Include="Editor\EditorMainWindow.LuaVisualEditor.cs" />
     <Compile Include="Editor\EditorRuntimeState.cs" />
     <Compile Include="Editor\EmbeddedGameHost.cs" />
