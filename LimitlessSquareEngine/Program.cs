@@ -3395,6 +3395,15 @@ namespace LimitlessSquareEngine
                 }
             }
 
+            if (TryGetProperty(root, "properties", out JsonElement propertiesElement))
+            {
+                if (propertiesElement.ValueKind != JsonValueKind.Object)
+                {
+                    reason = "'properties' must be a JSON object.";
+                    return false;
+                }
+            }
+
             return true;
         }
 

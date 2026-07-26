@@ -6334,7 +6334,8 @@ void main()
             return new SceneData
             {
                 SceneId = source.SceneId,
-                Objects = source.Objects.Select(CloneSceneObject).ToList()
+                Objects = source.Objects.Select(CloneSceneObject).ToList(),
+                Properties = source.Properties
             };
         }
 

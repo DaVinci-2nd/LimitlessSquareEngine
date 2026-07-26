@@ -298,6 +298,38 @@ namespace LimitlessSquareEngine.Engine
         public double Distance { get; set; }
     }
 
+    public class ScenePropertiesFogColor
+    {
+        public int R { get; set; } = 135;
+        public int G { get; set; } = 206;
+        public int B { get; set; } = 235;
+        public int A { get; set; } = 255;
+    }
+
+    public class ScenePropertiesSkybox
+    {
+        public bool Enabled { get; set; } = true;
+        public string ShaderName { get; set; } = "";
+        public Dictionary<string, object>? Parameters { get; set; }
+    }
+
+    public class ScenePropertiesFog
+    {
+        public bool Enabled { get; set; } = true;
+        public string Mode { get; set; } = "color";
+        public ScenePropertiesFogColor? Color { get; set; }
+        public float Start { get; set; } = 100f;
+        public float End { get; set; } = 1000f;
+        public string? CylindricalTexturePath { get; set; }
+        public bool EdgeTransitionToSkybox { get; set; } = true;
+    }
+
+    public class SceneProperties
+    {
+        public ScenePropertiesSkybox? Skybox { get; set; }
+        public ScenePropertiesFog? Fog { get; set; }
+    }
+
     public class SceneObject
     {
         public string Id { get; set; } = "";
@@ -319,6 +351,7 @@ namespace LimitlessSquareEngine.Engine
     {
         public string SceneId { get; set; } = "";
         public List<SceneObject> Objects { get; set; } = new();
+        public JsonElement? Properties { get; set; }
     }
 
     internal class Scene
@@ -366,6 +399,25 @@ namespace LimitlessSquareEngine.Engine
             Physics.RegisterScene(sceneId, runtime);
 
             MarkAllDirty(sceneId);
+
+            if (scene.Properties.HasValue && scene.Properties.Value.ValueKind == JsonValueKind.Object)
+            {
+                try
+                {
+                    SceneProperties? properties = ParseSceneProperties(scene.Properties.Value);
+                    if (properties != null)
+                    {
+                        _sceneProperties[sceneId] = properties;
+                        if (_boundGraphics != null)
+                            ApplySceneProperties(sceneId, properties);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[!] Failed to parse or apply scene properties for '{sceneId}': {ex.Message}");
+                }
+            }
+
             Console.WriteLine($"[i] Loaded scene: {scene.SceneId} ({scene.Objects.Count} objects)");
             return scene;
         }
@@ -500,6 +552,7 @@ namespace LimitlessSquareEngine.Engine
         }
 
         private static readonly ConcurrentDictionary<string, SceneRuntimeData> _runtimeScenes = new();
+        private static readonly ConcurrentDictionary<string, SceneProperties?> _sceneProperties = new();
         private static Graphics? _boundGraphics;
         private static Audio? _boundAudio;
 
@@ -1292,6 +1345,7 @@ namespace LimitlessSquareEngine.Engine
             _loadedScenes.TryRemove(sceneId, out _);
             _cameraQueues.TryRemove(sceneId, out _);
             _runtimeScenes.TryRemove(sceneId, out _);
+            _sceneProperties.TryRemove(sceneId, out _);
             _boundGraphics?.RemoveSceneCache(sceneId);
         }
 
@@ -1305,6 +1359,7 @@ namespace LimitlessSquareEngine.Engine
             _loadedScenes.Clear();
             _cameraQueues.Clear();
             _runtimeScenes.Clear();
+            _sceneProperties.Clear();
         }
 
         public static void RemoveScene(string sceneId)
@@ -1312,6 +1367,7 @@ namespace LimitlessSquareEngine.Engine
             _loadedScenes.TryRemove(sceneId, out _);
             _cameraQueues.TryRemove(sceneId, out _);
             _runtimeScenes.TryRemove(sceneId, out _);
+            _sceneProperties.TryRemove(sceneId, out _);
             _boundGraphics?.RemoveSceneCache(sceneId);
         }
 
@@ -2302,6 +2358,141 @@ namespace LimitlessSquareEngine.Engine
             }
 
             return settings;
+        }
+
+        private static SceneProperties? ParseSceneProperties(JsonElement props)
+        {
+            if (props.ValueKind != JsonValueKind.Object)
+                return null;
+
+            var result = new SceneProperties();
+
+            if (props.TryGetProperty("skybox", out JsonElement skybox) && skybox.ValueKind == JsonValueKind.Object)
+            {
+                try
+                {
+                    result.Skybox = JsonSerializer.Deserialize<ScenePropertiesSkybox>(skybox.GetRawText(), _jsonOptions);
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[!] Failed to parse skybox properties: {ex.Message}");
+                }
+            }
+
+            if (props.TryGetProperty("fog", out JsonElement fog) && fog.ValueKind == JsonValueKind.Object)
+            {
+                try
+                {
+                    result.Fog = JsonSerializer.Deserialize<ScenePropertiesFog>(fog.GetRawText(), _jsonOptions);
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[!] Failed to parse fog properties: {ex.Message}");
+                }
+            }
+
+            if (result.Skybox == null && result.Fog == null)
+                return null;
+
+            return result;
+        }
+
+        private static void ApplySceneProperties(string sceneId, SceneProperties properties)
+        {
+            if (properties.Skybox != null)
+            {
+                try
+                {
+                    var skybox = properties.Skybox;
+                    if (!skybox.Enabled)
+                    {
+                        _boundGraphics?.ClearScreenSkybox();
+                    }
+                    else if (!string.IsNullOrWhiteSpace(skybox.ShaderName))
+                    {
+                        string parametersJson = skybox.Parameters != null
+                            ? JsonSerializer.Serialize(skybox.Parameters)
+                            : "{}";
+                        _boundGraphics?.SetScreenSkybox(skybox.ShaderName, parametersJson);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[!] Failed to apply skybox properties for scene '{sceneId}': {ex.Message}");
+                }
+            }
+
+            if (properties.Fog != null)
+            {
+                try
+                {
+                    string? mainCameraId = FindMainCameraId(sceneId);
+                    if (string.IsNullOrWhiteSpace(mainCameraId))
+                    {
+                        Console.WriteLine($"[!] No main camera found in scene '{sceneId}', fog properties skipped.");
+                        return;
+                    }
+
+                    var fog = properties.Fog;
+                    if (!fog.Enabled)
+                    {
+                        _boundGraphics?.ClearCameraFog(mainCameraId);
+                    }
+                    else
+                    {
+                        _boundGraphics?.SetCameraFogEnabled(mainCameraId, true);
+                        _boundGraphics?.SetCameraFogMode(mainCameraId, fog.Mode);
+
+                        if (fog.Color != null)
+                        {
+                            _boundGraphics?.SetCameraFogColorRGB(mainCameraId, fog.Color.R, fog.Color.G, fog.Color.B, fog.Color.A);
+                        }
+
+                        _boundGraphics?.SetCameraFogRange(mainCameraId, fog.Start, fog.End);
+
+                        if (!string.IsNullOrWhiteSpace(fog.CylindricalTexturePath))
+                        {
+                            _boundGraphics?.SetCameraFogCylindricalTexture(mainCameraId, fog.CylindricalTexturePath);
+                        }
+
+                        _boundGraphics?.SetCameraFogEdgeTransitionToSkybox(mainCameraId, fog.EdgeTransitionToSkybox);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[!] Failed to apply fog properties for scene '{sceneId}': {ex.Message}");
+                }
+            }
+        }
+
+        private static string? FindMainCameraId(string sceneId)
+        {
+            if (!_loadedScenes.TryGetValue(sceneId, out SceneData? scene))
+                return null;
+
+            foreach (var obj in scene.Objects)
+            {
+                if (!string.Equals(obj.Type, "Camera", StringComparison.Ordinal))
+                    continue;
+
+                if (string.IsNullOrWhiteSpace(obj.Data))
+                    continue;
+
+                try
+                {
+                    using JsonDocument doc = JsonDocument.Parse(obj.Data);
+                    if (doc.RootElement.TryGetProperty("isMainCamera", out JsonElement isMain) &&
+                        isMain.ValueKind == JsonValueKind.True)
+                    {
+                        return obj.Id;
+                    }
+                }
+                catch
+                {
+                }
+            }
+
+            return null;
         }
 
         private class Double3JsonConverter : JsonConverter<Double3>
