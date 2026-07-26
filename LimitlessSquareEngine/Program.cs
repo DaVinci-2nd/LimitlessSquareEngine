@@ -1374,6 +1374,7 @@ namespace LimitlessSquareEngine
                 sceneId => QueueEditorHostAction(() =>
                 {
                     Scene.RemoveScene(sceneId);
+                    _graphics?.ClearScreenSkybox();
                     Scene.LoadScene(sceneId);
                     Scene.RebuildCameraQueue(sceneId);
                 }),
@@ -1779,6 +1780,7 @@ namespace LimitlessSquareEngine
             // 初始化窗口参数
             var options = WindowOptions.Default;
             options.PreferredDepthBufferBits = 32;
+            options.PreferredStencilBufferBits = 8;
             _windowBaseTitle = Path.GetFileNameWithoutExtension(Environment.ProcessPath) ?? "Limitless Square Engine";
             options.Title = _windowBaseTitle;
             options.IsVisible = !_isEditorMode && !_isExternalHostMode;
