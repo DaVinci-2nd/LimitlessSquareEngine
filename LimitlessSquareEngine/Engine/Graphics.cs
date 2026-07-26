@@ -2490,6 +2490,33 @@ namespace LimitlessSquareEngine
             return m;
         }
 
+        public static Matrix4x4 CreatePerspectiveReverseZInfinite(float fovRadians, float aspect, float near)
+        {
+            if (fovRadians <= 0f || fovRadians >= MathF.PI)
+                throw new ArgumentOutOfRangeException(nameof(fovRadians));
+
+            if (aspect <= 0f)
+                throw new ArgumentOutOfRangeException(nameof(aspect));
+
+            if (near <= 0f)
+                throw new ArgumentOutOfRangeException(nameof(near));
+
+            float yScale = 1f / MathF.Tan(fovRadians * 0.5f);
+            float xScale = yScale / aspect;
+
+            Matrix4x4 m = new Matrix4x4();
+            m.M11 = xScale;
+            m.M22 = yScale;
+
+            // Reverse-Z Infinite
+            m.M33 = 0f;
+            m.M34 = -1f;
+            m.M43 = near;
+            m.M44 = 0f;
+
+            return m;
+        }
+
         public static Matrix4x4 CreateOrthographic(float width, float height, float near, float far)
         {
             return Matrix4x4.CreateOrthographic(width, height, near, far);
@@ -5638,18 +5665,18 @@ namespace LimitlessSquareEngine
             uint texture = _gl.GenTexture();
             _gl.BindTexture(TextureTarget.Texture2D, texture);
 
-            uint[] emptyDepthStencil = new uint[Math.Max(1, width) * Math.Max(1, height)];
+            float[] emptyDepthStencil = new float[Math.Max(1, width) * Math.Max(1, height)];
 
             _gl.TexImage2D(
                 TextureTarget.Texture2D,
                 0,
-                InternalFormat.Depth24Stencil8,
+                InternalFormat.Depth32fStencil8,
                 (uint)width,
                 (uint)height,
                 0,
                 PixelFormat.DepthStencil,
-                PixelType.UnsignedInt248,
-                (ReadOnlySpan<uint>)emptyDepthStencil);
+                PixelType.Float32UnsignedInt248Rev,
+                (ReadOnlySpan<float>)emptyDepthStencil);
 
             _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.Nearest);
             _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMagFilter, (int)TextureMagFilter.Nearest);
@@ -8541,7 +8568,7 @@ namespace LimitlessSquareEngine
             {
                 // 透视
                 float fovRadians = (float)(settings.FovOrSize * Math.PI / 180.0);
-                Matrix4x4 projection = CreatePerspectiveReverseZ(fovRadians, aspect, near, far);
+                Matrix4x4 projection = CreatePerspectiveReverseZInfinite(fovRadians, aspect, near);
                 return ApplyRenderPlaneOffset(projection, settings, aspect, false);
             }
         }

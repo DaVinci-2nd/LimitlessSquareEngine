@@ -1778,6 +1778,7 @@ namespace LimitlessSquareEngine
             UserData.RegisterType<PhysicsRaycastHit>();
             // 初始化窗口参数
             var options = WindowOptions.Default;
+            options.PreferredDepthBufferBits = 32;
             _windowBaseTitle = Path.GetFileNameWithoutExtension(Environment.ProcessPath) ?? "Limitless Square Engine";
             options.Title = _windowBaseTitle;
             options.IsVisible = !_isEditorMode && !_isExternalHostMode;
@@ -3397,9 +3398,9 @@ namespace LimitlessSquareEngine
 
             if (TryGetProperty(root, "properties", out JsonElement propertiesElement))
             {
-                if (propertiesElement.ValueKind != JsonValueKind.Object)
+                if (propertiesElement.ValueKind != JsonValueKind.Object && propertiesElement.ValueKind != JsonValueKind.Null)
                 {
-                    reason = "'properties' must be a JSON object.";
+                    reason = "'properties' must be a JSON object or null.";
                     return false;
                 }
             }
