@@ -1302,6 +1302,8 @@ namespace LimitlessSquareEngine
             public Vector3 BoundingLocalMax;
 
             public bool UsePremultipliedTransparentBlend;
+            public int DepthLayerIndex;
+            public int DepthLayerCount;
         }
         private readonly List<RenderCommand> _renderQueue = new();
         private long _submissionCounter = 0;
@@ -1310,6 +1312,9 @@ namespace LimitlessSquareEngine
         private readonly List<RenderCommand> _sceneCommandsScratch = new();
         private readonly List<RenderCommand> _canvasCommandsScratch = new();
         private readonly List<RenderCommand> _fogSceneCommandsScratch = new();
+        private readonly HashSet<string> _layerGroupColorCleared = new(StringComparer.Ordinal);
+        private readonly Dictionary<string, long> _layerGroupFirstLayerBatchId = new(StringComparer.Ordinal);
+        private static readonly double[] _depthLayerFars = { 1000.0, 10000.0, 100000.0, 1000000.0, 10000000.0 };
         private readonly HashSet<string> _sceneCommandWarmupCache = new(StringComparer.Ordinal);
 
         private uint _meshPickFramebuffer = 0;
@@ -5850,6 +5855,25 @@ namespace LimitlessSquareEngine
             ExecuteSortedCommands(_postProcessSceneCommandsScratch, first.UseReverseZ);
         }
 
+        private void RenderBatchToPostProcessSceneTargetDepthOnly(in RenderCommand first, List<RenderCommand> batchCommands)
+        {
+            InitializePostProcessResources();
+            EnsurePostProcessSceneTargets(Math.Max(1, first.ViewportWidth), Math.Max(1, first.ViewportHeight));
+
+            CopyBatchCommandsForOffscreen(batchCommands, _postProcessSceneCommandsScratch, Math.Max(1, first.ViewportWidth), Math.Max(1, first.ViewportHeight));
+
+            _gl.BindFramebuffer(FramebufferTarget.Framebuffer, _postProcessSceneFramebuffer);
+            _gl.Viewport(0, 0, (uint)Math.Max(1, first.ViewportWidth), (uint)Math.Max(1, first.ViewportHeight));
+
+            _gl.Enable(GLEnum.ScissorTest);
+            _gl.Scissor(0, 0, (uint)Math.Max(1, first.ViewportWidth), (uint)Math.Max(1, first.ViewportHeight));
+            _gl.ClearDepth(first.UseReverseZ ? 0.0 : 1.0);
+            _gl.Clear(ClearBufferMask.DepthBufferBit);
+            _gl.Disable(GLEnum.ScissorTest);
+
+            ExecuteSortedCommands(_postProcessSceneCommandsScratch, first.UseReverseZ);
+        }
+
         private void ExecuteBloomPasses(CameraPostProcessSettings settings)
         {
             if (!NeedsBloom(settings))
@@ -8198,11 +8222,6 @@ namespace LimitlessSquareEngine
             ViewportRect viewport = GetSceneViewportRect();
             Matrix4x4 view = CreateSceneViewMatrix(cameraWorld);
 
-            bool useReverseZ = cameraItem.Settings.ProjectionType != 1;
-            Matrix4x4 projection = CreateSceneProjection(cameraItem.Settings, viewport.Aspect);
-
-            long batchId = ++_sceneBatchCounter;
-
             ClearCameraPostProcess(cameraItem.ObjectId);
 
             LimitlessSquareEngine.Engine.CameraPostProcessSettings postProcess =
@@ -8235,7 +8254,21 @@ namespace LimitlessSquareEngine
 
             SetCameraSmaaEnabled(cameraItem.ObjectId, postProcess.Smaa.Enabled);
 
+            double cameraNearClip = cameraItem.Settings.NearClip;
+            double cameraFarClip = cameraItem.Settings.FarClip;
+            int layerCount = _depthLayerFars.Length;
+            for (int i = 0; i < _depthLayerFars.Length; i++)
+            {
+                if (_depthLayerFars[i] >= cameraFarClip)
+                {
+                    layerCount = i + 1;
+                    break;
+                }
+            }
+            float fovRadians = (float)(cameraItem.Settings.FovOrSize * Math.PI / 180.0);
+
             SkyboxData skybox = ResolveSkyboxForCamera(cameraItem.ObjectId, cameraItem.Settings.RenderMode, mainScreenCameraId);
+            FogSettings? fogSettings = ResolveFogForCamera(cameraItem.ObjectId);
 
             if (skybox != null)
             {
@@ -8248,6 +8281,10 @@ namespace LimitlessSquareEngine
                 Matrix4x4 skyboxModel =
                     Matrix4x4.CreateScale(skyboxScale) * Matrix4x4.CreateRotationY(MathF.PI);
 
+                bool skyboxUseReverseZ = cameraItem.Settings.ProjectionType != 1;
+                Matrix4x4 skyboxProjection = CreatePerspectiveReverseZInfinite(fovRadians, viewport.Aspect, (float)cameraNearClip);
+                long skyboxBatchId = ++_sceneBatchCounter;
+
                 _renderQueue.Add(new RenderCommand
                 {
                     Vertices = skyboxSurface.Vertices,
@@ -8257,21 +8294,21 @@ namespace LimitlessSquareEngine
                     TextureId = 0,
                     VertexStrideFloats = skyboxSurface.VertexStrideFloats,
                     CameraPosition = Vector3.Zero,
-                    ClusterNear = (float)cameraItem.Settings.NearClip,
-                    ClusterFar = (float)cameraItem.Settings.FarClip,
+                    ClusterNear = (float)cameraNearClip,
+                    ClusterFar = (float)_depthLayerFars[_depthLayerFars.Length - 1],
                     RenderSpace = RenderSpace.Camera,
                     Model = skyboxModel,
                     View = view,
-                    Projection = projection,
+                    Projection = skyboxProjection,
                     QueueType = RenderQueueType.Opaque,
                     SortDepth = 0f,
                     SubmissionIndex = _submissionCounter++,
                     Pass = RenderPass.Scene,
-                    BatchId = batchId,
+                    BatchId = skyboxBatchId,
                     BatchSubmissionOrder = cameraItem.SubmissionOrder,
                     ViewportX = viewport.X,
                     ViewportY = viewport.Y,
-                    UseReverseZ = useReverseZ,
+                    UseReverseZ = skyboxUseReverseZ,
                     ViewportWidth = viewport.Width,
                     ViewportHeight = viewport.Height,
                     Material = null,
@@ -8285,70 +8322,137 @@ namespace LimitlessSquareEngine
                     MeshId = skyboxMesh.Id,
                     MeshSurfaceId = skyboxSurface.Id,
                     CameraObjectId = cameraItem.ObjectId,
-                    MeshVertexColorsAreWhite = skyboxSurface.VertexColorsAreWhite
+                    MeshVertexColorsAreWhite = skyboxSurface.VertexColorsAreWhite,
+                    DepthLayerIndex = -1,
+                    DepthLayerCount = layerCount
                 });
             }
 
-            FogSettings? fogSettings = ResolveFogForCamera(cameraItem.ObjectId);
-
-            foreach (var obj in objects)
+            for (int layerIdx = layerCount - 1; layerIdx >= 0; layerIdx--)
             {
-                if (!obj.Active || !obj.Visible)
-                    continue;
+                double layerFar = _depthLayerFars[layerIdx];
+                if (layerIdx == layerCount - 1)
+                    layerFar = Math.Min(layerFar, cameraFarClip);
+                double layerNear = (layerIdx == 0) ? cameraNearClip : _depthLayerFars[layerIdx - 1];
 
-                if (obj.ObjectId == cameraItem.ObjectId)
-                    continue;
+                bool useReverseZ = cameraItem.Settings.ProjectionType != 1;
+                Matrix4x4 projection;
+                if (layerCount == 1)
+                    projection = CreatePerspectiveReverseZInfinite(fovRadians, viewport.Aspect, (float)layerNear);
+                else
+                    projection = CreatePerspectiveReverseZ(fovRadians, viewport.Aspect, (float)layerNear, (float)layerFar);
 
-                if (string.Equals(obj.Type, "Camera", StringComparison.Ordinal))
-                    continue;
+                long batchId = ++_sceneBatchCounter;
 
-                if (string.Equals(obj.Type, "Light", StringComparison.Ordinal))
-                    continue;
-
-                if (string.IsNullOrWhiteSpace(obj.Mesh))
-                    continue;
-
-                if (!_meshes.TryGetValue(obj.Mesh, out MeshData mesh))
+                foreach (var obj in objects)
                 {
-                    Program.EnsureObjMeshRegistered(obj.Mesh, this);
-                }
-
-                if (!_meshes.TryGetValue(obj.Mesh, out mesh))
-                {
-                    Console.WriteLine($"[!] Mesh '{obj.Mesh}' not found for object '{obj.ObjectId}'.");
-                    continue;
-                }
-
-                StaticSceneObjectRenderCache? staticRenderCache = TryGetStaticSceneObjectRenderCache(obj, mesh);
-
-                Double3 relativePosition = obj.WorldPosition - cameraWorld.Position;
-
-                Matrix4x4 scaleRotation = staticRenderCache != null
-                    ? staticRenderCache.ScaleRotation
-                    : CreateSceneObjectScaleRotationMatrix(obj);
-
-                Matrix4x4 model =
-                    scaleRotation *
-                    Matrix4x4.CreateTranslation(
-                        (float)relativePosition.X,
-                        (float)relativePosition.Y,
-                        (float)(-relativePosition.Z));
-
-                if (staticRenderCache != null)
-                {
-                    foreach (StaticSceneSurfaceCommandTemplate surface in staticRenderCache.Surfaces)
+                    if (!obj.Active || !obj.Visible)
+                        continue;
+                    if (obj.ObjectId == cameraItem.ObjectId)
+                        continue;
+                    if (string.Equals(obj.Type, "Camera", StringComparison.Ordinal))
+                        continue;
+                    if (string.Equals(obj.Type, "Light", StringComparison.Ordinal))
+                        continue;
+                    if (string.IsNullOrWhiteSpace(obj.Mesh))
+                        continue;
+                    if (!_meshes.TryGetValue(obj.Mesh, out MeshData mesh))
                     {
+                        Program.EnsureObjMeshRegistered(obj.Mesh, this);
+                    }
+                    if (!_meshes.TryGetValue(obj.Mesh, out mesh))
+                    {
+                        Console.WriteLine($"[!] Mesh '{obj.Mesh}' not found for object '{obj.ObjectId}'.");
+                        continue;
+                    }
+
+                    StaticSceneObjectRenderCache? staticRenderCache = TryGetStaticSceneObjectRenderCache(obj, mesh);
+                    Double3 relativePosition = obj.WorldPosition - cameraWorld.Position;
+
+                    Matrix4x4 scaleRotation = staticRenderCache != null
+                        ? staticRenderCache.ScaleRotation
+                        : CreateSceneObjectScaleRotationMatrix(obj);
+
+                    Matrix4x4 model =
+                        scaleRotation *
+                        Matrix4x4.CreateTranslation(
+                            (float)relativePosition.X,
+                            (float)relativePosition.Y,
+                            (float)(-relativePosition.Z));
+
+                    if (staticRenderCache != null)
+                    {
+                        foreach (StaticSceneSurfaceCommandTemplate surface in staticRenderCache.Surfaces)
+                        {
+                            RenderCommand cmd = new RenderCommand
+                            {
+                                Vertices = surface.Vertices,
+                                PrimitiveType = surface.PrimitiveType,
+                                Program = surface.Material.Program,
+                                UseTexture = false,
+                                TextureId = 0,
+                                VertexStrideFloats = surface.VertexStrideFloats,
+                                CameraPosition = Vector3.Zero,
+                                ClusterNear = (float)layerNear,
+                                ClusterFar = (float)layerFar,
+                                SceneId = sceneId,
+                                ObjectId = obj.ObjectId,
+                                CameraWorldPosition = cameraWorld.Position,
+                                RenderSpace = RenderSpace.Camera,
+                                Model = model,
+                                View = view,
+                                Projection = projection,
+                                QueueType = surface.TransparentByColorAlpha ? RenderQueueType.Transparent : RenderQueueType.Opaque,
+                                UsePremultipliedTransparentBlend = surface.TransparentByColorAlpha,
+                                SortDepth = ComputeSortDepth(surface.LocalCenter, model, view, RenderSpace.Camera),
+                                SubmissionIndex = _submissionCounter++,
+                                Pass = RenderPass.Scene,
+                                BatchId = batchId,
+                                BatchSubmissionOrder = cameraItem.SubmissionOrder,
+                                ViewportX = viewport.X,
+                                ViewportY = viewport.Y,
+                                UseReverseZ = useReverseZ,
+                                ViewportWidth = viewport.Width,
+                                ViewportHeight = viewport.Height,
+                                Material = surface.Material,
+                                Skybox = null,
+                                ForceWhiteVertexColor = true,
+                                IsSkybox = false,
+                                CullMode = surface.CullMode,
+                                MeshId = obj.Mesh ?? "",
+                                MeshSurfaceId = surface.SurfaceId,
+                                CameraObjectId = cameraItem.ObjectId,
+                                MeshVertexColorsAreWhite = surface.MeshVertexColorsAreWhite,
+                                HasBoundingBox = true,
+                                BoundingLocalMin = surface.LocalBoundsMin,
+                                BoundingLocalMax = surface.LocalBoundsMax,
+                                DepthLayerIndex = layerIdx,
+                                DepthLayerCount = layerCount
+                            };
+                            ApplyFogStateToRenderCommand(ref cmd, fogSettings, skybox);
+                            WarmupSceneCommandResources(cmd);
+                            _renderQueue.Add(cmd);
+                        }
+                        continue;
+                    }
+
+                    foreach (MeshSurfaceData surface in mesh.Surfaces)
+                    {
+                        MaterialData material = ResolveSceneMaterial(obj, surface);
+                        float materialAlpha = ReadMaterialColorAlpha(material);
+                        bool transparentByColorAlpha = materialAlpha < 0.9999f;
+
                         RenderCommand cmd = new RenderCommand
                         {
                             Vertices = surface.Vertices,
                             PrimitiveType = surface.PrimitiveType,
-                            Program = surface.Material.Program,
+                            Program = material.Program,
                             UseTexture = false,
                             TextureId = 0,
                             VertexStrideFloats = surface.VertexStrideFloats,
                             CameraPosition = Vector3.Zero,
-                            ClusterNear = (float)cameraItem.Settings.NearClip,
-                            ClusterFar = (float)cameraItem.Settings.FarClip,
+                            ClusterNear = (float)layerNear,
+                            ClusterFar = (float)layerFar,
                             SceneId = sceneId,
                             ObjectId = obj.ObjectId,
                             CameraWorldPosition = cameraWorld.Position,
@@ -8356,8 +8460,8 @@ namespace LimitlessSquareEngine
                             Model = model,
                             View = view,
                             Projection = projection,
-                            QueueType = surface.TransparentByColorAlpha ? RenderQueueType.Transparent : RenderQueueType.Opaque,
-                            UsePremultipliedTransparentBlend = surface.TransparentByColorAlpha,
+                            QueueType = transparentByColorAlpha ? RenderQueueType.Transparent : RenderQueueType.Opaque,
+                            UsePremultipliedTransparentBlend = transparentByColorAlpha,
                             SortDepth = ComputeSortDepth(surface.LocalCenter, model, view, RenderSpace.Camera),
                             SubmissionIndex = _submissionCounter++,
                             Pass = RenderPass.Scene,
@@ -8368,82 +8472,25 @@ namespace LimitlessSquareEngine
                             UseReverseZ = useReverseZ,
                             ViewportWidth = viewport.Width,
                             ViewportHeight = viewport.Height,
-                            Material = surface.Material,
+                            Material = material,
                             Skybox = null,
                             ForceWhiteVertexColor = true,
                             IsSkybox = false,
-                            CullMode = surface.CullMode,
+                            CullMode = material.CullMode,
                             MeshId = obj.Mesh ?? "",
-                            MeshSurfaceId = surface.SurfaceId,
+                            MeshSurfaceId = surface.Id,
                             CameraObjectId = cameraItem.ObjectId,
-                            MeshVertexColorsAreWhite = surface.MeshVertexColorsAreWhite,
+                            MeshVertexColorsAreWhite = surface.VertexColorsAreWhite,
                             HasBoundingBox = true,
                             BoundingLocalMin = surface.LocalBoundsMin,
-                            BoundingLocalMax = surface.LocalBoundsMax
+                            BoundingLocalMax = surface.LocalBoundsMax,
+                            DepthLayerIndex = layerIdx,
+                            DepthLayerCount = layerCount
                         };
-
                         ApplyFogStateToRenderCommand(ref cmd, fogSettings, skybox);
                         WarmupSceneCommandResources(cmd);
                         _renderQueue.Add(cmd);
                     }
-
-                    continue;
-                }
-
-                foreach (MeshSurfaceData surface in mesh.Surfaces)
-                {
-                    MaterialData material = ResolveSceneMaterial(obj, surface);
-
-                    float materialAlpha = ReadMaterialColorAlpha(material);
-                    bool transparentByColorAlpha = materialAlpha < 0.9999f;
-
-                    RenderCommand cmd = new RenderCommand
-                    {
-                        Vertices = surface.Vertices,
-                        PrimitiveType = surface.PrimitiveType,
-                        Program = material.Program,
-                        UseTexture = false,
-                        TextureId = 0,
-                        VertexStrideFloats = surface.VertexStrideFloats,
-                        CameraPosition = Vector3.Zero,
-                        ClusterNear = (float)cameraItem.Settings.NearClip,
-                        ClusterFar = (float)cameraItem.Settings.FarClip,
-                        SceneId = sceneId,
-                        ObjectId = obj.ObjectId,
-                        CameraWorldPosition = cameraWorld.Position,
-                        RenderSpace = RenderSpace.Camera,
-                        Model = model,
-                        View = view,
-                        Projection = projection,
-                        QueueType = transparentByColorAlpha ? RenderQueueType.Transparent : RenderQueueType.Opaque,
-                        UsePremultipliedTransparentBlend = transparentByColorAlpha,
-                        SortDepth = ComputeSortDepth(surface.LocalCenter, model, view, RenderSpace.Camera),
-                        SubmissionIndex = _submissionCounter++,
-                        Pass = RenderPass.Scene,
-                        BatchId = batchId,
-                        BatchSubmissionOrder = cameraItem.SubmissionOrder,
-                        ViewportX = viewport.X,
-                        ViewportY = viewport.Y,
-                        UseReverseZ = useReverseZ,
-                        ViewportWidth = viewport.Width,
-                        ViewportHeight = viewport.Height,
-                        Material = material,
-                        Skybox = null,
-                        ForceWhiteVertexColor = true,
-                        IsSkybox = false,
-                        CullMode = material.CullMode,
-                        MeshId = obj.Mesh ?? "",
-                        MeshSurfaceId = surface.Id,
-                        CameraObjectId = cameraItem.ObjectId,
-                        MeshVertexColorsAreWhite = surface.VertexColorsAreWhite,
-                        HasBoundingBox = true,
-                        BoundingLocalMin = surface.LocalBoundsMin,
-                        BoundingLocalMax = surface.LocalBoundsMax
-                    };
-
-                    ApplyFogStateToRenderCommand(ref cmd, fogSettings, skybox);
-                    WarmupSceneCommandResources(cmd);
-                    _renderQueue.Add(cmd);
                 }
             }
         }
@@ -8661,6 +8708,8 @@ namespace LimitlessSquareEngine
             try
             {
                 _skyboxRenderedThisFrame = false;
+                _layerGroupColorCleared.Clear();
+                _layerGroupFirstLayerBatchId.Clear();
                 _sceneCommandsScratch.Clear();
                 _canvasCommandsScratch.Clear();
 
@@ -8701,6 +8750,35 @@ namespace LimitlessSquareEngine
                 .OrderBy(g => g.First().BatchSubmissionOrder)
                 .ToList();
 
+            _layerGroupFirstLayerBatchId.Clear();
+            foreach (var cameraGroup in batches.GroupBy(b => b.First().CameraObjectId, StringComparer.Ordinal))
+            {
+                foreach (var batch in cameraGroup.OrderBy(b => b.First().DepthLayerIndex))
+                {
+                    RenderCommand layer0Anchor = batch.First();
+                    if (layer0Anchor.DepthLayerIndex == 0)
+                    {
+                        if (HasVisibleNonSkyboxSceneCommand(batch.ToList()))
+                        {
+                            PrepareDirectionalShadowBatch(layer0Anchor, batch.ToList());
+                            PrepareLightingBuffersForBatch(layer0Anchor);
+                            _layerGroupFirstLayerBatchId[layer0Anchor.CameraObjectId] = layer0Anchor.BatchId;
+                        }
+                        break;
+                    }
+                }
+            }
+
+            bool hasAnyVisibleNonSkybox = false;
+            foreach (var batch in batches)
+            {
+                if (HasVisibleNonSkyboxSceneCommand(batch.ToList()))
+                {
+                    hasAnyVisibleNonSkybox = true;
+                    break;
+                }
+            }
+
             foreach (var batch in batches)
             {
                 List<RenderCommand> batchCommands = batch.ToList();
@@ -8724,30 +8802,46 @@ namespace LimitlessSquareEngine
 
                 bool hasVisibleNonSkyboxSceneCommand = HasVisibleNonSkyboxSceneCommand(batchCommands);
 
-                if (hasVisibleNonSkyboxSceneCommand && !_pendingSkyboxReflectionRefreshAfterRender)
-                    CaptureSkyboxReflectionForBatch(first, batchSkybox);
-
-                if (hasVisibleNonSkyboxSceneCommand)
+                if (batchSkybox != null && !_pendingSkyboxReflectionRefreshAfterRender)
                 {
-                    PrepareDirectionalShadowBatch(first, batchCommands);
+                    bool shouldCapture = first.DepthLayerIndex < 0 ? hasAnyVisibleNonSkybox : hasVisibleNonSkyboxSceneCommand;
+                    if (shouldCapture)
+                        CaptureSkyboxReflectionForBatch(first, batchSkybox);
+                }
+
+                if (hasVisibleNonSkyboxSceneCommand && first.DepthLayerIndex != 0)
+                {
+                    if (_layerGroupFirstLayerBatchId.TryGetValue(first.CameraObjectId, out long layer0BatchId) &&
+                        _directionalShadowBatchCache.TryGetValue(layer0BatchId, out var layer0ShadowData))
+                    {
+                        _directionalShadowBatchCache[first.BatchId] = layer0ShadowData;
+                    }
                     PrepareLightingBuffersForBatch(first);
                 }
-                else
+                else if (!hasVisibleNonSkyboxSceneCommand && first.DepthLayerIndex != 0)
                 {
                     _directionalShadowBatchCache.Remove(first.BatchId);
                 }
 
                 CameraPostProcessSettings? postSettings = ResolvePostProcessForCamera(first.CameraObjectId);
+                bool isFirstLayerOfGroup = _layerGroupColorCleared.Add(first.CameraObjectId);
+                bool isLastLayer = first.DepthLayerIndex == 0;
 
                 if (NeedsPostProcess(postSettings))
                 {
-                    RenderBatchToPostProcessSceneTarget(first, batchCommands);
+                    if (isFirstLayerOfGroup)
+                        RenderBatchToPostProcessSceneTarget(first, batchCommands);
+                    else
+                        RenderBatchToPostProcessSceneTargetDepthOnly(first, batchCommands);
 
-                    if (NeedsBloom(postSettings))
-                        ExecuteBloomPasses(postSettings);
+                    if (isLastLayer)
+                    {
+                        if (NeedsBloom(postSettings))
+                            ExecuteBloomPasses(postSettings);
 
-                    CompositePostProcessToBackbuffer(first, postSettings);
-                    ExecuteObjectContourPass(batchCommands, first);
+                        CompositePostProcessToBackbuffer(first, postSettings);
+                        ExecuteObjectContourPass(batchCommands, first);
+                    }
                 }
                 else
                 {
@@ -8764,12 +8858,24 @@ namespace LimitlessSquareEngine
                         first.ViewportY,
                         (uint)Math.Max(1, first.ViewportWidth),
                         (uint)Math.Max(1, first.ViewportHeight));
-                    _gl.ClearColor(_backgroundColor.X, _backgroundColor.Y, _backgroundColor.Z, _backgroundColor.W);
-                    _gl.ClearDepth(first.UseReverseZ ? 0.0 : 1.0);
-                    _gl.Clear(ClearBufferMask.ColorBufferBit | ClearBufferMask.DepthBufferBit | ClearBufferMask.StencilBufferBit);
+
+                    if (isFirstLayerOfGroup)
+                    {
+                        _gl.ClearColor(_backgroundColor.X, _backgroundColor.Y, _backgroundColor.Z, _backgroundColor.W);
+                        _gl.ClearDepth(first.UseReverseZ ? 0.0 : 1.0);
+                        _gl.Clear(ClearBufferMask.ColorBufferBit | ClearBufferMask.DepthBufferBit | ClearBufferMask.StencilBufferBit);
+                    }
+                    else
+                    {
+                        _gl.ClearDepth(first.UseReverseZ ? 0.0 : 1.0);
+                        _gl.Clear(ClearBufferMask.DepthBufferBit);
+                    }
+
                     _gl.Disable(GLEnum.ScissorTest);
                     ExecuteSortedCommands(batchCommands, first.UseReverseZ);
-                    ExecuteObjectContourPass(batchCommands, first);
+
+                    if (isLastLayer)
+                        ExecuteObjectContourPass(batchCommands, first);
                 }
             }
 
