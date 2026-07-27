@@ -306,6 +306,15 @@ namespace LimitlessSquareEngine.Engine
         public int A { get; set; } = 255;
     }
 
+    public class ScenePropertiesAmbientLight
+    {
+        public int R { get; set; } = 128;
+        public int G { get; set; } = 128;
+        public int B { get; set; } = 128;
+        public int A { get; set; } = 255;
+        public float Intensity { get; set; } = 1.0f;
+    }
+
     public class ScenePropertiesSkybox
     {
         public bool Enabled { get; set; } = true;
@@ -328,6 +337,7 @@ namespace LimitlessSquareEngine.Engine
     {
         public ScenePropertiesSkybox? Skybox { get; set; }
         public ScenePropertiesFog? Fog { get; set; }
+        public ScenePropertiesAmbientLight? AmbientLight { get; set; }
     }
 
     public class SceneObject
@@ -2391,7 +2401,19 @@ namespace LimitlessSquareEngine.Engine
                 }
             }
 
-            if (result.Skybox == null && result.Fog == null)
+            if (props.TryGetProperty("ambientLight", out JsonElement ambientLight) && ambientLight.ValueKind == JsonValueKind.Object)
+            {
+                try
+                {
+                    result.AmbientLight = JsonSerializer.Deserialize<ScenePropertiesAmbientLight>(ambientLight.GetRawText(), _jsonOptions);
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[!] Failed to parse ambientLight properties: {ex.Message}");
+                }
+            }
+
+            if (result.Skybox == null && result.Fog == null && result.AmbientLight == null)
                 return null;
 
             return result;
@@ -2461,6 +2483,19 @@ namespace LimitlessSquareEngine.Engine
                 catch (Exception ex)
                 {
                     Console.WriteLine($"[!] Failed to apply fog properties for scene '{sceneId}': {ex.Message}");
+                }
+            }
+
+            if (properties.AmbientLight != null)
+            {
+                try
+                {
+                    var al = properties.AmbientLight;
+                    _boundGraphics?.SetAmbientLightRGB(al.R, al.G, al.B, al.Intensity);
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[!] Failed to apply ambientLight properties for scene '{sceneId}': {ex.Message}");
                 }
             }
         }
