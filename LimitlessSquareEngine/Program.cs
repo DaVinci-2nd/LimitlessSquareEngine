@@ -1,4 +1,5 @@
 ﻿using LimitlessSquareEngine.Engine;
+using LimitlessSquareEngine.Engine.Terrain;
 using MoonSharp.Interpreter;
 using MoonSharp.Interpreter.Platforms;
 using Silk.NET.Core;
@@ -881,7 +882,7 @@ namespace LimitlessSquareEngine
                 vao = _gl.GenVertexArray();
                 _gl.BindVertexArray(vao);
 
-                _gl.Viewport(0, 0, (uint)_window.Size.X, (uint)_window.Size.Y);
+                _gl.Viewport(0, 0, (uint)Math.Max(1, _window.Size.X), (uint)Math.Max(1, _window.Size.Y));
                 _gl.Disable(EnableCap.DepthTest);
                 _gl.Clear(ClearBufferMask.ColorBufferBit);
 
@@ -1777,6 +1778,9 @@ namespace LimitlessSquareEngine
             UserData.RegisterType<Double3>();
             UserData.RegisterType<Input>();
             UserData.RegisterType<PhysicsRaycastHit>();
+            UserData.RegisterType<LimitlessSquareEngine.Engine.Terrain.Terrain>();
+            UserData.RegisterType<LimitlessSquareEngine.Engine.Terrain.TerrainProfile>();
+            UserData.RegisterType<LimitlessSquareEngine.Engine.Terrain.TerrainStreamer>();
             // 初始化窗口参数
             var options = WindowOptions.Default;
             options.PreferredDepthBufferBits = 32;
@@ -1910,6 +1914,14 @@ namespace LimitlessSquareEngine
                         RecordLuaApi("game_data", "game_data", "游戏数据对象", "Data");
                         instance.LuaScript.Globals["graphics"] = graphics;
                         RecordLuaApi("graphics", "graphics", "图形系统对象", "Graphics");
+                        // 注入地形系统
+                        instance.LuaScript.Globals["terrain_get"] =
+                            (Func<string, string, LimitlessSquareEngine.Engine.Terrain.Terrain?>)(
+                                (sceneId, objectId) => TerrainManager.GetOrCreate(sceneId, objectId));
+                        RecordLuaApi("terrain_get", "terrain_get(sceneId, objectId) -> terrain", "获取或创建地形节点", "Terrain");
+                        instance.LuaScript.Globals["terrain_remove"] =
+                            (Action<string, string>)((sceneId, objectId) => TerrainManager.Remove(sceneId, objectId));
+                        RecordLuaApi("terrain_remove", "terrain_remove(sceneId, objectId)", "移除地形节点", "Terrain");
                         // 注入后台任务函数
                         instance.LuaScript.Globals["submit_task"] = submitTaskFunc;
                         RecordLuaApi("submit_task", "submit_task(luaCode) -> taskId", "提交后台任务", "Task");
@@ -2740,6 +2752,8 @@ namespace LimitlessSquareEngine
                 Physics.Step(deltaTime, fixedDeltaTime);
                 // 把场景层的脏transform同步到Graphics缓存
                 Scene.FlushDirtyToRenderer();
+                // 地形分帧流式生成
+                TerrainManager.TickAll();
             }
             // 提交场景相机渲染
             _graphics?.QueueLoadedSceneRender();

@@ -1193,6 +1193,27 @@ namespace LimitlessSquareEngine
         }
 
         [MoonSharpHidden]
+        public void RemoveSceneObject(string sceneId, string objectId)
+        {
+            if (_sceneObjectCache.TryGetValue(sceneId, out var map))
+            {
+                map.Remove(objectId);
+            }
+
+            if (!string.IsNullOrWhiteSpace(sceneId) && !string.IsNullOrWhiteSpace(objectId))
+            {
+                string prefix = BuildSceneObjectRenderCacheKey(sceneId, objectId);
+
+                List<string> keys = _staticSceneObjectRenderCache.Keys
+                    .Where(k => k.StartsWith(prefix, StringComparison.Ordinal))
+                    .ToList();
+
+                foreach (string key in keys)
+                    _staticSceneObjectRenderCache.Remove(key);
+            }
+        }
+
+        [MoonSharpHidden]
         public void ReplaceSceneCameras(string sceneId, List<SceneRenderCameraSnapshot> cameras)
         {
             _sceneCameraCache[sceneId] = cameras
@@ -5670,7 +5691,7 @@ namespace LimitlessSquareEngine
             uint texture = _gl.GenTexture();
             _gl.BindTexture(TextureTarget.Texture2D, texture);
 
-            float[] emptyDepthStencil = new float[Math.Max(1, width) * Math.Max(1, height)];
+            float[] emptyDepthStencil = new float[Math.Max(1, width) * Math.Max(1, height) * 2];
 
             _gl.TexImage2D(
                 TextureTarget.Texture2D,
@@ -6468,10 +6489,90 @@ namespace LimitlessSquareEngine
             }
         }
 
+        /// <summary>
+        /// 从内存图像注册GPU纹理
+        /// </summary>
+        [MoonSharpHidden]
+        public void RegisterTextureFromMemory(string key, Image<Rgba32> image)
+        {
+            if (string.IsNullOrWhiteSpace(key))
+                throw new ArgumentException("[X] Texture key cannot be null or empty.", nameof(key));
+
+            if (image == null)
+                throw new ArgumentNullException(nameof(image));
+
+            if (image.Width <= 0 || image.Height <= 0)
+                throw new ArgumentException("[X] Texture image dimensions must be positive.", nameof(image));
+
+            if (_textures.TryGetValue(key, out TextureInfo existing) && existing.Id != 0)
+                _gl.DeleteTexture(existing.Id);
+
+            int pixelCount = image.Width * image.Height;
+            Rgba32[] pixels = new Rgba32[pixelCount];
+            image.CopyPixelDataTo(pixels);
+
+            byte[] pixelBytes = new byte[pixelCount * 4];
+            bool hasTransparency = false;
+
+            for (int i = 0; i < pixelCount; i++)
+            {
+                pixelBytes[i * 4] = pixels[i].R;
+                pixelBytes[i * 4 + 1] = pixels[i].G;
+                pixelBytes[i * 4 + 2] = pixels[i].B;
+                pixelBytes[i * 4 + 3] = pixels[i].A;
+
+                if (pixels[i].A < 255)
+                    hasTransparency = true;
+            }
+
+            uint texture = _gl.GenTexture();
+            _gl.BindTexture(TextureTarget.Texture2D, texture);
+
+            _gl.TexImage2D(
+                TextureTarget.Texture2D,
+                0,
+                InternalFormat.Rgba,
+                (uint)image.Width,
+                (uint)image.Height,
+                0,
+                PixelFormat.Rgba,
+                PixelType.UnsignedByte,
+                (ReadOnlySpan<byte>)pixelBytes);
+
+            _gl.GenerateMipmap(TextureTarget.Texture2D);
+
+            _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.LinearMipmapLinear);
+            _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMagFilter, (int)TextureMagFilter.Linear);
+            _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapS, (int)TextureWrapMode.ClampToEdge);
+            _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapT, (int)TextureWrapMode.ClampToEdge);
+            _gl.BindTexture(TextureTarget.Texture2D, 0);
+
+            TextureInfo info = new TextureInfo
+            {
+                Id = texture,
+                HasTransparency = hasTransparency,
+                Width = image.Width,
+                Height = image.Height
+            };
+
+            _textures[key] = info;
+        }
+
+        [MoonSharpHidden]
+        public void RemoveTextureFromMemory(string key)
+        {
+            if (string.IsNullOrWhiteSpace(key))
+                return;
+
+            if (_textures.TryGetValue(key, out TextureInfo existing) && existing.Id != 0)
+                _gl.DeleteTexture(existing.Id);
+
+            _textures.Remove(key);
+        }
+
         private string NormalizeMaterialKey(string raw)
         {
             string key = raw.Replace('\\', '/').Trim();
-
             if (key.StartsWith("/"))
                 key = key[1..];
 
@@ -7569,6 +7670,12 @@ namespace LimitlessSquareEngine
             if (string.IsNullOrWhiteSpace(rawPath))
                 return false;
 
+            if (_textures.ContainsKey(rawPath))
+            {
+                fullPath = rawPath;
+                return true;
+            }
+
             return Program.EnsureTextureRegistered(rawPath, out fullPath);
         }
 
@@ -8020,8 +8127,8 @@ namespace LimitlessSquareEngine
         /// </summary>
         private (float ndcX, float ndcY) PixelToNDC(float pixelX, float pixelY)
         {
-            float halfWidth = _window.Size.X / 2.0f;
-            float halfHeight = _window.Size.Y / 2.0f;
+            float halfWidth = Math.Max(1, _window.Size.X) / 2.0f;
+            float halfHeight = Math.Max(1, _window.Size.Y) / 2.0f;
             float ndcX = (pixelX - halfWidth) / halfWidth;
             float ndcY = (halfHeight - pixelY) / halfHeight;
             return (ndcX, ndcY);
@@ -8886,7 +8993,7 @@ namespace LimitlessSquareEngine
             _gizmoSceneCameraSet = false;
 
             _gl.BindFramebuffer(FramebufferTarget.Framebuffer, 0);
-            _gl.Viewport(0, 0, (uint)_window.Size.X, (uint)_window.Size.Y);
+            _gl.Viewport(0, 0, (uint)Math.Max(1, _window.Size.X), (uint)Math.Max(1, _window.Size.Y));
             _gl.ClearDepth(1.0);
             _gl.Clear(ClearBufferMask.DepthBufferBit);
         }
@@ -9862,7 +9969,7 @@ void main()
             try
             {
                 _gl.BindFramebuffer(FramebufferTarget.Framebuffer, _meshPickFramebuffer);
-                _gl.Viewport(0, 0, (uint)windowWidth, (uint)windowHeight);
+                _gl.Viewport(0, 0, (uint)Math.Max(1, windowWidth), (uint)Math.Max(1, windowHeight));
                 _gl.Disable(GLEnum.ScissorTest);
                 _gl.Disable(GLEnum.Blend);
                 _gl.Enable(GLEnum.DepthTest);
@@ -10343,7 +10450,7 @@ void main()
             if (canvasCommands.Count == 0)
                 return;
 
-            _gl.Viewport(0, 0, (uint)_window.Size.X, (uint)_window.Size.Y);
+            _gl.Viewport(0, 0, (uint)Math.Max(1, _window.Size.X), (uint)Math.Max(1, _window.Size.Y));
 
             _gl.Disable(GLEnum.DepthTest);
             _gl.DepthMask(false);
