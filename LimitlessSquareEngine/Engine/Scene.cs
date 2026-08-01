@@ -572,6 +572,8 @@ namespace LimitlessSquareEngine.Engine
             Physics.SetMeshColliderTriangleResolver(graphics.TryGetMeshColliderTriangles);
         }
 
+        internal static Graphics? BoundGraphics => _boundGraphics;
+
         public static void BindAudio(Audio audio)
         {
             _boundAudio = audio;

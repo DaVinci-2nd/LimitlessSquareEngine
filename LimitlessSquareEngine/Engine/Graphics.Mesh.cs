@@ -349,6 +349,19 @@ namespace LimitlessSquareEngine
             _meshes[id] = new MeshData(id, new[] { surface }, revision);
         }
 
+        /// <summary>
+        /// 移除已注册网格并释放其GPU资源
+        /// </summary>
+        [MoonSharpHidden]
+        public void RemoveMesh(string id)
+        {
+            if (string.IsNullOrWhiteSpace(id))
+                return;
+
+            InvalidateMeshGpuResources(id);
+            _meshes.Remove(id);
+        }
+
         [MoonSharpHidden]
         public void RegisterObjMeshFromFile(string assetsRoot, string objFilePath)
         {
