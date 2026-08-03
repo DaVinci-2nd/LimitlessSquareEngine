@@ -705,6 +705,107 @@ namespace LimitlessSquareEngine
                 return;
 
             RegisterMesh("builtin/cube_1x1x1", CreateUnitCubeVertices(), PrimitiveType.Triangles, 16);
+            RegisterMesh("builtin/sphere_1x1x1", CreateUnitSphereVertices(), PrimitiveType.Triangles, 16);
+        }
+
+        private float[] CreateUnitSphereVertices()
+        {
+            var data = new List<float>();
+
+            void AddVertex(
+                float x, float y, float z,
+                float u, float v,
+                float nx, float ny, float nz,
+                float tx, float ty, float tz, float tw)
+            {
+                data.Add(x * 0.5f);
+                data.Add(y * 0.5f);
+                data.Add(z * 0.5f);
+
+                data.Add(1f);
+                data.Add(1f);
+                data.Add(1f);
+                data.Add(1f);
+
+                data.Add(u);
+                data.Add(v);
+
+                data.Add(nx);
+                data.Add(ny);
+                data.Add(nz);
+
+                data.Add(tx);
+                data.Add(ty);
+                data.Add(tz);
+                data.Add(tw);
+            }
+
+            void AddTriangle(
+                float ax, float ay, float az, float au, float av,
+                float bx, float by, float bz, float bu, float bv,
+                float cx, float cy, float cz, float cu, float cv,
+                float nx, float ny, float nz,
+                float tx, float ty, float tz, float tw)
+            {
+                AddVertex(ax, ay, az, au, av, nx, ny, nz, tx, ty, tz, tw);
+                AddVertex(bx, by, bz, bu, bv, nx, ny, nz, tx, ty, tz, tw);
+                AddVertex(cx, cy, cz, cu, cv, nx, ny, nz, tx, ty, tz, tw);
+            }
+
+            int stacks = 48;
+            int slices = 96;
+
+            for (int i = 0; i < stacks; i++)
+            {
+                float phi0 = (float)i / stacks * MathF.PI;
+                float phi1 = (float)(i + 1) / stacks * MathF.PI;
+
+                for (int j = 0; j < slices; j++)
+                {
+                    float theta0 = (float)j / slices * 2f * MathF.PI;
+                    float theta1 = (float)(j + 1) / slices * 2f * MathF.PI;
+
+                    float x00 = MathF.Sin(phi0) * MathF.Cos(theta0);
+                    float y00 = MathF.Cos(phi0);
+                    float z00 = MathF.Sin(phi0) * MathF.Sin(theta0);
+
+                    float x01 = MathF.Sin(phi0) * MathF.Cos(theta1);
+                    float y01 = MathF.Cos(phi0);
+                    float z01 = MathF.Sin(phi0) * MathF.Sin(theta1);
+
+                    float x10 = MathF.Sin(phi1) * MathF.Cos(theta0);
+                    float y10 = MathF.Cos(phi1);
+                    float z10 = MathF.Sin(phi1) * MathF.Sin(theta0);
+
+                    float x11 = MathF.Sin(phi1) * MathF.Cos(theta1);
+                    float y11 = MathF.Cos(phi1);
+                    float z11 = MathF.Sin(phi1) * MathF.Sin(theta1);
+
+                    float u00 = theta0 / (2f * MathF.PI);
+                    float u01 = theta1 / (2f * MathF.PI);
+                    float v0 = phi0 / MathF.PI;
+                    float v1 = phi1 / MathF.PI;
+
+                    float tx0 = -z00;
+                    float tz0 = x00;
+
+                    AddTriangle(
+                        x00, y00, z00, u00, v0,
+                        x01, y01, z01, u01, v0,
+                        x11, y11, z11, u01, v1,
+                        x00, y00, z00,
+                        tx0, 0f, tz0, 1f);
+
+                    AddTriangle(
+                        x00, y00, z00, u00, v0,
+                        x11, y11, z11, u01, v1,
+                        x10, y10, z10, u00, v1,
+                        x00, y00, z00,
+                        tx0, 0f, tz0, 1f);
+                }
+            }
+
+            return data.ToArray();
         }
 
         /// <summary>

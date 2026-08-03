@@ -24,28 +24,28 @@ uniform float uNormalStrength;
 /* 材质参数 */
 uniform float uAmbientStrength;
 uniform float uSpecularIntensity;
-uniform float uSpecularRange;     // 0 = 窄高光, 1 = 宽高光
+uniform float uSpecularRange;
 uniform float uRimIntensity;
-uniform float uRimRange;          // 0 = 窄边缘光, 1 = 宽边缘光
+uniform float uRimRange;
 
-uniform vec3 uSpecularColor;      // 默认 (1,1,1)
-uniform vec3 uRimColor;           // 默认 (1,1,1)
+uniform vec3 uSpecularColor;
+uniform vec3 uRimColor;
 
-uniform float uSmoothness;        // 默认 0.0 = 完全不光滑
+uniform float uSmoothness;
 uniform float uMetallic;
 
-uniform int uReceiveShadow;       // 材质默认应为 1
-uniform int uCastShadow;          // 材质默认应为 1，供投影流程读取
-uniform int uReceiveReflection;   // 材质默认应为 1
-uniform int uEnableColorBanding;  // 材质默认应为 0
+uniform int uReceiveShadow;
+uniform int uCastShadow;
+uniform int uReceiveReflection;
+uniform int uEnableColorBanding;
 
 
-uniform int uEnableOutline;       // 材质开关，默认 0
-uniform int uOutlinePass;         // 系统开关：0=正常通道，1=描边通道
-uniform vec4 uOutlineColor;       // 默认 (0,0,0,1)
+uniform int uEnableOutline;
+uniform int uOutlinePass;
+uniform vec4 uOutlineColor;
 
 uniform int uFogEnabled;
-uniform int uFogMode; // 0=SolidColor, 1=CylindricalTexture, 2=Skybox
+uniform int uFogMode;
 uniform vec4 uFogColor;
 uniform float uFogStart;
 uniform float uFogEnd;
@@ -70,10 +70,17 @@ uniform int uLightCount;
 
 uniform sampler2DShadow uShadowAtlasTexture;
 
-uniform sampler2D uReflectionTexture;      // 2D 反射贴图源
-uniform samplerCube uReflectionSkyboxCube; // 当前批次天空盒捕获得到的 cubemap
+uniform samplerCube uCloudShadowCube;
+uniform float uCloudShadowStrength;
+uniform vec3 uCloudShadowPlanetCenter;
+uniform float uCloudShadowSlant;
+uniform float uCloudShadowTexelSize;
+uniform int uCloudShadowAffectsAmbient;
+
+uniform sampler2D uReflectionTexture;
+uniform samplerCube uReflectionSkyboxCube;
 uniform int uReflectionEnabled;
-uniform int uReflectionSource;             // 0 = SkyboxCube, 1 = Texture2D
+uniform int uReflectionSource;
 uniform float uReflectionIntensity;
 
 in vec4 vColor;
@@ -89,16 +96,16 @@ out vec4 FragColor;
 
 struct GPULight
 {
-    vec4 Meta0;                  // x=Kind, y=Intensity, z=CastShadow, w=AttenuationCurve
-    vec4 ColorRange;             // xyz=Color, w=Range
-    vec4 PositionInner;          // xyz=Position, w=InnerAngle
-    vec4 DirectionOuter;         // xyz=Direction, w=OuterAngle
-    vec4 BoxSizeAreaWidth;       // xyz=BoxSize, w=AreaWidth
-    vec4 AreaRightAreaHeight;    // xyz=AreaRight, w=AreaHeight
-    vec4 AreaUpLineLength;       // xyz=AreaUp, w=LineLength
-    vec4 LineDirectionReserved;  // xyz=LineDirection, w=Reserved0
-    vec4 ShadowAtlasRect;        // xy=min uv, zw=size uv
-    mat4 ShadowMatrix;           // 世界到阴影裁剪空间
+    vec4 Meta0;
+    vec4 ColorRange;
+    vec4 PositionInner;
+    vec4 DirectionOuter;
+    vec4 BoxSizeAreaWidth;
+    vec4 AreaRightAreaHeight;
+    vec4 AreaUpLineLength;
+    vec4 LineDirectionReserved;
+    vec4 ShadowAtlasRect;
+    mat4 ShadowMatrix;
 };
 
 layout(std430, binding = 0) readonly buffer LightBuffer
@@ -840,6 +847,53 @@ void main()
             rimValue *
             attenuation *
             specularRimAttenuation;
+    }
+
+    if (uCloudShadowStrength > 0.0001)
+    {
+        vec3 cloudSunDir = vec3(0.0, 1.0, 0.0);
+        bool cloudSunFound = false;
+
+        for (int i = 0; i < uLightCount; i++)
+        {
+            GPULight src = uLights[i];
+            if (int(src.Meta0.x + 0.5) == LIGHT_KIND_DIRECTIONAL)
+            {
+                cloudSunDir = SafeNormalize(-src.DirectionOuter.xyz);
+                cloudSunFound = true;
+                break;
+            }
+        }
+
+        if (cloudSunFound)
+        {
+            vec3 toCenter = vWorldPos - uCloudShadowPlanetCenter;
+            float centerDist = length(toCenter);
+
+            if (centerDist > 0.000001)
+            {
+                vec3 upDir = toCenter / centerDist;
+                float elevation = dot(upDir, cloudSunDir);
+                float elevFactor = smoothstep(0.0, 0.12, elevation);
+
+                if (elevFactor > 0.0001)
+                {
+                    vec3 sunHorizontal = SafeNormalize(cloudSunDir - upDir * elevation);
+                    float slant = uCloudShadowSlant / max(elevation, 0.02);
+                    vec3 sampleDir = SafeNormalize(upDir * cos(slant) + sunHorizontal * sin(slant));
+
+                    float camDist = max(length(vWorldPos - uCameraPosition), 0.0001);
+                    float lod = clamp(log2(max(1.0, camDist / max(uCloudShadowTexelSize, 0.0001))), 0.0, 10.0);
+
+                    float cloudOpacity = textureLod(uCloudShadowCube, sampleDir, lod).r;
+                    float cloudShadowFactor = 1.0 - cloudOpacity * uCloudShadowStrength * elevFactor;
+
+                    diffuseAccum *= cloudShadowFactor;
+                    if (uCloudShadowAffectsAmbient == 1)
+                        ambientTerm *= cloudShadowFactor;
+                }
+            }
+        }
     }
 
     vec3 reflectionAccum = vec3(0.0);
