@@ -342,6 +342,7 @@ namespace LimitlessSquareEngine
             public Vector2 TextureUV { get; init; } = Vector2.One;
             public MaterialTextureWrapMode TextureWrap { get; init; } = MaterialTextureWrapMode.Repeat;
             public RenderCullMode CullMode { get; init; } = RenderCullMode.Front;
+            public bool IsCloud { get; init; }
         }
 
         private sealed class SkyboxData
@@ -945,6 +946,22 @@ namespace LimitlessSquareEngine
             public int FogSkyboxCube = -1;
             public int FogInvViewRotation = -1;
 
+            public int CloudShadowCube = -1;
+            public int CloudShadowStrength = -1;
+            public int CloudShadowPlanetCenter = -1;
+            public int CloudShadowSlant = -1;
+            public int CloudShadowTexelSize = -1;
+            public int CloudShadowAffectsAmbient = -1;
+            public int CloudTime = -1;
+            public int CloudPlanetCenter = -1;
+            public int CloudPlanetCenterWorld = -1;
+            public int CloudCameraWorldPos = -1;
+            public int CloudInvViewProjection = -1;
+            public int CloudViewProjection = -1;
+            public int CloudFarDepth = -1;
+            public int CloudTanHalfFov = -1;
+            public int CloudViewportHeight = -1;
+
             public int Texture = -1;
         }
 
@@ -1276,6 +1293,7 @@ namespace LimitlessSquareEngine
             public string SceneId;
             public string ObjectId;
             public Double3 CameraWorldPosition;
+            public Double3 CloudPlanetCenterWorldPosition;
 
             public string CameraObjectId;
 
@@ -4178,6 +4196,8 @@ namespace LimitlessSquareEngine
             if (loc.UseOutlineNormal != -1)
                 _gl.Uniform1(loc.UseOutlineNormal, cmd.VertexStrideFloats >= 19 ? 1 : 0);
 
+            ApplyCloudSupportUniforms(cmd);
+
             _gl.ActiveTexture(TextureUnit.Texture0);
         }
 
@@ -6758,7 +6778,8 @@ namespace LimitlessSquareEngine
                         Parameters = parameters,
                         TextureUV = ReadMaterialTextureUV(parameters),
                         TextureWrap = ReadMaterialTextureWrap(parameters),
-                        CullMode = ReadMaterialCullMode(parameters, RenderCullMode.Front)
+                        CullMode = ReadMaterialCullMode(parameters, RenderCullMode.Front),
+                        IsCloud = string.Equals(shaderKey, _cloudShaderKey, StringComparison.OrdinalIgnoreCase)
                     };
 
                     _materialCache[key] = material;
@@ -6797,7 +6818,8 @@ namespace LimitlessSquareEngine
                     Parameters = parameters,
                     TextureUV = ReadMaterialTextureUV(parameters),
                     TextureWrap = ReadMaterialTextureWrap(parameters),
-                    CullMode = ReadMaterialCullMode(parameters, RenderCullMode.Front)
+                    CullMode = ReadMaterialCullMode(parameters, RenderCullMode.Front),
+                    IsCloud = string.Equals(shaderKey, _cloudShaderKey, StringComparison.OrdinalIgnoreCase)
                 };
 
                 _materialCache[key] = material;
@@ -7255,6 +7277,22 @@ namespace LimitlessSquareEngine
             cache.FogSkyboxCube = GetLoc(_uniformFogSkyboxCube);
             cache.FogInvViewRotation = GetLoc(_uniformFogInvViewRotation);
 
+            cache.CloudShadowCube = GetLoc(_uniformCloudShadowCube);
+            cache.CloudShadowStrength = GetLoc(_uniformCloudShadowStrength);
+            cache.CloudShadowPlanetCenter = GetLoc(_uniformCloudShadowPlanetCenter);
+            cache.CloudShadowSlant = GetLoc(_uniformCloudShadowSlant);
+            cache.CloudShadowTexelSize = GetLoc(_uniformCloudShadowTexelSize);
+            cache.CloudShadowAffectsAmbient = GetLoc(_uniformCloudShadowAffectsAmbient);
+            cache.CloudTime = GetLoc(_uniformCloudTime);
+            cache.CloudPlanetCenter = GetLoc(_uniformCloudPlanetCenter);
+            cache.CloudPlanetCenterWorld = GetLoc(_uniformCloudPlanetCenterWorld);
+            cache.CloudCameraWorldPos = GetLoc(_uniformCloudCameraWorldPos);
+            cache.CloudInvViewProjection = GetLoc(_uniformCloudInvViewProjection);
+            cache.CloudViewProjection = GetLoc(_uniformCloudViewProjection);
+            cache.CloudFarDepth = GetLoc(_uniformCloudFarDepth);
+            cache.CloudTanHalfFov = GetLoc(_uniformCloudTanHalfFov);
+            cache.CloudViewportHeight = GetLoc(_uniformCloudViewportHeight);
+
             cache.Texture = GetLoc("uTexture");
 
             _programLocationCache[program] = cache;
@@ -7308,6 +7346,111 @@ namespace LimitlessSquareEngine
                                 MaterialDefaultCommandKind.Float1,
                                 uniform.Location,
                                 x: 0.5f));
+                        }
+                        else if (string.Equals(uniform.Name, "uCloudStepSize", StringComparison.Ordinal))
+                        {
+                            cache.Commands.Add(new MaterialDefaultCommand(
+                                MaterialDefaultCommandKind.Float1,
+                                uniform.Location,
+                                x: 280f));
+                        }
+                        else if (string.Equals(uniform.Name, "uCloudExtinction", StringComparison.Ordinal))
+                        {
+                            cache.Commands.Add(new MaterialDefaultCommand(
+                                MaterialDefaultCommandKind.Float1,
+                                uniform.Location,
+                                x: 0.0002f));
+                        }
+                        else if (string.Equals(uniform.Name, "uCloudDetailStrength", StringComparison.Ordinal))
+                        {
+                            cache.Commands.Add(new MaterialDefaultCommand(
+                                MaterialDefaultCommandKind.Float1,
+                                uniform.Location,
+                                x: 0.25f));
+                        }
+                        else if (string.Equals(uniform.Name, "uCloudWarpStrength", StringComparison.Ordinal))
+                        {
+                            cache.Commands.Add(new MaterialDefaultCommand(
+                                MaterialDefaultCommandKind.Float1,
+                                uniform.Location,
+                                x: 0.35f));
+                        }
+                        else if (string.Equals(uniform.Name, "uCloudSilverLining", StringComparison.Ordinal))
+                        {
+                            cache.Commands.Add(new MaterialDefaultCommand(
+                                MaterialDefaultCommandKind.Float1,
+                                uniform.Location,
+                                x: 0.35f));
+                        }
+                        else if (string.Equals(uniform.Name, "uCloudSilverWidth", StringComparison.Ordinal))
+                        {
+                            cache.Commands.Add(new MaterialDefaultCommand(
+                                MaterialDefaultCommandKind.Float1,
+                                uniform.Location,
+                                x: 6f));
+                        }
+                        else if (string.Equals(uniform.Name, "uCloudCelSoftness", StringComparison.Ordinal))
+                        {
+                            cache.Commands.Add(new MaterialDefaultCommand(
+                                MaterialDefaultCommandKind.Float1,
+                                uniform.Location,
+                                x: 0.08f));
+                        }
+                        else if (string.Equals(uniform.Name, "uCloudAlphaMin", StringComparison.Ordinal))
+                        {
+                            cache.Commands.Add(new MaterialDefaultCommand(
+                                MaterialDefaultCommandKind.Float1,
+                                uniform.Location,
+                                x: 0f));
+                        }
+                        else if (string.Equals(uniform.Name, "uCloudAlphaMax", StringComparison.Ordinal))
+                        {
+                            cache.Commands.Add(new MaterialDefaultCommand(
+                                MaterialDefaultCommandKind.Float1,
+                                uniform.Location,
+                                x: 1f));
+                        }
+                        else if (string.Equals(uniform.Name, "uPlanetRadius", StringComparison.Ordinal))
+                        {
+                            cache.Commands.Add(new MaterialDefaultCommand(
+                                MaterialDefaultCommandKind.Float1,
+                                uniform.Location,
+                                x: 6371000f));
+                        }
+                        else if (string.Equals(uniform.Name, "uCloudBaseAltitude", StringComparison.Ordinal))
+                        {
+                            cache.Commands.Add(new MaterialDefaultCommand(
+                                MaterialDefaultCommandKind.Float1,
+                                uniform.Location,
+                                x: 1500f));
+                        }
+                        else if (string.Equals(uniform.Name, "uCloudThickness", StringComparison.Ordinal))
+                        {
+                            cache.Commands.Add(new MaterialDefaultCommand(
+                                MaterialDefaultCommandKind.Float1,
+                                uniform.Location,
+                                x: 2000f));
+                        }
+                        else if (string.Equals(uniform.Name, "uCloudCoverage", StringComparison.Ordinal))
+                        {
+                            cache.Commands.Add(new MaterialDefaultCommand(
+                                MaterialDefaultCommandKind.Float1,
+                                uniform.Location,
+                                x: 0.5f));
+                        }
+                        else if (string.Equals(uniform.Name, "uCloudNoiseScale", StringComparison.Ordinal))
+                        {
+                            cache.Commands.Add(new MaterialDefaultCommand(
+                                MaterialDefaultCommandKind.Float1,
+                                uniform.Location,
+                                x: 0.002f));
+                        }
+                        else if (string.Equals(uniform.Name, "uCloudCoverageScale", StringComparison.Ordinal))
+                        {
+                            cache.Commands.Add(new MaterialDefaultCommand(
+                                MaterialDefaultCommandKind.Float1,
+                                uniform.Location,
+                                x: 0.00025f));
                         }
                         else
                         {
@@ -7368,6 +7511,13 @@ namespace LimitlessSquareEngine
                                 MaterialDefaultCommandKind.Int1,
                                 uniform.Location,
                                 ix: 1));
+                        }
+                        else if (string.Equals(uniform.Name, "uCloudMaxSteps", StringComparison.Ordinal))
+                        {
+                            cache.Commands.Add(new MaterialDefaultCommand(
+                                MaterialDefaultCommandKind.Int1,
+                                uniform.Location,
+                                ix: 64));
                         }
                         else
                         {
@@ -7460,7 +7610,22 @@ namespace LimitlessSquareEngine
                     string.Equals(uniformName, _uniformFogEdgeTransitionToSkybox, StringComparison.Ordinal) ||
                     string.Equals(uniformName, _uniformFogCylindricalTexture, StringComparison.Ordinal) ||
                     string.Equals(uniformName, _uniformFogSkyboxCube, StringComparison.Ordinal) ||
-                    string.Equals(uniformName, _uniformFogInvViewRotation, StringComparison.Ordinal);
+                    string.Equals(uniformName, _uniformFogInvViewRotation, StringComparison.Ordinal) ||
+                    string.Equals(uniformName, _uniformCloudShadowCube, StringComparison.Ordinal) ||
+                    string.Equals(uniformName, _uniformCloudShadowStrength, StringComparison.Ordinal) ||
+                    string.Equals(uniformName, _uniformCloudShadowPlanetCenter, StringComparison.Ordinal) ||
+                    string.Equals(uniformName, _uniformCloudShadowSlant, StringComparison.Ordinal) ||
+                    string.Equals(uniformName, _uniformCloudShadowTexelSize, StringComparison.Ordinal) ||
+                    string.Equals(uniformName, _uniformCloudShadowAffectsAmbient, StringComparison.Ordinal) ||
+                    string.Equals(uniformName, _uniformCloudTime, StringComparison.Ordinal) ||
+                    string.Equals(uniformName, _uniformCloudPlanetCenter, StringComparison.Ordinal) ||
+                    string.Equals(uniformName, _uniformCloudPlanetCenterWorld, StringComparison.Ordinal) ||
+                    string.Equals(uniformName, _uniformCloudCameraWorldPos, StringComparison.Ordinal) ||
+                    string.Equals(uniformName, _uniformCloudInvViewProjection, StringComparison.Ordinal) ||
+                    string.Equals(uniformName, _uniformCloudViewProjection, StringComparison.Ordinal) ||
+                    string.Equals(uniformName, _uniformCloudFarDepth, StringComparison.Ordinal) ||
+                    string.Equals(uniformName, _uniformCloudTanHalfFov, StringComparison.Ordinal) ||
+                    string.Equals(uniformName, _uniformCloudViewportHeight, StringComparison.Ordinal);
         }
 
         private bool CanReuseCapturedSkyboxReflection(in RenderCommand batchCmd, SkyboxData skybox)
@@ -8487,6 +8652,73 @@ namespace LimitlessSquareEngine
                             (float)relativePosition.Y,
                             (float)(-relativePosition.Z));
 
+                    MaterialData? cloudMaterial = null;
+                    foreach (MeshSurfaceData surface in mesh.Surfaces)
+                    {
+                        MaterialData surfaceMaterial = ResolveSceneMaterial(obj, surface);
+                        if (surfaceMaterial.IsCloud)
+                        {
+                            cloudMaterial = surfaceMaterial;
+                            break;
+                        }
+                    }
+
+                    if (cloudMaterial != null)
+                    {
+                        Vector3 planetCenterCameraRelative = new Vector3(
+                            (float)relativePosition.X,
+                            (float)relativePosition.Y,
+                            (float)(-relativePosition.Z));
+
+                        _renderQueue.Add(new RenderCommand
+                        {
+                            Vertices = _cloudFullscreenVertices,
+                            PrimitiveType = PrimitiveType.Triangles,
+                            Program = cloudMaterial.Program,
+                            UseTexture = false,
+                            TextureId = 0,
+                            VertexStrideFloats = 9,
+                            CameraPosition = Vector3.Zero,
+                            ClusterNear = (float)layerNear,
+                            ClusterFar = (float)layerFar,
+                            SceneId = sceneId,
+                            ObjectId = obj.ObjectId,
+                            CameraWorldPosition = cameraWorld.Position,
+                            CloudPlanetCenterWorldPosition = obj.WorldPosition,
+                            RenderSpace = RenderSpace.Camera,
+                            Model = Matrix4x4.CreateTranslation(planetCenterCameraRelative),
+                            View = view,
+                            Projection = projection,
+                            QueueType = RenderQueueType.Transparent,
+                            UsePremultipliedTransparentBlend = false,
+                            SortDepth = float.MaxValue,
+                            SubmissionIndex = _submissionCounter++,
+                            Pass = RenderPass.Scene,
+                            BatchId = batchId,
+                            BatchSubmissionOrder = cameraItem.SubmissionOrder,
+                            ViewportX = viewport.X,
+                            ViewportY = viewport.Y,
+                            UseReverseZ = useReverseZ,
+                            ViewportWidth = viewport.Width,
+                            ViewportHeight = viewport.Height,
+                            Material = cloudMaterial,
+                            Skybox = null,
+                            ForceWhiteVertexColor = false,
+                            IsSkybox = false,
+                            CullMode = RenderCullMode.Both,
+                            MeshId = "",
+                            MeshSurfaceId = "",
+                            CameraObjectId = cameraItem.ObjectId,
+                            MeshVertexColorsAreWhite = true,
+                            HasBoundingBox = false,
+                            BoundingLocalMin = Vector3.Zero,
+                            BoundingLocalMax = Vector3.Zero,
+                            DepthLayerIndex = layerIdx,
+                            DepthLayerCount = layerCount
+                        });
+                        continue;
+                    }
+
                     if (staticRenderCache != null)
                     {
                         foreach (StaticSceneSurfaceCommandTemplate surface in staticRenderCache.Surfaces)
@@ -8537,6 +8769,7 @@ namespace LimitlessSquareEngine
                                 DepthLayerCount = layerCount
                             };
                             ApplyFogStateToRenderCommand(ref cmd, fogSettings, skybox);
+                            PrepareCloudRenderCommand(surface.Material, ref cmd);
                             WarmupSceneCommandResources(cmd);
                             _renderQueue.Add(cmd);
                         }
@@ -8595,6 +8828,7 @@ namespace LimitlessSquareEngine
                             DepthLayerCount = layerCount
                         };
                         ApplyFogStateToRenderCommand(ref cmd, fogSettings, skybox);
+                        PrepareCloudRenderCommand(material, ref cmd);
                         WarmupSceneCommandResources(cmd);
                         _renderQueue.Add(cmd);
                     }
@@ -8810,6 +9044,9 @@ namespace LimitlessSquareEngine
         [MoonSharpHidden]
         public void ExecuteRenderQueue()
         {
+            _frameId++;
+            _cloudTimeSeconds = _cloudTimeStopwatch.Elapsed.TotalSeconds;
+
             BeginRenderFrameDiagnostics(_renderQueue.Count);
 
             try
@@ -8868,6 +9105,7 @@ namespace LimitlessSquareEngine
                         if (HasVisibleNonSkyboxSceneCommand(batch.ToList()))
                         {
                             PrepareDirectionalShadowBatch(layer0Anchor, batch.ToList());
+                            PrepareCloudShadowBatch(layer0Anchor, batch.ToList());
                             PrepareLightingBuffersForBatch(layer0Anchor);
                             _layerGroupFirstLayerBatchId[layer0Anchor.CameraObjectId] = layer0Anchor.BatchId;
                         }
@@ -8923,11 +9161,17 @@ namespace LimitlessSquareEngine
                     {
                         _directionalShadowBatchCache[first.BatchId] = layer0ShadowData;
                     }
+                    if (_layerGroupFirstLayerBatchId.TryGetValue(first.CameraObjectId, out layer0BatchId) &&
+                        _cloudShadowBatchCache.TryGetValue(layer0BatchId, out var layer0CloudData))
+                    {
+                        _cloudShadowBatchCache[first.BatchId] = layer0CloudData;
+                    }
                     PrepareLightingBuffersForBatch(first);
                 }
                 else if (!hasVisibleNonSkyboxSceneCommand && first.DepthLayerIndex != 0)
                 {
                     _directionalShadowBatchCache.Remove(first.BatchId);
+                    _cloudShadowBatchCache.Remove(first.BatchId);
                 }
 
                 CameraPostProcessSettings? postSettings = ResolvePostProcessForCamera(first.CameraObjectId);
@@ -10903,6 +11147,8 @@ void main()
                 _gl.DeleteTexture(_lightingDummyTexture);
                 _lightingDummyTexture = 0;
             }
+
+            ReleaseCloudSupportResources();
 
             foreach (TextTextureInfo info in _textTextureCache.Values)
             {
