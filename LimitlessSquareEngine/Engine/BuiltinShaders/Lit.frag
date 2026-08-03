@@ -70,13 +70,6 @@ uniform int uLightCount;
 
 uniform sampler2DShadow uShadowAtlasTexture;
 
-uniform samplerCube uCloudShadowCube;
-uniform float uCloudShadowStrength;
-uniform vec3 uCloudShadowPlanetCenter;
-uniform float uCloudShadowSlant;
-uniform float uCloudShadowTexelSize;
-uniform int uCloudShadowAffectsAmbient;
-
 uniform sampler2D uReflectionTexture;
 uniform samplerCube uReflectionSkyboxCube;
 uniform int uReflectionEnabled;
@@ -847,53 +840,6 @@ void main()
             rimValue *
             attenuation *
             specularRimAttenuation;
-    }
-
-    if (uCloudShadowStrength > 0.0001)
-    {
-        vec3 cloudSunDir = vec3(0.0, 1.0, 0.0);
-        bool cloudSunFound = false;
-
-        for (int i = 0; i < uLightCount; i++)
-        {
-            GPULight src = uLights[i];
-            if (int(src.Meta0.x + 0.5) == LIGHT_KIND_DIRECTIONAL)
-            {
-                cloudSunDir = SafeNormalize(-src.DirectionOuter.xyz);
-                cloudSunFound = true;
-                break;
-            }
-        }
-
-        if (cloudSunFound)
-        {
-            vec3 toCenter = vWorldPos - uCloudShadowPlanetCenter;
-            float centerDist = length(toCenter);
-
-            if (centerDist > 0.000001)
-            {
-                vec3 upDir = toCenter / centerDist;
-                float elevation = dot(upDir, cloudSunDir);
-                float elevFactor = smoothstep(0.0, 0.12, elevation);
-
-                if (elevFactor > 0.0001)
-                {
-                    vec3 sunHorizontal = SafeNormalize(cloudSunDir - upDir * elevation);
-                    float slant = uCloudShadowSlant / max(elevation, 0.02);
-                    vec3 sampleDir = SafeNormalize(upDir * cos(slant) + sunHorizontal * sin(slant));
-
-                    float camDist = max(length(vWorldPos - uCameraPosition), 0.0001);
-                    float lod = clamp(log2(max(1.0, camDist / max(uCloudShadowTexelSize, 0.0001))), 0.0, 10.0);
-
-                    float cloudOpacity = textureLod(uCloudShadowCube, sampleDir, lod).r;
-                    float cloudShadowFactor = 1.0 - cloudOpacity * uCloudShadowStrength * elevFactor;
-
-                    diffuseAccum *= cloudShadowFactor;
-                    if (uCloudShadowAffectsAmbient == 1)
-                        ambientTerm *= cloudShadowFactor;
-                }
-            }
-        }
     }
 
     vec3 reflectionAccum = vec3(0.0);

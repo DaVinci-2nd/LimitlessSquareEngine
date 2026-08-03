@@ -946,12 +946,6 @@ namespace LimitlessSquareEngine
             public int FogSkyboxCube = -1;
             public int FogInvViewRotation = -1;
 
-            public int CloudShadowCube = -1;
-            public int CloudShadowStrength = -1;
-            public int CloudShadowPlanetCenter = -1;
-            public int CloudShadowSlant = -1;
-            public int CloudShadowTexelSize = -1;
-            public int CloudShadowAffectsAmbient = -1;
             public int CloudTime = -1;
             public int CloudPlanetCenter = -1;
             public int CloudPlanetCenterWorld = -1;
@@ -961,6 +955,8 @@ namespace LimitlessSquareEngine
             public int CloudFarDepth = -1;
             public int CloudTanHalfFov = -1;
             public int CloudViewportHeight = -1;
+            public int CloudLayerNear = -1;
+            public int CloudLayerFar = -1;
 
             public int Texture = -1;
         }
@@ -1290,6 +1286,8 @@ namespace LimitlessSquareEngine
             public Vector3 CameraPosition;
             public float ClusterNear;
             public float ClusterFar;
+            public float CloudLayerNear;
+            public float CloudLayerFar;
             public string SceneId;
             public string ObjectId;
             public Double3 CameraWorldPosition;
@@ -7277,12 +7275,6 @@ namespace LimitlessSquareEngine
             cache.FogSkyboxCube = GetLoc(_uniformFogSkyboxCube);
             cache.FogInvViewRotation = GetLoc(_uniformFogInvViewRotation);
 
-            cache.CloudShadowCube = GetLoc(_uniformCloudShadowCube);
-            cache.CloudShadowStrength = GetLoc(_uniformCloudShadowStrength);
-            cache.CloudShadowPlanetCenter = GetLoc(_uniformCloudShadowPlanetCenter);
-            cache.CloudShadowSlant = GetLoc(_uniformCloudShadowSlant);
-            cache.CloudShadowTexelSize = GetLoc(_uniformCloudShadowTexelSize);
-            cache.CloudShadowAffectsAmbient = GetLoc(_uniformCloudShadowAffectsAmbient);
             cache.CloudTime = GetLoc(_uniformCloudTime);
             cache.CloudPlanetCenter = GetLoc(_uniformCloudPlanetCenter);
             cache.CloudPlanetCenterWorld = GetLoc(_uniformCloudPlanetCenterWorld);
@@ -7292,6 +7284,8 @@ namespace LimitlessSquareEngine
             cache.CloudFarDepth = GetLoc(_uniformCloudFarDepth);
             cache.CloudTanHalfFov = GetLoc(_uniformCloudTanHalfFov);
             cache.CloudViewportHeight = GetLoc(_uniformCloudViewportHeight);
+            cache.CloudLayerNear = GetLoc(_uniformCloudLayerNear);
+            cache.CloudLayerFar = GetLoc(_uniformCloudLayerFar);
 
             cache.Texture = GetLoc("uTexture");
 
@@ -7352,7 +7346,7 @@ namespace LimitlessSquareEngine
                             cache.Commands.Add(new MaterialDefaultCommand(
                                 MaterialDefaultCommandKind.Float1,
                                 uniform.Location,
-                                x: 280f));
+                                x: 1200f));
                         }
                         else if (string.Equals(uniform.Name, "uCloudExtinction", StringComparison.Ordinal))
                         {
@@ -7422,14 +7416,14 @@ namespace LimitlessSquareEngine
                             cache.Commands.Add(new MaterialDefaultCommand(
                                 MaterialDefaultCommandKind.Float1,
                                 uniform.Location,
-                                x: 1500f));
+                                x: -12000f));
                         }
                         else if (string.Equals(uniform.Name, "uCloudThickness", StringComparison.Ordinal))
                         {
                             cache.Commands.Add(new MaterialDefaultCommand(
                                 MaterialDefaultCommandKind.Float1,
                                 uniform.Location,
-                                x: 2000f));
+                                x: 15500f));
                         }
                         else if (string.Equals(uniform.Name, "uCloudCoverage", StringComparison.Ordinal))
                         {
@@ -7517,7 +7511,7 @@ namespace LimitlessSquareEngine
                             cache.Commands.Add(new MaterialDefaultCommand(
                                 MaterialDefaultCommandKind.Int1,
                                 uniform.Location,
-                                ix: 64));
+                                ix: 16));
                         }
                         else
                         {
@@ -7611,12 +7605,6 @@ namespace LimitlessSquareEngine
                     string.Equals(uniformName, _uniformFogCylindricalTexture, StringComparison.Ordinal) ||
                     string.Equals(uniformName, _uniformFogSkyboxCube, StringComparison.Ordinal) ||
                     string.Equals(uniformName, _uniformFogInvViewRotation, StringComparison.Ordinal) ||
-                    string.Equals(uniformName, _uniformCloudShadowCube, StringComparison.Ordinal) ||
-                    string.Equals(uniformName, _uniformCloudShadowStrength, StringComparison.Ordinal) ||
-                    string.Equals(uniformName, _uniformCloudShadowPlanetCenter, StringComparison.Ordinal) ||
-                    string.Equals(uniformName, _uniformCloudShadowSlant, StringComparison.Ordinal) ||
-                    string.Equals(uniformName, _uniformCloudShadowTexelSize, StringComparison.Ordinal) ||
-                    string.Equals(uniformName, _uniformCloudShadowAffectsAmbient, StringComparison.Ordinal) ||
                     string.Equals(uniformName, _uniformCloudTime, StringComparison.Ordinal) ||
                     string.Equals(uniformName, _uniformCloudPlanetCenter, StringComparison.Ordinal) ||
                     string.Equals(uniformName, _uniformCloudPlanetCenterWorld, StringComparison.Ordinal) ||
@@ -8681,6 +8669,8 @@ namespace LimitlessSquareEngine
                             CameraPosition = Vector3.Zero,
                             ClusterNear = (float)layerNear,
                             ClusterFar = (float)layerFar,
+                            CloudLayerNear = (float)layerNear,
+                            CloudLayerFar = layerCount == 1 ? float.MaxValue : (float)layerFar,
                             SceneId = sceneId,
                             ObjectId = obj.ObjectId,
                             CameraWorldPosition = cameraWorld.Position,
@@ -9105,7 +9095,6 @@ namespace LimitlessSquareEngine
                         if (HasVisibleNonSkyboxSceneCommand(batch.ToList()))
                         {
                             PrepareDirectionalShadowBatch(layer0Anchor, batch.ToList());
-                            PrepareCloudShadowBatch(layer0Anchor, batch.ToList());
                             PrepareLightingBuffersForBatch(layer0Anchor);
                             _layerGroupFirstLayerBatchId[layer0Anchor.CameraObjectId] = layer0Anchor.BatchId;
                         }
@@ -9161,17 +9150,11 @@ namespace LimitlessSquareEngine
                     {
                         _directionalShadowBatchCache[first.BatchId] = layer0ShadowData;
                     }
-                    if (_layerGroupFirstLayerBatchId.TryGetValue(first.CameraObjectId, out layer0BatchId) &&
-                        _cloudShadowBatchCache.TryGetValue(layer0BatchId, out var layer0CloudData))
-                    {
-                        _cloudShadowBatchCache[first.BatchId] = layer0CloudData;
-                    }
                     PrepareLightingBuffersForBatch(first);
                 }
                 else if (!hasVisibleNonSkyboxSceneCommand && first.DepthLayerIndex != 0)
                 {
                     _directionalShadowBatchCache.Remove(first.BatchId);
-                    _cloudShadowBatchCache.Remove(first.BatchId);
                 }
 
                 CameraPostProcessSettings? postSettings = ResolvePostProcessForCamera(first.CameraObjectId);
