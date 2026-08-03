@@ -39,9 +39,8 @@ uniform mat4 uCloudInvViewProjection;
 uniform mat4 uCloudViewProjection;
 uniform float uCloudTanHalfFov;
 uniform float uCloudViewportHeight;
-
-uniform samplerCube uCloudShadowCube;
-uniform float uCloudShadowStrength;
+uniform float uCloudLayerNear;
+uniform float uCloudLayerFar;
 
 struct GPULight
 {
@@ -210,6 +209,9 @@ float sampleDensity(vec3 planetLocal, float h, float t, float stepSize)
     float erosion = fbmNoise(p * uCloudNoiseScale * detailAtten);
     density = max(0.0, density - erosion * uCloudDetailStrength);
 
+    float absoluteAlt = length(planetLocal) - uPlanetRadius;
+    density *= smoothstep(1400.0, 1600.0, absoluteAlt);
+
     return density;
 }
 
@@ -268,13 +270,11 @@ void main()
             tEntry = tInnerFar;
     }
 
-    float tPlanetNear;
-    float tPlanetFar;
-    if (raySphere(cameraPos, viewDir, planetCenter, uPlanetRadius, tPlanetNear, tPlanetFar) &&
-        tPlanetNear > tEntry && tPlanetNear < tExit)
-    {
-        tExit = tPlanetNear;
-    }
+    float cosTheta = max((uCloudViewProjection * vec4(viewDir, 0.0)).w, 0.000001);
+    float tLayerNear = uCloudLayerNear / cosTheta;
+    float tLayerFar = uCloudLayerFar / cosTheta;
+    tEntry = max(tEntry, tLayerNear);
+    tExit = min(tExit, tLayerFar);
 
     float chord = tExit - tEntry;
     if (chord <= 0.0001)
@@ -283,61 +283,78 @@ void main()
         return;
     }
 
-    float midDist = tEntry + chord * 0.5;
-    float pixelStep = midDist * 2.0 * max(uCloudTanHalfFov, 0.0001) / max(uCloudViewportHeight, 1.0);
-    float stepSize = max(uCloudStepSize, pixelStep);
-    int steps = clamp(int(ceil(chord / stepSize)), 8, max(uCloudMaxSteps, 8));
-    stepSize = chord / float(steps);
+    vec3 camLocal = vec3(uCloudCameraWorldPos - uCloudPlanetCenterWorld);
+
+    float pixelStep = tEntry * 2.0 * max(uCloudTanHalfFov, 0.0001) / max(uCloudViewportHeight, 1.0);
+    float nearStep = max(uCloudStepSize, pixelStep);
+
+    int budget = max(uCloudMaxSteps, 8);
+    int steps;
+    float slope;
+    if (chord <= float(budget) * nearStep)
+    {
+        steps = clamp(int(ceil(chord / nearStep)), 1, budget);
+        slope = 0.0;
+    }
+    else
+    {
+        steps = budget;
+        float n = float(budget);
+        slope = 2.0 * (chord - n * nearStep) / (n * (n - 1.0));
+    }
 
     vec3 sunDir = findSunDir();
-    vec3 upCam = normalize(vec3(uCloudCameraWorldPos - uCloudPlanetCenterWorld));
+    vec3 upCam = normalize(camLocal);
     float celSoft = clamp(uCloudCelSoftness, 0.001, 0.5);
     float extinct = max(uCloudExtinction, 0.0000001);
-    float shadowStrength = clamp(uCloudShadowStrength, 0.0, 1.0);
 
     float transmittance = 1.0;
     vec3 accumLight = vec3(0.0);
+    float firstCloudT = -1.0;
 
+    float t = tEntry;
+    float step = nearStep;
     for (int i = 0; i < steps; i++)
     {
-        double tt = double(tEntry) + (double(i) + 0.5) * double(stepSize);
-        dvec3 samplePosAbs = uCloudCameraWorldPos + dvec3(viewDirWorld) * tt;
-        vec3 planetLocal = vec3(samplePosAbs - uCloudPlanetCenterWorld);
-        float alt = float(length(samplePosAbs - uCloudPlanetCenterWorld)) - uPlanetRadius;
+        vec3 samplePos = camLocal + viewDirWorld * (t + step * 0.5);
+        float alt = length(samplePos) - uPlanetRadius;
 
-        if (alt <= uCloudBaseAltitude || alt >= uCloudBaseAltitude + uCloudThickness)
-            continue;
+        if (alt > uCloudBaseAltitude && alt < uCloudBaseAltitude + uCloudThickness)
+        {
+            float h = (alt - uCloudBaseAltitude) / max(uCloudThickness, 0.0001);
+            float density = sampleDensity(samplePos, h, t + step * 0.5, step);
 
-        float h = (alt - uCloudBaseAltitude) / max(uCloudThickness, 0.0001);
-        float density = sampleDensity(planetLocal, h, float(tt), stepSize);
+            if (density > 0.001)
+            {
+                if (firstCloudT < 0.0)
+                    firstCloudT = t + step * 0.5;
 
-        if (density <= 0.001)
-            continue;
+                float stepTransmittance = exp(-density * step * extinct);
+                float densityLight = density * step * extinct;
 
-        float stepTransmittance = exp(-density * stepSize * extinct);
-        float densityLight = density * stepSize * extinct;
+                vec3 upDir = normalize(samplePos);
+                float ndl = dot(upDir, sunDir);
+                float lit = smoothstep(0.0, celSoft, ndl);
 
-        vec3 upDir = normalize(planetLocal);
-        float ndl = dot(upDir, sunDir);
-        float lit = smoothstep(0.0, celSoft, ndl);
+                vec3 cloudCol = mix(uCloudShadeColor, uCloudLightColor, lit);
 
-        vec3 cloudCol = mix(uCloudShadeColor, uCloudLightColor, lit);
+                float rim = pow(1.0 - abs(dot(viewDirWorld, sunDir)), uCloudSilverWidth) * uCloudSilverLining;
+                cloudCol += uCloudLightColor * rim;
 
-        float cloudOpacity = textureLod(uCloudShadowCube, sunDir, 4.0).r;
-        cloudCol *= 1.0 - cloudOpacity * shadowStrength;
+                float sunElev = dot(upCam, sunDir);
+                float twilightBand = smoothstep(-0.10, 0.06, sunElev) * (1.0 - smoothstep(0.05, 0.18, sunElev));
+                cloudCol = mix(cloudCol, uCloudTwilightColor, twilightBand * uCloudTwilightStrength);
 
-        float rim = pow(1.0 - abs(dot(viewDirWorld, sunDir)), uCloudSilverWidth) * uCloudSilverLining;
-        cloudCol += uCloudLightColor * rim;
+                accumLight += transmittance * cloudCol * densityLight;
+                transmittance *= stepTransmittance;
 
-        float sunElev = dot(upCam, sunDir);
-        float twilightBand = smoothstep(-0.10, 0.06, sunElev) * (1.0 - smoothstep(0.05, 0.18, sunElev));
-        cloudCol = mix(cloudCol, uCloudTwilightColor, twilightBand * uCloudTwilightStrength);
+                if (transmittance < 0.02)
+                    break;
+            }
+        }
 
-        accumLight += transmittance * cloudCol * densityLight;
-        transmittance *= stepTransmittance;
-
-        if (transmittance < 0.02)
-            break;
+        t += step;
+        step += slope;
     }
 
     float alpha = 1.0 - transmittance;
@@ -353,6 +370,7 @@ void main()
     cloudCol = clamp(cloudCol, 0.0, 1.0);
     FragColor = vec4(cloudCol * alpha, alpha);
 
-    vec4 clipDepth = uCloudViewProjection * vec4(viewDir * tEntry, 1.0);
+    float depthT = firstCloudT >= 0.0 ? firstCloudT : tEntry;
+    vec4 clipDepth = uCloudViewProjection * vec4(viewDir * depthT, 1.0);
     gl_FragDepth = clamp(clipDepth.z / max(clipDepth.w, 0.000001) * 0.5 + 0.5, 0.0, 1.0);
 }
