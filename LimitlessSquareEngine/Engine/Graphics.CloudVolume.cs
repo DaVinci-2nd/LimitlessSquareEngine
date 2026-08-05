@@ -22,6 +22,8 @@ namespace LimitlessSquareEngine
         private const string _uniformCloudViewportHeight = "uCloudViewportHeight";
         private const string _uniformCloudLayerNear = "uCloudLayerNear";
         private const string _uniformCloudLayerFar = "uCloudLayerFar";
+        private const string _uniformCloudShapeNoise = "uCloudShapeNoise";
+        private const string _uniformCloudDetailNoise = "uCloudDetailNoise";
 
         private static readonly float[] _cloudFullscreenVertices =
         {
@@ -97,7 +99,7 @@ namespace LimitlessSquareEngine
                 SetMatrixUniform(loc.CloudViewProjection, cmd.View * cmd.Projection);
 
             if (loc.CloudFarDepth != -1)
-                _gl.Uniform1(loc.CloudFarDepth, cmd.UseReverseZ ? 0f : 1f);
+                _gl.Uniform1(loc.CloudFarDepth, cmd.UseReverseZ ? -1f : 1f);
 
             if (loc.CloudTanHalfFov != -1)
             {
@@ -115,6 +117,35 @@ namespace LimitlessSquareEngine
 
             if (loc.CloudLayerFar != -1)
                 _gl.Uniform1(loc.CloudLayerFar, cmd.CloudLayerFar);
+
+            if (loc.CloudShapeNoise != -1 || loc.CloudDetailNoise != -1)
+            {
+                EnsureCloudNoiseTextures();
+
+                _gl.UseProgram(_currentProgram);
+                _gl.Viewport(
+                    cmd.ViewportX,
+                    cmd.ViewportY,
+                    (uint)Math.Max(1, cmd.ViewportWidth),
+                    (uint)Math.Max(1, cmd.ViewportHeight));
+                BindCommandGeometry(cmd);
+
+                if (loc.CloudShapeNoise != -1)
+                {
+                    const int shapeNoiseUnit = 14;
+                    _gl.ActiveTexture((TextureUnit)((int)TextureUnit.Texture0 + shapeNoiseUnit));
+                    _gl.BindTexture(TextureTarget.Texture3D, _cloudNoiseShapeTexture);
+                    _gl.Uniform1(loc.CloudShapeNoise, shapeNoiseUnit);
+                }
+
+                if (loc.CloudDetailNoise != -1)
+                {
+                    const int detailNoiseUnit = 19;
+                    _gl.ActiveTexture((TextureUnit)((int)TextureUnit.Texture0 + detailNoiseUnit));
+                    _gl.BindTexture(TextureTarget.Texture3D, _cloudNoiseDetailTexture);
+                    _gl.Uniform1(loc.CloudDetailNoise, detailNoiseUnit);
+                }
+            }
         }
 
         private static void PrepareCloudRenderCommand(MaterialData material, ref RenderCommand cmd)
@@ -132,6 +163,8 @@ namespace LimitlessSquareEngine
                 _gl.DeleteVertexArray(_cloudFullscreenVao);
                 _cloudFullscreenVao = 0;
             }
+
+            ReleaseCloudNoiseTextures();
 
             _cloudSupportInitialized = false;
         }
