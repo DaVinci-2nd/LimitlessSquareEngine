@@ -957,6 +957,8 @@ namespace LimitlessSquareEngine
             public int CloudViewportHeight = -1;
             public int CloudLayerNear = -1;
             public int CloudLayerFar = -1;
+            public int CloudShapeNoise = -1;
+            public int CloudDetailNoise = -1;
 
             public int Texture = -1;
         }
@@ -7286,6 +7288,8 @@ namespace LimitlessSquareEngine
             cache.CloudViewportHeight = GetLoc(_uniformCloudViewportHeight);
             cache.CloudLayerNear = GetLoc(_uniformCloudLayerNear);
             cache.CloudLayerFar = GetLoc(_uniformCloudLayerFar);
+            cache.CloudShapeNoise = GetLoc(_uniformCloudShapeNoise);
+            cache.CloudDetailNoise = GetLoc(_uniformCloudDetailNoise);
 
             cache.Texture = GetLoc("uTexture");
 
@@ -7346,21 +7350,56 @@ namespace LimitlessSquareEngine
                             cache.Commands.Add(new MaterialDefaultCommand(
                                 MaterialDefaultCommandKind.Float1,
                                 uniform.Location,
-                                x: 1200f));
+                                x: 60f));
+                        }
+                        else if (string.Equals(uniform.Name, "uCloudEvolution", StringComparison.Ordinal))
+                        {
+                            cache.Commands.Add(new MaterialDefaultCommand(
+                                MaterialDefaultCommandKind.Float1,
+                                uniform.Location,
+                                x: 0.5f));
                         }
                         else if (string.Equals(uniform.Name, "uCloudExtinction", StringComparison.Ordinal))
                         {
                             cache.Commands.Add(new MaterialDefaultCommand(
                                 MaterialDefaultCommandKind.Float1,
                                 uniform.Location,
-                                x: 0.0002f));
+                                x: 0.003f));
                         }
                         else if (string.Equals(uniform.Name, "uCloudDetailStrength", StringComparison.Ordinal))
                         {
                             cache.Commands.Add(new MaterialDefaultCommand(
                                 MaterialDefaultCommandKind.Float1,
                                 uniform.Location,
-                                x: 0.25f));
+                                x: 0.5f));
+                        }
+                        else if (string.Equals(uniform.Name, "uCloudEdgeSoftness", StringComparison.Ordinal))
+                        {
+                            cache.Commands.Add(new MaterialDefaultCommand(
+                                MaterialDefaultCommandKind.Float1,
+                                uniform.Location,
+                                x: 0.5f));
+                        }
+                        else if (string.Equals(uniform.Name, "uCloudShadowStrength", StringComparison.Ordinal))
+                        {
+                            cache.Commands.Add(new MaterialDefaultCommand(
+                                MaterialDefaultCommandKind.Float1,
+                                uniform.Location,
+                                x: 0.6f));
+                        }
+                        else if (string.Equals(uniform.Name, "uCloudShadowAffectsAmbient", StringComparison.Ordinal))
+                        {
+                            cache.Commands.Add(new MaterialDefaultCommand(
+                                MaterialDefaultCommandKind.Float1,
+                                uniform.Location,
+                                x: 1f));
+                        }
+                        else if (string.Equals(uniform.Name, "uCloudShadowProbeDist", StringComparison.Ordinal))
+                        {
+                            cache.Commands.Add(new MaterialDefaultCommand(
+                                MaterialDefaultCommandKind.Float1,
+                                uniform.Location,
+                                x: 400f));
                         }
                         else if (string.Equals(uniform.Name, "uCloudWarpStrength", StringComparison.Ordinal))
                         {
@@ -7416,14 +7455,14 @@ namespace LimitlessSquareEngine
                             cache.Commands.Add(new MaterialDefaultCommand(
                                 MaterialDefaultCommandKind.Float1,
                                 uniform.Location,
-                                x: -12000f));
+                                x: 1400f));
                         }
                         else if (string.Equals(uniform.Name, "uCloudThickness", StringComparison.Ordinal))
                         {
                             cache.Commands.Add(new MaterialDefaultCommand(
                                 MaterialDefaultCommandKind.Float1,
                                 uniform.Location,
-                                x: 15500f));
+                                x: 2600f));
                         }
                         else if (string.Equals(uniform.Name, "uCloudCoverage", StringComparison.Ordinal))
                         {
@@ -7432,19 +7471,19 @@ namespace LimitlessSquareEngine
                                 uniform.Location,
                                 x: 0.5f));
                         }
-                        else if (string.Equals(uniform.Name, "uCloudNoiseScale", StringComparison.Ordinal))
+                        else if (string.Equals(uniform.Name, "uCloudShapeTile", StringComparison.Ordinal))
                         {
                             cache.Commands.Add(new MaterialDefaultCommand(
                                 MaterialDefaultCommandKind.Float1,
                                 uniform.Location,
-                                x: 0.002f));
+                                x: 12000f));
                         }
-                        else if (string.Equals(uniform.Name, "uCloudCoverageScale", StringComparison.Ordinal))
+                        else if (string.Equals(uniform.Name, "uCloudDetailTile", StringComparison.Ordinal))
                         {
                             cache.Commands.Add(new MaterialDefaultCommand(
                                 MaterialDefaultCommandKind.Float1,
                                 uniform.Location,
-                                x: 0.00025f));
+                                x: 1800f));
                         }
                         else
                         {
@@ -7456,20 +7495,61 @@ namespace LimitlessSquareEngine
                         break;
 
                     case UniformType.FloatVec2:
-                        cache.Commands.Add(new MaterialDefaultCommand(
-                            MaterialDefaultCommandKind.Float2,
-                            uniform.Location,
-                            x: 0f,
-                            y: 0f));
+                        if (string.Equals(uniform.Name, "uCloudWind", StringComparison.Ordinal))
+                        {
+                            cache.Commands.Add(new MaterialDefaultCommand(
+                                MaterialDefaultCommandKind.Float2,
+                                uniform.Location,
+                                x: 6f,
+                                y: 2f));
+                        }
+                        else
+                        {
+                            cache.Commands.Add(new MaterialDefaultCommand(
+                                MaterialDefaultCommandKind.Float2,
+                                uniform.Location,
+                                x: 0f,
+                                y: 0f));
+                        }
                         break;
 
                     case UniformType.FloatVec3:
-                        cache.Commands.Add(new MaterialDefaultCommand(
-                            MaterialDefaultCommandKind.Float3,
-                            uniform.Location,
-                            x: 0f,
-                            y: 0f,
-                            z: 0f));
+                        if (string.Equals(uniform.Name, "uCloudLightColor", StringComparison.Ordinal))
+                        {
+                            cache.Commands.Add(new MaterialDefaultCommand(
+                                MaterialDefaultCommandKind.Float3,
+                                uniform.Location,
+                                x: 1f,
+                                y: 0.99f,
+                                z: 0.97f));
+                        }
+                        else if (string.Equals(uniform.Name, "uCloudShadeColor", StringComparison.Ordinal))
+                        {
+                            cache.Commands.Add(new MaterialDefaultCommand(
+                                MaterialDefaultCommandKind.Float3,
+                                uniform.Location,
+                                x: 0.52f,
+                                y: 0.58f,
+                                z: 0.70f));
+                        }
+                        else if (string.Equals(uniform.Name, "uCloudTwilightColor", StringComparison.Ordinal))
+                        {
+                            cache.Commands.Add(new MaterialDefaultCommand(
+                                MaterialDefaultCommandKind.Float3,
+                                uniform.Location,
+                                x: 1f,
+                                y: 0.62f,
+                                z: 0.38f));
+                        }
+                        else
+                        {
+                            cache.Commands.Add(new MaterialDefaultCommand(
+                                MaterialDefaultCommandKind.Float3,
+                                uniform.Location,
+                                x: 0f,
+                                y: 0f,
+                                z: 0f));
+                        }
                         break;
 
                     case UniformType.FloatVec4:
@@ -7511,7 +7591,7 @@ namespace LimitlessSquareEngine
                             cache.Commands.Add(new MaterialDefaultCommand(
                                 MaterialDefaultCommandKind.Int1,
                                 uniform.Location,
-                                ix: 16));
+                                ix: 64));
                         }
                         else
                         {
@@ -7612,8 +7692,12 @@ namespace LimitlessSquareEngine
                     string.Equals(uniformName, _uniformCloudInvViewProjection, StringComparison.Ordinal) ||
                     string.Equals(uniformName, _uniformCloudViewProjection, StringComparison.Ordinal) ||
                     string.Equals(uniformName, _uniformCloudFarDepth, StringComparison.Ordinal) ||
-                    string.Equals(uniformName, _uniformCloudTanHalfFov, StringComparison.Ordinal) ||
-                    string.Equals(uniformName, _uniformCloudViewportHeight, StringComparison.Ordinal);
+                     string.Equals(uniformName, _uniformCloudTanHalfFov, StringComparison.Ordinal) ||
+                     string.Equals(uniformName, _uniformCloudViewportHeight, StringComparison.Ordinal) ||
+                     string.Equals(uniformName, _uniformCloudLayerNear, StringComparison.Ordinal) ||
+                     string.Equals(uniformName, _uniformCloudLayerFar, StringComparison.Ordinal) ||
+                     string.Equals(uniformName, _uniformCloudShapeNoise, StringComparison.Ordinal) ||
+                     string.Equals(uniformName, _uniformCloudDetailNoise, StringComparison.Ordinal);
         }
 
         private bool CanReuseCapturedSkyboxReflection(in RenderCommand batchCmd, SkyboxData skybox)
@@ -8680,7 +8764,7 @@ namespace LimitlessSquareEngine
                             View = view,
                             Projection = projection,
                             QueueType = RenderQueueType.Transparent,
-                            UsePremultipliedTransparentBlend = false,
+                            UsePremultipliedTransparentBlend = true,
                             SortDepth = float.MaxValue,
                             SubmissionIndex = _submissionCounter++,
                             Pass = RenderPass.Scene,
