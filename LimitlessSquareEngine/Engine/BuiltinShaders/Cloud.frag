@@ -24,7 +24,7 @@ uniform float uCloudTime;
 uniform float uCloudEvolution;
 uniform float uCloudShapeTile;
 uniform float uCloudDetailTile;
-
+uniform float uCloudCoverageScale;
 uniform float uCloudStepSize;
 uniform int uCloudMaxSteps;
 uniform float uCloudDetailStrength;
@@ -126,25 +126,25 @@ float sampleDensity(vec3 planetLocal, float h, float t, float detailScale)
 
     vec4 shapeTex = textureLod(uCloudShapeNoise, warpedCoord, lod);
 
-    float carving = dot(shapeTex.gba, vec3(0.45, 0.30, 0.15)) * uCloudDetailStrength * 1.5;
-    float shape = remap01(shapeTex.r, carving * 0.75);
-    shape = pow(clamp(shape, 0.0, 1.0), mix(1.5, 0.8, clamp(uCloudEdgeSoftness, 0.0, 1.0)));
-
     float heightGrad = smoothstep(0.0, 0.10, h) * (1.0 - smoothstep(0.35, 0.9, h));
 
-    float coverageSignal = textureLod(uCloudShapeNoise, shapeCoord * 0.18 + vec3(evo * 0.0007, 0.0, evo * 0.0004), 1.5).b;
-    float cov = smoothstep(1.0 - uCloudCoverage, 1.0 - uCloudCoverage * 0.4, coverageSignal);
+    float coarse = textureLod(uCloudShapeNoise, shapeCoord * max(uCloudCoverageScale, 0.0001), 1.5).r;
 
-    float density = shape * cov * heightGrad;
+    float conc = clamp(coarse, 0.0, 1.0) * clamp(shapeTex.r, 0.0, 1.0);
+    conc = clamp(conc * 8.0, 0.0, 1.0);
 
-    if (density > 0.0001 && detailScale > 0.0)
+    float threshold = 0.1;
+    float density;
+    if (conc >= threshold)
     {
-        vec3 detailCoord = (p + windOffset * 1.5 + vec3(0.0, evo * 25.0, 0.0)) / max(uCloudDetailTile, 1.0);
-        vec3 detailTex = textureLod(uCloudDetailNoise, detailCoord, lod + 0.5).rgb;
-        float detail = dot(detailTex, vec3(0.625, 0.25, 0.125));
-        float erosion = detail * uCloudDetailStrength * (1.0 - shape) * detailScale;
-        erosion *= clamp(1.5 - lod * 0.35, 0.0, 1.0);
-        density = clamp(density - erosion, 0.0, 1.0);
+        float t = (conc - threshold) / (1.0 - threshold);
+        float levels = 4.0;
+        t = floor(t * levels + 0.001) / levels;
+        density = t * heightGrad;
+    }
+    else
+    {
+        density = 0.0;
     }
 
     return density;
@@ -162,7 +162,7 @@ vec3 findSunDir()
             break;
         }
     }
-    return sunDir;
+    return vec3(sunDir.x, sunDir.y, -sunDir.z);
 }
 
 float stepForT(float t, float minStep)
@@ -240,6 +240,7 @@ void main()
     float transmittance = 1.0;
     vec3 accumLight = vec3(0.0);
     float firstCloudT = -1.0;
+    float accumDepth = 0.0;
 
     int budget = max(uCloudMaxSteps, 8);
     float minStep = max(0.0, (fullExit - fullEntry) / float(budget));
@@ -308,25 +309,30 @@ void main()
         float stepTransmittance = exp(-density * stride * extinct);
         float densityLight = density * stride * extinct;
 
+        accumDepth += density * stride;
+
         vec3 upDir = normalize(samplePos);
         float ndl = dot(upDir, sunDir);
         float lit = smoothstep(0.0, celSoft, ndl);
 
                 float probe1 = sampleDensity(samplePos + sunDir * uCloudShadowProbeDist, h, sampleT, 0.0);
-                float probe2 = sampleDensity(samplePos + sunDir * uCloudShadowProbeDist * 3.0, h, sampleT, 0.0);
-                float occlusion = clamp((probe1 * 0.7 + probe2 * 0.3) * 2.0 * uCloudShadowStrength, 0.0, 1.0);
+                float occlusion = clamp(probe1 * 2.0 * uCloudShadowStrength, 0.0, 1.0);
 
                 float litShadow = clamp(lit - occlusion * 0.8, 0.0, 1.0);
                 float ambientKeep = mix(1.0, 1.0 - occlusion * 0.75, clamp(uCloudShadowAffectsAmbient, 0.0, 1.0));
 
-        vec3 cloudCol = mix(uCloudShadeColor * ambientKeep, uCloudLightColor, litShadow);
+        float depthNorm = clamp(accumDepth * 0.015, 0.0, 1.0);
+        float shadeLevel = floor(depthNorm * 3.0 + 0.001) / 3.0;
+        vec3 cloudCol = mix(uCloudLightColor, uCloudShadeColor, shadeLevel);
 
-        float rim = pow(1.0 - abs(dot(viewDirWorld, sunDir)), uCloudSilverWidth) * uCloudSilverLining;
-        cloudCol += uCloudLightColor * rim;
+        cloudCol *= mix(0.55, 1.0, litShadow);
+        cloudCol *= mix(0.75, 1.0, ambientKeep);
 
-        float sunElev = dot(upCam, sunDir);
-        float twilightBand = smoothstep(-0.10, 0.06, sunElev) * (1.0 - smoothstep(0.05, 0.18, sunElev));
-        cloudCol = mix(cloudCol, uCloudTwilightColor, twilightBand * uCloudTwilightStrength);
+        float sunShade = smoothstep(0.15, 0.75, ndl);
+        cloudCol *= mix(0.03, 1.0, sunShade);
+
+        float twilightBlend = 1.0 - smoothstep(0.0, 0.35, abs(ndl - 0.25));
+        cloudCol = mix(cloudCol, uCloudTwilightColor, twilightBlend * uCloudTwilightStrength * 0.8);
 
         accumLight += transmittance * cloudCol * densityLight;
         transmittance *= stepTransmittance;
