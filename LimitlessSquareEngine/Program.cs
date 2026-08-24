@@ -272,6 +272,9 @@ namespace LimitlessSquareEngine
         internal static Dictionary<string, string> _textureFileRegistry = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         // 音频文件注册表
         internal static Dictionary<string, string> _audioFileRegistry = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        // 噪声定义注册表
+        internal static Dictionary<string, string> _noiseFieldFileRegistry = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        static readonly HashSet<string> _lazyNoiseFieldKeyDiscoveryCompleted = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         // 场景文件显示名表
         static Dictionary<string, string> _sceneFileDisplayName = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
@@ -553,6 +556,36 @@ namespace LimitlessSquareEngine
                 }
 
                 _lazyAudioKeyDiscoveryCompleted.Add(_assetRootPath);
+            }
+        }
+
+        internal static void EnsureAllNoiseFieldKeysDiscovered()
+        {
+            lock (_assetDiscoveryLock)
+            {
+                if (_lazyNoiseFieldKeyDiscoveryCompleted.Contains(_assetRootPath))
+                    return;
+
+                if (!Directory.Exists(_assetRootPath))
+                {
+                    _lazyNoiseFieldKeyDiscoveryCompleted.Add(_assetRootPath);
+                    return;
+                }
+
+                string[] files = Directory.GetFiles(_assetRootPath, "*.json", SearchOption.AllDirectories);
+                Array.Sort(files, StringComparer.OrdinalIgnoreCase);
+
+                foreach (string file in files)
+                {
+                    if (!Graphics.TryValidateNoiseFieldFile(file, out _))
+                        continue;
+
+                    string key = BuildAssetKey(_assetRootPath, file, removeExtension: true);
+                    _noiseFieldFileRegistry[key] = file;
+                    Console.WriteLine($"[i] Lazily registered noise field: {key} -> {file}");
+                }
+
+                _lazyNoiseFieldKeyDiscoveryCompleted.Add(_assetRootPath);
             }
         }
 
@@ -1464,6 +1497,8 @@ namespace LimitlessSquareEngine
             _audioFileRegistry.Clear();
             _audio?.ClearFileRegistry();
             _uiLayouts.Clear();
+            _noiseFieldFileRegistry.Clear();
+            _lazyNoiseFieldKeyDiscoveryCompleted.Clear();
             _shaderVertexFiles.Clear();
             _lazyTextureKeyDiscoveryCompleted.Clear();
             _lazyAudioKeyDiscoveryCompleted.Clear();
@@ -1547,6 +1582,21 @@ namespace LimitlessSquareEngine
                     catch (Exception ex)
                     {
                         Console.WriteLine($"[!] UI layout scan failed for {file}: {ex.Message}");
+                    }
+
+                    try
+                    {
+                        if (Graphics.TryValidateNoiseFieldFile(file, out _))
+                        {
+                            string key = BuildAssetKey(assetsPath, file, removeExtension: true);
+                            _noiseFieldFileRegistry[key] = file;
+                            Console.WriteLine($"[i] Registered noise field: {key} -> {file}");
+                            continue;
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"[!] Noise field scan failed for {file}: {ex.Message}");
                     }
 
                     Console.WriteLine($"[i] Unknown json asset skipped: {file}");

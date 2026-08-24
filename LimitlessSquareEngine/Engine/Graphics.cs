@@ -7478,6 +7478,13 @@ namespace LimitlessSquareEngine
                                 uniform.Location,
                                 x: 12000f));
                         }
+                        else if (string.Equals(uniform.Name, "uCloudCoverageScale", StringComparison.Ordinal))
+                        {
+                            cache.Commands.Add(new MaterialDefaultCommand(
+                                MaterialDefaultCommandKind.Float1,
+                                uniform.Location,
+                                x: 0.0125f));
+                        }
                         else if (string.Equals(uniform.Name, "uCloudDetailTile", StringComparison.Ordinal))
                         {
                             cache.Commands.Add(new MaterialDefaultCommand(
@@ -10853,6 +10860,16 @@ void main()
                 .ThenBy(c => c.SubmissionIndex)
                 .ToList();
 
+            _cloudCommandsScratch.Clear();
+            var transparentScene = new List<RenderCommand>();
+            foreach (RenderCommand cmd in transparent)
+            {
+                if (cmd.Material != null && cmd.Material.IsCloud)
+                    _cloudCommandsScratch.Add(cmd);
+                else
+                    transparentScene.Add(cmd);
+            }
+
             GLEnum opaqueDepthFunc = useReverseZ ? GLEnum.Greater : GLEnum.Less;
             GLEnum transparentDepthFunc = useReverseZ ? GLEnum.Gequal : GLEnum.Lequal;
 
@@ -10874,8 +10891,14 @@ void main()
             _gl.Enable(GLEnum.Blend);
             _gl.BlendFunc(GLEnum.SrcAlpha, GLEnum.OneMinusSrcAlpha);
 
-            foreach (var cmd in transparent)
+            foreach (var cmd in transparentScene)
                 ExecuteCommand(cmd);
+
+            if (_cloudCommandsScratch.Count > 0)
+            {
+                RenderCommand cloudAnchor = _cloudCommandsScratch[0];
+                ExecuteCloudDownsampleAndComposite(in cloudAnchor);
+            }
 
             _gl.DepthMask(true);
 
