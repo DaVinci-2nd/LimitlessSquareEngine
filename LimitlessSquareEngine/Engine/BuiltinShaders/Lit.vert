@@ -20,6 +20,17 @@ uniform float uOutlineWidth;  // 单位：像素，默认 2.0
 layout(location = 5) in vec3 aOutlineNormal;
 uniform int uUseOutlineNormal;
 
+layout(location = 6) in vec4 aBoneIndex;
+layout(location = 7) in vec4 aBoneWeight;
+
+layout(std430, binding = 0) readonly buffer AvatarBoneMatrices
+{
+    mat4 uBoneMatrices[];
+};
+
+uniform int uSkinEnabled;
+uniform int uBoneBaseIndex;
+
 out vec4 vColor;
 out vec2 vTexCoord;
 out vec3 vWorldPos;
@@ -31,7 +42,38 @@ flat out int vRenderSpace;
 
 void main()
 {
-    vec4 worldPos4 = uModel * vec4(aPos, 1.0);
+    vec3 localPos = aPos;
+    vec3 localNormal = aNormal;
+    vec3 localTangent = aTangent.xyz;
+
+    if (uSkinEnabled == 1)
+    {
+        vec3 skinPos = vec3(0.0);
+        vec3 skinNormal = vec3(0.0);
+        vec3 skinTangent = vec3(0.0);
+
+        for (int i = 0; i < 4; i++)
+        {
+            float weight = aBoneWeight[i];
+            if (weight <= 0.000001)
+                continue;
+
+            int jointIndex = uBoneBaseIndex + int(aBoneIndex[i]);
+            mat4 joint = uBoneMatrices[jointIndex];
+
+            skinPos += weight * (joint * vec4(aPos, 1.0)).xyz;
+
+            mat3 jointRotation = mat3(joint);
+            skinNormal += weight * (jointRotation * aNormal);
+            skinTangent += weight * (jointRotation * aTangent.xyz);
+        }
+
+        localPos = skinPos;
+        localNormal = skinNormal;
+        localTangent = skinTangent;
+    }
+
+    vec4 worldPos4 = uModel * vec4(localPos, 1.0);
     vec4 viewPos4 = uView * worldPos4;
 
     vWorldPos = worldPos4.xyz;
@@ -39,8 +81,8 @@ void main()
 
     mat3 normalMatrix = transpose(inverse(mat3(uModel)));
 
-    vec3 worldNormal = normalize(normalMatrix * aNormal);
-    vec3 worldTangent = normalize(normalMatrix * aTangent.xyz);
+    vec3 worldNormal = normalize(normalMatrix * localNormal);
+    vec3 worldTangent = normalize(normalMatrix * localTangent);
 
     worldTangent = normalize(worldTangent - worldNormal * dot(worldNormal, worldTangent));
     vec3 worldBitangent = normalize(cross(worldNormal, worldTangent) * aTangent.w);
@@ -51,7 +93,7 @@ void main()
 
     if (uRenderSpace == 0)
     {
-        gl_Position = vec4(aPos, 1.0);
+        gl_Position = vec4(localPos, 1.0);
     }
     else
     {
@@ -59,7 +101,7 @@ void main()
 
         if (uEnableOutline == 1 && uOutlinePass == 1)
         {
-            vec3 outlineObjectNormal = (uUseOutlineNormal == 1) ? aOutlineNormal : aNormal;
+            vec3 outlineObjectNormal = (uUseOutlineNormal == 1) ? aOutlineNormal : localNormal;
             vec3 worldOutlineNormal = normalize(normalMatrix * outlineObjectNormal);
             vec3 viewNormal = normalize(mat3(uView) * worldOutlineNormal);
 

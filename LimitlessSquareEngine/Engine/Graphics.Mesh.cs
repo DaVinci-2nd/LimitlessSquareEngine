@@ -1,12 +1,17 @@
 ﻿using MoonSharp.Interpreter;
 using LimitlessSquareEngine.Engine;
+using SharpGLTF.Memory;
+using SharpGLTF.Transforms;
+using SharpGLTF.Validation;
 using Silk.NET.OpenGL;
 using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Numerics;
 using System.Text;
+using System.Text.Json;
 using System.Threading.Tasks;
+using Gltf = SharpGLTF.Schema2;
 
 namespace LimitlessSquareEngine
 {
@@ -36,6 +41,7 @@ namespace LimitlessSquareEngine
             public bool VertexColorsAreWhite { get; }
             public Vector3 LocalBoundsMin { get; }
             public Vector3 LocalBoundsMax { get; }
+            public bool IsSkinned { get; }
 
             public MeshSurfaceData(
                 string id,
@@ -47,7 +53,8 @@ namespace LimitlessSquareEngine
                 Vector3 localCenter = default,
                 bool vertexColorsAreWhite = false,
                 Vector3 localBoundsMin = default,
-                Vector3 localBoundsMax = default)
+                Vector3 localBoundsMax = default,
+                bool isSkinned = false)
             {
                 Id = id;
                 Vertices = vertices;
@@ -59,6 +66,7 @@ namespace LimitlessSquareEngine
                 VertexColorsAreWhite = vertexColorsAreWhite;
                 LocalBoundsMin = localBoundsMin;
                 LocalBoundsMax = localBoundsMax;
+                IsSkinned = isSkinned;
             }
         }
 
@@ -111,6 +119,30 @@ namespace LimitlessSquareEngine
                 Vertices = surfaces[0].Vertices;
                 PrimitiveType = surfaces[0].PrimitiveType;
                 VertexStrideFloats = surfaces[0].VertexStrideFloats;
+            }
+
+            public MeshData WithUpdatedSurfaceVertices(int surfaceIndex, float[] vertices)
+            {
+                if (surfaceIndex < 0 || surfaceIndex >= Surfaces.Length)
+                    throw new ArgumentOutOfRangeException(nameof(surfaceIndex));
+
+                MeshSurfaceData[] newSurfaces = (MeshSurfaceData[])Surfaces.Clone();
+                MeshSurfaceData old = newSurfaces[surfaceIndex];
+
+                newSurfaces[surfaceIndex] = new MeshSurfaceData(
+                    old.Id,
+                    vertices,
+                    old.PrimitiveType,
+                    old.VertexStrideFloats,
+                    old.MaterialSlot,
+                    old.DefaultMaterialKey,
+                    old.LocalCenter,
+                    old.VertexColorsAreWhite,
+                    old.LocalBoundsMin,
+                    old.LocalBoundsMax,
+                    old.IsSkinned);
+
+                return new MeshData(Id, newSurfaces, Revision);
             }
         }
 
@@ -223,6 +255,15 @@ namespace LimitlessSquareEngine
                 _gl.EnableVertexAttribArray(5);
             }
 
+            if (vertexStrideFloats >= 27)
+            {
+                _gl.VertexAttribPointer(6, 4, VertexAttribPointerType.Float, false, strideBytes, 19 * sizeof(float));
+                _gl.EnableVertexAttribArray(6);
+
+                _gl.VertexAttribPointer(7, 4, VertexAttribPointerType.Float, false, strideBytes, 23 * sizeof(float));
+                _gl.EnableVertexAttribArray(7);
+            }
+
             _gl.BindBuffer(BufferTargetARB.ArrayBuffer, 0);
             _gl.BindVertexArray(0);
 
@@ -242,7 +283,11 @@ namespace LimitlessSquareEngine
 
             uint vbo = _gl.GenBuffer();
             _gl.BindBuffer(BufferTargetARB.ArrayBuffer, vbo);
-            _gl.BufferData(BufferTargetARB.ArrayBuffer, (ReadOnlySpan<float>)vertices, BufferUsageARB.StaticDraw);
+
+            bool isSkinned = vertexStrideFloats >= 27;
+            BufferUsageARB usage = isSkinned ? BufferUsageARB.DynamicDraw : BufferUsageARB.StaticDraw;
+
+            _gl.BufferData(BufferTargetARB.ArrayBuffer, (ReadOnlySpan<float>)vertices, usage);
             _gl.BindBuffer(BufferTargetARB.ArrayBuffer, 0);
 
             uint vao = CreateStaticMeshSurfaceVAO(vbo, vertexStrideFloats);
@@ -310,6 +355,49 @@ namespace LimitlessSquareEngine
 
             _gl.BindVertexArray(resource.Vao);
             return true;
+        }
+
+        [MoonSharpHidden]
+        public void UpdateMeshSurfaceVertices(string meshId, string surfaceId, float[] vertices)
+        {
+            if (string.IsNullOrWhiteSpace(meshId) || string.IsNullOrWhiteSpace(surfaceId))
+                return;
+
+            if (!_meshes.TryGetValue(meshId, out MeshData mesh))
+                return;
+
+            int surfaceIndex = -1;
+            for (int i = 0; i < mesh.Surfaces.Length; i++)
+            {
+                if (string.Equals(mesh.Surfaces[i].Id, surfaceId, StringComparison.Ordinal))
+                {
+                    surfaceIndex = i;
+                    break;
+                }
+            }
+
+            if (surfaceIndex < 0)
+                return;
+
+            MeshSurfaceData surface = mesh.Surfaces[surfaceIndex];
+            int stride = surface.VertexStrideFloats;
+
+            if (vertices == null || vertices.Length == 0 || vertices.Length % stride != 0)
+                throw new ArgumentException(
+                    "[X] Updated mesh surface vertices must be non-empty and aligned to the surface vertex stride.",
+                    nameof(vertices));
+
+            MeshSurfaceGpuResource resource = GetOrCreateMeshSurfaceGpuResource(
+                meshId,
+                surfaceId,
+                vertices,
+                stride);
+
+            _gl.BindBuffer(BufferTargetARB.ArrayBuffer, resource.Vbo);
+            _gl.BufferSubData(BufferTargetARB.ArrayBuffer, 0, (ReadOnlySpan<float>)vertices);
+            _gl.BindBuffer(BufferTargetARB.ArrayBuffer, 0);
+
+            _meshes[meshId] = mesh.WithUpdatedSurfaceVertices(surfaceIndex, vertices);
         }
 
         /// <summary>
@@ -429,6 +517,262 @@ namespace LimitlessSquareEngine
                     Console.WriteLine($"[!] Failed to import OBJ '{objFile}': {ex.Message}");
                 }
             }
+        }
+
+        [MoonSharpHidden]
+        public void RegisterVrmFromFile(string assetsRoot, string vrmFilePath)
+        {
+            if (string.IsNullOrWhiteSpace(assetsRoot))
+                throw new ArgumentException("[X] Assets root cannot be null or empty.", nameof(assetsRoot));
+
+            if (string.IsNullOrWhiteSpace(vrmFilePath))
+                throw new ArgumentException("[X] VRM file path cannot be null or empty.", nameof(vrmFilePath));
+
+            if (!File.Exists(vrmFilePath))
+                throw new FileNotFoundException("[X] VRM file not found.", vrmFilePath);
+
+            if (!string.Equals(Path.GetExtension(vrmFilePath), ".vrm", StringComparison.OrdinalIgnoreCase))
+                return;
+
+            string meshKey = Path.GetRelativePath(assetsRoot, vrmFilePath).Replace('\\', '/');
+
+            VrmData data = VrmLoader.LoadFromFile(vrmFilePath);
+
+            var avatar = new Avatar(meshKey, meshKey);
+            new VrmAvatar(meshKey).MapToAvatar(avatar, data);
+
+            Dictionary<int, string> materialKeysByIndex =
+                RegisterVrmGeneratedMaterials(meshKey, assetsRoot, vrmFilePath, data);
+
+            var surfaces = new List<MeshSurfaceData>(avatar.Skins.Count);
+
+            for (int s = 0; s < avatar.Skins.Count; s++)
+            {
+                AvatarSkin skin = avatar.Skins[s];
+
+                if (skin.BaseVertices.Length == 0 || skin.BaseVertices.Length % skin.VertexStrideFloats != 0)
+                    continue;
+
+                int materialIndex = s < data.Surfaces.Count ? data.Surfaces[s].MaterialIndex : 0;
+
+                Vector3 localCenter = ComputeMeshLocalCenter(skin.BaseVertices, skin.VertexStrideFloats);
+                ComputeMeshLocalBounds(skin.BaseVertices, skin.VertexStrideFloats, out Vector3 localBoundsMin, out Vector3 localBoundsMax);
+                bool vertexColorsAreWhite = AreMeshVertexColorsWhite(skin.BaseVertices, skin.VertexStrideFloats);
+
+                materialKeysByIndex.TryGetValue(materialIndex, out string? defaultMaterialKey);
+
+                surfaces.Add(new MeshSurfaceData(
+                    skin.SurfaceId,
+                    skin.BaseVertices,
+                    PrimitiveType.Triangles,
+                    skin.VertexStrideFloats,
+                    materialIndex,
+                    defaultMaterialKey,
+                    localCenter,
+                    vertexColorsAreWhite,
+                    localBoundsMin,
+                    localBoundsMax,
+                    true));
+            }
+
+            if (surfaces.Count == 0)
+                throw new InvalidDataException($"[X] VRM '{vrmFilePath}' did not produce any skinned surfaces.");
+
+            InvalidateMeshGpuResources(meshKey);
+            int revision = ++_meshRevisionCounter;
+            _meshes[meshKey] = new MeshData(meshKey, surfaces.ToArray(), revision);
+
+            Console.WriteLine($"[i] Registered VRM avatar: {meshKey} ({surfaces.Count} surfaces)");
+        }
+
+        [MoonSharpHidden]
+        public void RegisterVrmMeshesFromAssets(string assetsRoot)
+        {
+            if (string.IsNullOrWhiteSpace(assetsRoot) || !Directory.Exists(assetsRoot))
+                return;
+
+            string[] vrmFiles = Directory.GetFiles(assetsRoot, "*.vrm", SearchOption.AllDirectories);
+            Array.Sort(vrmFiles, StringComparer.OrdinalIgnoreCase);
+
+            foreach (string vrmFile in vrmFiles)
+            {
+                try
+                {
+                    RegisterVrmFromFile(assetsRoot, vrmFile);
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[!] Failed to import VRM '{vrmFile}': {ex.Message}");
+                }
+            }
+        }
+
+        private Dictionary<int, string> RegisterVrmGeneratedMaterials(
+            string meshKey,
+            string assetsRoot,
+            string vrmFilePath,
+            VrmData data)
+        {
+            var result = new Dictionary<int, string>();
+
+            for (int i = 0; i < data.Materials.Count; i++)
+            {
+                string key = $"{meshKey}::mat_{i}";
+                string json = BuildVrmMaterialJson(data, i, assetsRoot, vrmFilePath);
+
+                Program._generatedMaterialJsonRegistry[key] = json;
+                result[i] = key;
+
+                Console.WriteLine($"[i] Registered generated VRM material: {key}");
+            }
+
+            return result;
+        }
+
+        private string BuildVrmMaterialJson(VrmData data, int materialIndex, string assetsRoot, string vrmFilePath)
+        {
+            VrmMaterialData material = data.Materials[materialIndex];
+
+            var parameters = new Dictionary<string, object?>();
+
+            parameters["uColor"] = new[]
+            {
+                material.BaseColor.X,
+                material.BaseColor.Y,
+                material.BaseColor.Z,
+                material.BaseColor.W
+            };
+
+            if (material.BaseColorTextureIndex >= 0 && material.BaseColorTextureIndex < data.Textures.Count)
+            {
+                string? textureKey = SaveVrmTexture(data, material.BaseColorTextureIndex, vrmFilePath, assetsRoot);
+
+                if (!string.IsNullOrWhiteSpace(textureKey))
+                {
+                    parameters["uUseTexture"] = 1;
+                    parameters["uTexture"] = textureKey;
+                    parameters["uTextureUV"] = new[] { 1.0f, 1.0f };
+                    parameters["uTextureWrap"] = "Repeat";
+                }
+            }
+
+            if (material.Mtoon != null)
+            {
+                parameters["uMetallic"] = 0f;
+                parameters["uSmoothness"] = 0f;
+            }
+            else
+            {
+                parameters["uMetallic"] = material.Metallic;
+                parameters["uSmoothness"] = Math.Clamp(1f - material.Roughness, 0f, 1f);
+            }
+
+            if (material.NormalTextureIndex >= 0 && material.NormalTextureIndex < data.Textures.Count)
+            {
+                string? textureKey = SaveVrmTexture(data, material.NormalTextureIndex, vrmFilePath, assetsRoot);
+
+                if (!string.IsNullOrWhiteSpace(textureKey))
+                {
+                    parameters["uUseNormalTexture"] = 1;
+                    parameters["uNormalTexture"] = textureKey;
+                    parameters["uNormalStrength"] = material.NormalStrength;
+                }
+            }
+
+            if (string.Equals(material.AlphaMode, "Mask", StringComparison.OrdinalIgnoreCase))
+            {
+                parameters["uUseAlphaCutoff"] = 1;
+                parameters["uAlphaCutoff"] = material.AlphaCutoff;
+            }
+
+            if (material.DoubleSided)
+                parameters["uCull"] = "both";
+
+            if (material.Mtoon != null)
+            {
+                if (material.Mtoon.ShadingToonyFactor > 0.01f)
+                    parameters["uEnableColorBanding"] = 1;
+
+                parameters["uSpecularColor"] = new[] { 0f, 0f, 0f };
+                parameters["uSpecularIntensity"] = 0f;
+
+                Vector3 rimColor = material.Mtoon.ParametricRimColorFactor;
+                bool hasRim = rimColor.LengthSquared() > 0.000001f;
+                float rimPower = MathF.Max(0.001f, material.Mtoon.ParametricRimFresnelPowerFactor);
+
+                parameters["uRimColor"] = new[] { rimColor.X, rimColor.Y, rimColor.Z };
+                parameters["uRimIntensity"] = hasRim ? 1f + MathF.Max(0f, material.Mtoon.ParametricRimLiftFactor) : 0f;
+                parameters["uRimRange"] = MathF.Min(1f, MathF.Max(0f, 1f / (1f + rimPower)));
+
+                parameters["uReceiveShadow"] = 1;
+
+                if (!string.Equals(material.Mtoon.OutlineWidthMode, "none", StringComparison.OrdinalIgnoreCase))
+                {
+                    parameters["uEnableOutline"] = 1;
+                    parameters["uOutlineColor"] = new[]
+                    {
+                        material.Mtoon.OutlineColorFactor.X,
+                        material.Mtoon.OutlineColorFactor.Y,
+                        material.Mtoon.OutlineColorFactor.Z,
+                        1f
+                    };
+
+                    float outlineWidth = material.Mtoon.OutlineWidthFactor;
+
+                    if (string.Equals(material.Mtoon.OutlineWidthMode, "screenCoordinates", StringComparison.OrdinalIgnoreCase))
+                        parameters["uOutlineWidth"] = outlineWidth * 1080f;
+                    else
+                        parameters["uOutlineWidth"] = Math.Max(1f, outlineWidth * 2000f);
+                }
+            }
+
+            var root = new Dictionary<string, object?>
+            {
+                ["assetType"] = "Material",
+                ["shader"] = "Shaders/Builtin/Lit",
+                ["parameters"] = parameters
+            };
+
+            return JsonSerializer.Serialize(root, new JsonSerializerOptions
+            {
+                WriteIndented = true
+            });
+        }
+
+        private string? SaveVrmTexture(VrmData data, int textureIndex, string vrmFilePath, string assetsRoot)
+        {
+            VrmTextureData texture = data.Textures[textureIndex];
+
+            if (texture.Content == null || texture.Content.Length == 0)
+                return null;
+
+            string vrmName = Path.GetFileNameWithoutExtension(vrmFilePath);
+            string vrmDir = Path.GetDirectoryName(vrmFilePath) ?? "";
+            string textureDir = Path.Combine(vrmDir, vrmName + ".textures");
+            Directory.CreateDirectory(textureDir);
+
+            string ext = string.IsNullOrWhiteSpace(texture.FileExtension) ? "png" : texture.FileExtension;
+
+            if (!string.Equals(ext, "png", StringComparison.OrdinalIgnoreCase) &&
+                !string.Equals(ext, "jpg", StringComparison.OrdinalIgnoreCase) &&
+                !string.Equals(ext, "jpeg", StringComparison.OrdinalIgnoreCase))
+            {
+                ext = "png";
+            }
+
+            string fileName = $"tex_{textureIndex}.{ext}";
+            string fullPath = Path.Combine(textureDir, fileName);
+
+            if (!File.Exists(fullPath))
+                File.WriteAllBytes(fullPath, texture.Content);
+
+            string fullAssets = Path.GetFullPath(assetsRoot);
+            string fullTexture = Path.GetFullPath(fullPath);
+
+            if (!fullTexture.StartsWith(fullAssets, StringComparison.Ordinal))
+                return null;
+
+            return Path.GetRelativePath(assetsRoot, fullTexture).Replace('\\', '/');
         }
 
         [MoonSharpHidden]
@@ -619,8 +963,8 @@ namespace LimitlessSquareEngine
 
         private float[] NormalizeRegisteredMeshVertices(float[] vertices, PrimitiveType primitiveType, ref int vertexStrideFloats)
         {
-            if (vertexStrideFloats != 9 && vertexStrideFloats != 16 && vertexStrideFloats != 19)
-                throw new ArgumentException("[X] Supported mesh vertex strides are 9, 16 and 19 floats.", nameof(vertexStrideFloats));
+            if (vertexStrideFloats != 9 && vertexStrideFloats != 16 && vertexStrideFloats != 19 && vertexStrideFloats != 27)
+                throw new ArgumentException("[X] Supported mesh vertex strides are 9, 16, 19 and 27 floats.", nameof(vertexStrideFloats));
 
             if (vertices == null || vertices.Length == 0 || vertices.Length % vertexStrideFloats != 0)
                 throw new ArgumentException("[X] Mesh vertices must be non-empty and aligned to the declared vertex stride.", nameof(vertices));
@@ -923,6 +1267,718 @@ namespace LimitlessSquareEngine
                  1f, 0f, 0f, 1f);
 
             return data.ToArray();
+        }
+    }
+
+    internal static class VrmLoader
+    {
+        public static VrmData LoadFromFile(string vrmFilePath)
+        {
+            VrmData data = new VrmData();
+
+            Gltf.ModelRoot root = Gltf.ModelRoot.Load(vrmFilePath, new Gltf.ReadSettings { Validation = ValidationMode.Skip });
+
+            LoadNodes(root, data);
+            LoadSkins(root, data);
+            LoadMeshes(root, data);
+            LoadTextures(root, data);
+            LoadMaterials(root, data);
+            ParseVrmExtensionJson(root, data);
+
+            return data;
+        }
+
+        private static void LoadNodes(Gltf.ModelRoot root, VrmData data)
+        {
+            IReadOnlyList<Gltf.Node> nodes = root.LogicalNodes;
+
+            for (int i = 0; i < nodes.Count; i++)
+            {
+                Gltf.Node node = nodes[i];
+
+                AffineTransform local = node.LocalTransform.GetDecomposed();
+
+                data.Nodes.Add(new VrmSkeletonNode
+                {
+                    Name = string.IsNullOrWhiteSpace(node.Name) ? $"node_{i}" : node.Name,
+                    ParentIndex = node.VisualParent?.LogicalIndex ?? -1,
+                    Position = local.Translation,
+                    Rotation = local.Rotation,
+                    Scale = local.Scale
+                });
+            }
+        }
+
+        private static void LoadSkins(Gltf.ModelRoot root, VrmData data)
+        {
+            IReadOnlyList<Gltf.Skin> skins = root.LogicalSkins;
+
+            for (int i = 0; i < skins.Count; i++)
+            {
+                Gltf.Skin skin = skins[i];
+
+                Matrix4x4[] inverseBindMatrices = skin.InverseBindMatrices.ToArray();
+
+                data.Skins.Add(new VrmSkinData
+                {
+                    Joints = skin.Joints.Select(j => j.LogicalIndex).ToArray(),
+                    InverseBindMatrices = inverseBindMatrices
+                });
+            }
+        }
+
+        private static void LoadMeshes(Gltf.ModelRoot root, VrmData data)
+        {
+            IReadOnlyList<Gltf.Node> nodes = root.LogicalNodes;
+            IReadOnlyList<Gltf.Mesh> meshes = root.LogicalMeshes;
+
+            for (int meshIndex = 0; meshIndex < meshes.Count; meshIndex++)
+            {
+                Gltf.Mesh mesh = meshes[meshIndex];
+
+                Gltf.Node? meshNode = nodes.FirstOrDefault(n => ReferenceEquals(n.Mesh, mesh));
+                int nodeIndex = meshNode?.LogicalIndex ?? -1;
+
+                int skinIndex = -1;
+                if (meshNode?.Skin != null)
+                    skinIndex = meshNode.Skin.LogicalIndex;
+
+                for (int primIndex = 0; primIndex < mesh.Primitives.Count; primIndex++)
+                {
+                    Gltf.MeshPrimitive primitive = mesh.Primitives[primIndex];
+
+                    if (primitive.DrawPrimitiveType != Gltf.PrimitiveType.TRIANGLES)
+                        continue;
+
+                    Gltf.Accessor? positionAccessor = primitive.GetVertexAccessor("POSITION");
+                    if (positionAccessor == null)
+                        continue;
+
+                    int positionCount = positionAccessor.Count;
+
+                    string surfaceName = mesh.Primitives.Count == 1
+                        ? (string.IsNullOrWhiteSpace(mesh.Name) ? $"surface_{meshIndex}" : mesh.Name)
+                        : (string.IsNullOrWhiteSpace(mesh.Name) ? $"surface_{meshIndex}_{primIndex}" : $"{mesh.Name}_{primIndex}");
+
+                    VrmMeshSurfaceData surface = new VrmMeshSurfaceData
+                    {
+                        Name = surfaceName,
+                        NodeIndex = nodeIndex,
+                        MaterialIndex = primitive.Material?.LogicalIndex ?? 0,
+                        SkinIndex = skinIndex,
+                        PositionCount = positionCount,
+                        Positions = ReadFloatArray(primitive.GetVertexAccessor("POSITION")?.AsVector3Array(), 3, positionCount),
+                        Normals = ReadFloatArray(primitive.GetVertexAccessor("NORMAL")?.AsVector3Array(), 3, positionCount),
+                        TexCoords = ReadFloatArray(primitive.GetVertexAccessor("TEXCOORD_0")?.AsVector2Array(), 2, positionCount),
+                        Tangents = ReadFloatArray(primitive.GetVertexAccessor("TANGENT")?.AsVector4Array(), 4, positionCount),
+                        Indices = ReadTriangleIndices(primitive),
+                        JointIndices = ReadIntArray(primitive.GetVertexAccessor("JOINTS_0")?.AsVector4Array(), positionCount),
+                        JointWeights = ReadFloatArray(primitive.GetVertexAccessor("WEIGHTS_0")?.AsVector4Array(), 4, positionCount)
+                    };
+
+                    for (int m = 0; m < primitive.MorphTargetsCount; m++)
+                    {
+                        IReadOnlyDictionary<string, Gltf.Accessor> target = primitive.GetMorphTargetAccessors(m);
+
+                        VrmMorphTargetData morph = new VrmMorphTargetData();
+
+                        if (target.TryGetValue("POSITION", out Gltf.Accessor? positionMorph))
+                            morph.PositionDeltas = ReadFloatArray(positionMorph.AsVector3Array(), 3, positionCount);
+
+                        if (target.TryGetValue("NORMAL", out Gltf.Accessor? normalMorph))
+                            morph.NormalDeltas = ReadFloatArray(normalMorph.AsVector3Array(), 3, positionCount);
+
+                        surface.MorphTargets.Add(morph);
+                    }
+
+                    data.Surfaces.Add(surface);
+                }
+            }
+        }
+
+        private static int[] ReadTriangleIndices(Gltf.MeshPrimitive primitive)
+        {
+            var list = new List<int>();
+
+            foreach ((int a, int b, int c) in primitive.GetTriangleIndices())
+            {
+                list.Add(a);
+                list.Add(b);
+                list.Add(c);
+            }
+
+            return list.ToArray();
+        }
+
+        private static float[] ReadFloatArray(IAccessorArray<Vector3>? array, int componentCount, int itemCount)
+        {
+            if (array == null)
+                return Array.Empty<float>();
+
+            float[] result = new float[itemCount * 3];
+
+            for (int i = 0; i < itemCount; i++)
+            {
+                Vector3 value = array[i];
+                result[i * 3 + 0] = value.X;
+                result[i * 3 + 1] = value.Y;
+                result[i * 3 + 2] = value.Z;
+            }
+
+            return result;
+        }
+
+        private static float[] ReadFloatArray(IAccessorArray<Vector2>? array, int componentCount, int itemCount)
+        {
+            if (array == null)
+                return Array.Empty<float>();
+
+            float[] result = new float[itemCount * 2];
+
+            for (int i = 0; i < itemCount; i++)
+            {
+                Vector2 value = array[i];
+                result[i * 2 + 0] = value.X;
+                result[i * 2 + 1] = value.Y;
+            }
+
+            return result;
+        }
+
+        private static float[] ReadFloatArray(IAccessorArray<Vector4>? array, int componentCount, int itemCount)
+        {
+            if (array == null)
+                return Array.Empty<float>();
+
+            float[] result = new float[itemCount * 4];
+
+            for (int i = 0; i < itemCount; i++)
+            {
+                Vector4 value = array[i];
+                result[i * 4 + 0] = value.X;
+                result[i * 4 + 1] = value.Y;
+                result[i * 4 + 2] = value.Z;
+                result[i * 4 + 3] = value.W;
+            }
+
+            return result;
+        }
+
+        private static int[] ReadIntArray(IAccessorArray<Vector4>? array, int itemCount)
+        {
+            if (array == null)
+                return Array.Empty<int>();
+
+            int[] result = new int[itemCount * 4];
+
+            for (int i = 0; i < itemCount; i++)
+            {
+                Vector4 value = array[i];
+                result[i * 4 + 0] = (int)value.X;
+                result[i * 4 + 1] = (int)value.Y;
+                result[i * 4 + 2] = (int)value.Z;
+                result[i * 4 + 3] = (int)value.W;
+            }
+
+            return result;
+        }
+
+        private static float GetChannelFactor(Gltf.MaterialChannel channel, string key, float fallback)
+        {
+            foreach (Gltf.IMaterialParameter parameter in channel.Parameters)
+            {
+                if (!string.Equals(parameter.Name, key, StringComparison.Ordinal))
+                    continue;
+
+                object? value = parameter.Value;
+
+                if (value is float floatValue)
+                    return floatValue;
+
+                if (value is double doubleValue)
+                    return (float)doubleValue;
+
+                return fallback;
+            }
+
+            return fallback;
+        }
+
+        private static void LoadTextures(Gltf.ModelRoot root, VrmData data)
+        {
+            IReadOnlyList<Gltf.Image> images = root.LogicalImages;
+
+            for (int i = 0; i < images.Count; i++)
+            {
+                Gltf.Image image = images[i];
+                MemoryImage content = image.Content;
+
+                data.Textures.Add(new VrmTextureData
+                {
+                    Name = string.IsNullOrWhiteSpace(image.Name) ? $"image_{i}" : image.Name,
+                    Content = content.Content.ToArray(),
+                    FileExtension = string.IsNullOrWhiteSpace(content.FileExtension)
+                        ? "png"
+                        : content.FileExtension.TrimStart('.')
+                });
+            }
+        }
+
+        private static void LoadMaterials(Gltf.ModelRoot root, VrmData data)
+        {
+            IReadOnlyList<Gltf.Material> materials = root.LogicalMaterials;
+
+            for (int i = 0; i < materials.Count; i++)
+            {
+                Gltf.Material material = materials[i];
+
+                VrmMaterialData md = new VrmMaterialData
+                {
+                    Name = string.IsNullOrWhiteSpace(material.Name) ? $"material_{i}" : material.Name,
+                    Unlit = material.Unlit,
+                    DoubleSided = material.DoubleSided,
+                    AlphaMode = material.Alpha.ToString(),
+                    AlphaCutoff = material.AlphaCutoff
+                };
+
+                Gltf.MaterialChannel? baseColor = material.FindChannel("BaseColor");
+                if (baseColor.HasValue)
+                {
+                    Vector4 color = baseColor.Value.Color;
+                    md.BaseColor = new Vector4(color.X, color.Y, color.Z, color.W);
+
+                    if (baseColor.Value.Texture != null)
+                        md.BaseColorTextureIndex = baseColor.Value.Texture.PrimaryImage?.LogicalIndex ?? -1;
+
+                    if (baseColor.Value.TextureTransform != null)                    {
+                        md.BaseColorTextureScale = baseColor.Value.TextureTransform.Scale;
+                        md.BaseColorTextureOffset = baseColor.Value.TextureTransform.Offset;
+                    }
+                }
+
+                Gltf.MaterialChannel? metallicRoughness = material.FindChannel("MetallicRoughness");
+                if (metallicRoughness.HasValue)
+                {
+                    md.Metallic = GetChannelFactor(metallicRoughness.Value, "Metallic", 1f);
+                    md.Roughness = GetChannelFactor(metallicRoughness.Value, "Roughness", 1f);
+                }
+
+                Gltf.MaterialChannel? normal = material.FindChannel("Normal");
+                if (normal.HasValue)
+                {
+                    md.NormalStrength = GetChannelFactor(normal.Value, "Scale", 1f);
+
+                    if (normal.Value.Texture != null)
+                        md.NormalTextureIndex = normal.Value.Texture.PrimaryImage?.LogicalIndex ?? -1;
+
+                    if (normal.Value.TextureTransform != null)
+                    {
+                        md.NormalTextureScale = normal.Value.TextureTransform.Scale;
+                        md.NormalTextureOffset = normal.Value.TextureTransform.Offset;
+                    }
+                }
+
+                Gltf.MaterialChannel? emissive = material.FindChannel("Emissive");
+                if (emissive.HasValue)
+                {
+                    Vector4 color = emissive.Value.Color;
+                    md.EmissiveColor = new Vector4(color.X, color.Y, color.Z, color.W);
+
+                    if (emissive.Value.Texture != null)
+                        md.EmissiveTextureIndex = emissive.Value.Texture.PrimaryImage?.LogicalIndex ?? -1;
+                }
+
+                Gltf.MaterialChannel? occlusion = material.FindChannel("Occlusion");
+                if (occlusion.HasValue && occlusion.Value.Texture != null)
+                    md.OcclusionTextureIndex = occlusion.Value.Texture.PrimaryImage?.LogicalIndex ?? -1;
+
+                data.Materials.Add(md);
+            }
+        }
+
+        private static void ParseVrmExtensionJson(Gltf.ModelRoot root, VrmData data)
+        {
+            string json = root.GetJsonPreview();
+
+            using JsonDocument doc = JsonDocument.Parse(json);
+
+            ParseMtoonMaterials(doc.RootElement, data);
+
+            if (!doc.RootElement.TryGetProperty("extensions", out JsonElement extensions) ||
+                extensions.ValueKind != JsonValueKind.Object)
+                return;
+
+            if (!extensions.TryGetProperty("VRMC_vrm", out JsonElement vrm) ||
+                vrm.ValueKind != JsonValueKind.Object)
+                return;
+
+            if (vrm.TryGetProperty("humanoid", out JsonElement humanoid) &&
+                humanoid.ValueKind == JsonValueKind.Object &&
+                humanoid.TryGetProperty("humanBones", out JsonElement humanBones) &&
+                humanBones.ValueKind == JsonValueKind.Object)
+            {
+                foreach (JsonProperty boneProp in humanBones.EnumerateObject())
+                {
+                    if (boneProp.Value.ValueKind != JsonValueKind.Object)
+                        continue;
+
+                    if (!boneProp.Value.TryGetProperty("node", out JsonElement nodeElem) ||
+                        nodeElem.ValueKind != JsonValueKind.Number)
+                        continue;
+
+                    data.HumanoidBones.Add(new VrmHumanoidBone
+                    {
+                        BoneName = boneProp.Name,
+                        NodeIndex = nodeElem.GetInt32()
+                    });
+                }
+            }
+
+            if (vrm.TryGetProperty("expressions", out JsonElement expressions) &&
+                expressions.ValueKind == JsonValueKind.Object)
+            {
+                ParseExpressionGroup(expressions, "preset", true, data);
+                ParseExpressionGroup(expressions, "custom", false, data);
+            }
+
+            if (vrm.TryGetProperty("lookAt", out JsonElement lookAt) &&
+                lookAt.ValueKind == JsonValueKind.Object)
+            {
+                if (lookAt.TryGetProperty("type", out JsonElement typeElem) &&
+                    typeElem.ValueKind == JsonValueKind.String)
+                    data.LookAt.Type = typeElem.GetString() ?? "bone";
+
+                if (lookAt.TryGetProperty("offsetFromHeadBone", out JsonElement offsetElem) &&
+                    TryReadNumberArray(offsetElem, out float[] offset) && offset.Length >= 3)
+                {
+                    data.LookAt.OffsetFromHeadBone = new Vector3(offset[0], offset[1], offset[2]);
+                }
+
+                ReadRangeMap(lookAt, "rangeMapHorizontalInner", data.LookAt.RangeMapHorizontalInner);
+                ReadRangeMap(lookAt, "rangeMapHorizontalOuter", data.LookAt.RangeMapHorizontalOuter);
+                ReadRangeMap(lookAt, "rangeMapVerticalDown", data.LookAt.RangeMapVerticalDown);
+                ReadRangeMap(lookAt, "rangeMapVerticalUp", data.LookAt.RangeMapVerticalUp);
+            }
+
+            if (vrm.TryGetProperty("meta", out JsonElement meta) &&
+                meta.ValueKind == JsonValueKind.Object)
+            {
+                if (meta.TryGetProperty("name", out JsonElement nameElem) &&
+                    nameElem.ValueKind == JsonValueKind.String)
+                    data.Meta.Name = nameElem.GetString() ?? "";
+
+                if (meta.TryGetProperty("version", out JsonElement versionElem) &&
+                    versionElem.ValueKind == JsonValueKind.String)
+                    data.Meta.Version = versionElem.GetString() ?? "";
+
+                if (meta.TryGetProperty("authors", out JsonElement authorsElem) &&
+                    authorsElem.ValueKind == JsonValueKind.Array)
+                {
+                    foreach (JsonElement authorElem in authorsElem.EnumerateArray())
+                    {
+                        if (authorElem.ValueKind == JsonValueKind.String)
+                            data.Meta.Authors.Add(authorElem.GetString() ?? "");
+                    }
+                }
+
+                if (meta.TryGetProperty("copyrightInformation", out JsonElement copyrightElem) &&
+                    copyrightElem.ValueKind == JsonValueKind.String)
+                    data.Meta.CopyrightInformation = copyrightElem.GetString() ?? "";
+            }
+        }
+
+        private static void ParseMtoonMaterials(JsonElement root, VrmData data)
+        {
+            if (!root.TryGetProperty("materials", out JsonElement materialsElem) ||
+                materialsElem.ValueKind != JsonValueKind.Array)
+                return;
+
+            for (int i = 0; i < materialsElem.GetArrayLength() && i < data.Materials.Count; i++)
+            {
+                JsonElement materialElem = materialsElem[i];
+                if (materialElem.ValueKind != JsonValueKind.Object)
+                    continue;
+
+                if (!materialElem.TryGetProperty("extensions", out JsonElement extensions) ||
+                    extensions.ValueKind != JsonValueKind.Object)
+                    continue;
+
+                if (!extensions.TryGetProperty("VRMC_materials_mtoon", out JsonElement mtoonElem) ||
+                    mtoonElem.ValueKind != JsonValueKind.Object)
+                    continue;
+
+                VrmMtoonData mtoon = new VrmMtoonData();
+
+                ReadStringProperty(mtoonElem, "specVersion", value => mtoon.SpecVersion = value);
+                ReadStringProperty(mtoonElem, "outlineWidthMode", value => mtoon.OutlineWidthMode = value);
+
+                if (mtoonElem.TryGetProperty("shadeColorFactor", out JsonElement shadeColorElem) &&
+                    TryReadNumberArray(shadeColorElem, out float[] shadeColor) && shadeColor.Length >= 3)
+                    mtoon.ShadeColorFactor = new Vector3(shadeColor[0], shadeColor[1], shadeColor[2]);
+
+                if (mtoonElem.TryGetProperty("shadeMultiplyTexture", out JsonElement shadeTexElem) &&
+                    shadeTexElem.ValueKind == JsonValueKind.Object &&
+                    shadeTexElem.TryGetProperty("index", out JsonElement shadeTexIdx) &&
+                    shadeTexIdx.ValueKind == JsonValueKind.Number)
+                    mtoon.ShadeMultiplyTextureIndex = shadeTexIdx.GetInt32();
+
+                if (mtoonElem.TryGetProperty("shadingShiftFactor", out JsonElement shadingShiftElem) &&
+                    shadingShiftElem.ValueKind == JsonValueKind.Number)
+                    mtoon.ShadingShiftFactor = (float)shadingShiftElem.GetDouble();
+
+                if (mtoonElem.TryGetProperty("shadingToonyFactor", out JsonElement shadingToonyElem) &&
+                    shadingToonyElem.ValueKind == JsonValueKind.Number)
+                    mtoon.ShadingToonyFactor = (float)shadingToonyElem.GetDouble();
+
+                if (mtoonElem.TryGetProperty("parametricRimColorFactor", out JsonElement rimColorElem) &&
+                    TryReadNumberArray(rimColorElem, out float[] rimColor) && rimColor.Length >= 3)
+                    mtoon.ParametricRimColorFactor = new Vector3(rimColor[0], rimColor[1], rimColor[2]);
+
+                if (mtoonElem.TryGetProperty("parametricRimFresnelPowerFactor", out JsonElement rimPowerElem) &&
+                    rimPowerElem.ValueKind == JsonValueKind.Number)
+                    mtoon.ParametricRimFresnelPowerFactor = (float)rimPowerElem.GetDouble();
+
+                if (mtoonElem.TryGetProperty("parametricRimLiftFactor", out JsonElement rimLiftElem) &&
+                    rimLiftElem.ValueKind == JsonValueKind.Number)
+                    mtoon.ParametricRimLiftFactor = (float)rimLiftElem.GetDouble();
+
+                if (mtoonElem.TryGetProperty("rimMultiplyTexture", out JsonElement rimTexElem) &&
+                    rimTexElem.ValueKind == JsonValueKind.Object &&
+                    rimTexElem.TryGetProperty("index", out JsonElement rimTexIdx) &&
+                    rimTexIdx.ValueKind == JsonValueKind.Number)
+                    mtoon.RimMultiplyTextureIndex = rimTexIdx.GetInt32();
+
+                if (mtoonElem.TryGetProperty("rimLightingMixFactor", out JsonElement rimMixElem) &&
+                    rimMixElem.ValueKind == JsonValueKind.Number)
+                    mtoon.RimLightingMixFactor = (float)rimMixElem.GetDouble();
+
+                if (mtoonElem.TryGetProperty("matcapFactor", out JsonElement matcapFactorElem) &&
+                    TryReadNumberArray(matcapFactorElem, out float[] matcapFactor) && matcapFactor.Length >= 3)
+                    mtoon.MatcapFactor = new Vector3(matcapFactor[0], matcapFactor[1], matcapFactor[2]);
+
+                if (mtoonElem.TryGetProperty("matcapTexture", out JsonElement matcapTexElem) &&
+                    matcapTexElem.ValueKind == JsonValueKind.Object &&
+                    matcapTexElem.TryGetProperty("index", out JsonElement matcapTexIdx) &&
+                    matcapTexIdx.ValueKind == JsonValueKind.Number)
+                    mtoon.MatcapTextureIndex = matcapTexIdx.GetInt32();
+
+                if (mtoonElem.TryGetProperty("outlineColorFactor", out JsonElement outlineColorElem) &&
+                    TryReadNumberArray(outlineColorElem, out float[] outlineColor) && outlineColor.Length >= 3)
+                    mtoon.OutlineColorFactor = new Vector3(outlineColor[0], outlineColor[1], outlineColor[2]);
+
+                if (mtoonElem.TryGetProperty("outlineWidthFactor", out JsonElement outlineWidthElem) &&
+                    outlineWidthElem.ValueKind == JsonValueKind.Number)
+                    mtoon.OutlineWidthFactor = (float)outlineWidthElem.GetDouble();
+
+                if (mtoonElem.TryGetProperty("outlineLightingMixFactor", out JsonElement outlineMixElem) &&
+                    outlineMixElem.ValueKind == JsonValueKind.Number)
+                    mtoon.OutlineLightingMixFactor = (float)outlineMixElem.GetDouble();
+
+                if (mtoonElem.TryGetProperty("outlineWidthMultiplyTexture", out JsonElement outlineWidthTexElem) &&
+                    outlineWidthTexElem.ValueKind == JsonValueKind.Object &&
+                    outlineWidthTexElem.TryGetProperty("index", out JsonElement outlineWidthTexIdx) &&
+                    outlineWidthTexIdx.ValueKind == JsonValueKind.Number)
+                    mtoon.OutlineWidthMultiplyTextureIndex = outlineWidthTexIdx.GetInt32();
+
+                if (mtoonElem.TryGetProperty("giEqualizationFactor", out JsonElement giEqualElem) &&
+                    giEqualElem.ValueKind == JsonValueKind.Number)
+                    mtoon.GiEqualizationFactor = (float)giEqualElem.GetDouble();
+
+                if (mtoonElem.TryGetProperty("transparentWithZWrite", out JsonElement zwriteElem))
+                {
+                    mtoon.TransparentWithZWrite = zwriteElem.ValueKind == JsonValueKind.True ||
+                                                  (zwriteElem.ValueKind == JsonValueKind.Number && zwriteElem.GetDouble() != 0);
+                }
+
+                if (mtoonElem.TryGetProperty("renderQueueOffsetNumber", out JsonElement queueOffsetElem) &&
+                    queueOffsetElem.ValueKind == JsonValueKind.Number)
+                    mtoon.RenderQueueOffsetNumber = queueOffsetElem.GetInt32();
+
+                if (mtoonElem.TryGetProperty("uvAnimationScrollXSpeedFactor", out JsonElement uvScrollXElem) &&
+                    uvScrollXElem.ValueKind == JsonValueKind.Number)
+                    mtoon.UvAnimationScrollXSpeedFactor = (float)uvScrollXElem.GetDouble();
+
+                if (mtoonElem.TryGetProperty("uvAnimationScrollYSpeedFactor", out JsonElement uvScrollYElem) &&
+                    uvScrollYElem.ValueKind == JsonValueKind.Number)
+                    mtoon.UvAnimationScrollYSpeedFactor = (float)uvScrollYElem.GetDouble();
+
+                if (mtoonElem.TryGetProperty("uvAnimationRotationSpeedFactor", out JsonElement uvRotElem) &&
+                    uvRotElem.ValueKind == JsonValueKind.Number)
+                    mtoon.UvAnimationRotationSpeedFactor = (float)uvRotElem.GetDouble();
+
+                data.Materials[i].Mtoon = mtoon;
+            }
+        }
+
+        private static void ParseExpressionGroup(JsonElement expressions, string groupName, bool isPreset, VrmData data)
+        {
+            if (!expressions.TryGetProperty(groupName, out JsonElement group) ||
+                group.ValueKind != JsonValueKind.Object)
+                return;
+
+            foreach (JsonProperty prop in group.EnumerateObject())
+            {
+                if (prop.Value.ValueKind != JsonValueKind.Object)
+                    continue;
+
+                JsonElement exprElem = prop.Value;
+
+                VrmRawExpression expression = new VrmRawExpression
+                {
+                    Name = prop.Name,
+                    IsPreset = isPreset
+                };
+
+                if (exprElem.TryGetProperty("isBinary", out JsonElement binaryElem))
+                {
+                    expression.IsBinary = binaryElem.ValueKind == JsonValueKind.True ||
+                                          (binaryElem.ValueKind == JsonValueKind.Number && binaryElem.GetDouble() != 0);
+                }
+
+                ReadStringProperty(exprElem, "overrideMouth", value => expression.OverrideMouth = value);
+                ReadStringProperty(exprElem, "overrideBlink", value => expression.OverrideBlink = value);
+                ReadStringProperty(exprElem, "overrideLookAt", value => expression.OverrideLookAt = value);
+
+                if (exprElem.TryGetProperty("morphTargetBinds", out JsonElement morphBinds) &&
+                    morphBinds.ValueKind == JsonValueKind.Array)
+                {
+                    foreach (JsonElement bindElem in morphBinds.EnumerateArray())
+                    {
+                        if (bindElem.ValueKind != JsonValueKind.Object)
+                            continue;
+
+                        if (!bindElem.TryGetProperty("node", out JsonElement nodeElem) ||
+                            nodeElem.ValueKind != JsonValueKind.Number)
+                            continue;
+
+                        if (!bindElem.TryGetProperty("index", out JsonElement indexElem) ||
+                            indexElem.ValueKind != JsonValueKind.Number)
+                            continue;
+
+                        float weight = 1f;
+                        if (bindElem.TryGetProperty("weight", out JsonElement weightElem) &&
+                            weightElem.ValueKind == JsonValueKind.Number)
+                            weight = (float)weightElem.GetDouble();
+
+                        expression.MorphTargetBinds.Add(new VrmRawMorphTargetBind
+                        {
+                            NodeIndex = nodeElem.GetInt32(),
+                            MorphIndex = indexElem.GetInt32(),
+                            Weight = weight
+                        });
+                    }
+                }
+
+                if (exprElem.TryGetProperty("materialColorBinds", out JsonElement colorBinds) &&
+                    colorBinds.ValueKind == JsonValueKind.Array)
+                {
+                    foreach (JsonElement bindElem in colorBinds.EnumerateArray())
+                    {
+                        if (bindElem.ValueKind != JsonValueKind.Object)
+                            continue;
+
+                        if (!bindElem.TryGetProperty("material", out JsonElement materialElem) ||
+                            materialElem.ValueKind != JsonValueKind.Number)
+                            continue;
+
+                        string type = "color";
+                        if (bindElem.TryGetProperty("type", out JsonElement typeElem) &&
+                            typeElem.ValueKind == JsonValueKind.String)
+                            type = typeElem.GetString() ?? "color";
+
+                        Vector4 targetValue = Vector4.Zero;
+                        if (bindElem.TryGetProperty("targetValue", out JsonElement targetElem) &&
+                            TryReadNumberArray(targetElem, out float[] targetNumbers) && targetNumbers.Length >= 4)
+                        {
+                            targetValue = new Vector4(targetNumbers[0], targetNumbers[1], targetNumbers[2], targetNumbers[3]);
+                        }
+
+                        expression.MaterialColorBinds.Add(new VrmRawMaterialColorBind
+                        {
+                            MaterialIndex = materialElem.GetInt32(),
+                            Type = type,
+                            TargetValue = targetValue
+                        });
+                    }
+                }
+
+                if (exprElem.TryGetProperty("textureTransformBinds", out JsonElement transformBinds) &&
+                    transformBinds.ValueKind == JsonValueKind.Array)
+                {
+                    foreach (JsonElement bindElem in transformBinds.EnumerateArray())
+                    {
+                        if (bindElem.ValueKind != JsonValueKind.Object)
+                            continue;
+
+                        if (!bindElem.TryGetProperty("material", out JsonElement materialElem) ||
+                            materialElem.ValueKind != JsonValueKind.Number)
+                            continue;
+
+                        Vector2 scale = Vector2.One;
+                        if (bindElem.TryGetProperty("scale", out JsonElement scaleElem) &&
+                            TryReadNumberArray(scaleElem, out float[] scaleNumbers) && scaleNumbers.Length >= 2)
+                            scale = new Vector2(scaleNumbers[0], scaleNumbers[1]);
+
+                        Vector2 offset = Vector2.Zero;
+                        if (bindElem.TryGetProperty("offset", out JsonElement offsetElem) &&
+                            TryReadNumberArray(offsetElem, out float[] offsetNumbers) && offsetNumbers.Length >= 2)
+                            offset = new Vector2(offsetNumbers[0], offsetNumbers[1]);
+
+                        expression.TextureTransformBinds.Add(new VrmRawTextureTransformBind
+                        {
+                            MaterialIndex = materialElem.GetInt32(),
+                            Scale = scale,
+                            Offset = offset
+                        });
+                    }
+                }
+
+                data.Expressions.Add(expression);
+            }
+        }
+
+        private static void ReadRangeMap(JsonElement lookAt, string propertyName, VrmRangeMap rangeMap)
+        {
+            if (!lookAt.TryGetProperty(propertyName, out JsonElement mapElem) ||
+                mapElem.ValueKind != JsonValueKind.Object)
+                return;
+
+            if (mapElem.TryGetProperty("inputMaxValue", out JsonElement inputElem) &&
+                inputElem.ValueKind == JsonValueKind.Number)
+                rangeMap.InputMaxValue = (float)inputElem.GetDouble();
+
+            if (mapElem.TryGetProperty("outputScale", out JsonElement outputElem) &&
+                outputElem.ValueKind == JsonValueKind.Number)
+                rangeMap.OutputScale = (float)outputElem.GetDouble();
+        }
+
+        private static void ReadStringProperty(JsonElement element, string propertyName, Action<string> setter)
+        {
+            if (element.TryGetProperty(propertyName, out JsonElement propElem) &&
+                propElem.ValueKind == JsonValueKind.String)
+                setter(propElem.GetString() ?? "");
+        }
+
+        private static bool TryReadNumberArray(JsonElement element, out float[] values)
+        {
+            values = Array.Empty<float>();
+
+            if (element.ValueKind != JsonValueKind.Array)
+                return false;
+
+            var list = new List<float>();
+
+            foreach (JsonElement item in element.EnumerateArray())
+            {
+                if (item.ValueKind == JsonValueKind.Number)
+                    list.Add((float)item.GetDouble());
+            }
+
+            if (list.Count == 0)
+                return false;
+
+            values = list.ToArray();
+            return true;
         }
     }
 }

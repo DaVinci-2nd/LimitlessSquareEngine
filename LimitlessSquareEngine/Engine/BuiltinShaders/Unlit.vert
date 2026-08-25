@@ -11,18 +11,26 @@ uniform mat4 uProjection;
 
 out vec4 vColor;
 out vec2 vTexCoord;
+out vec3 vViewPos;
+flat out int vRenderSpace;
 
 void main()
 {
+    vec4 worldPos4 = uModel * vec4(aPos, 1.0);
+    vec4 viewPos4 = uView * worldPos4;
+
+    vViewPos = viewPos4.xyz;
+
     if (uRenderSpace == 0)
     {
         gl_Position = vec4(aPos, 1.0);
     }
     else
     {
-        gl_Position = uProjection * uView * uModel * vec4(aPos, 1.0);
+        gl_Position = uProjection * viewPos4;
     }
 
     vColor = aColor;
     vTexCoord = aTexCoord;
+    vRenderSpace = uRenderSpace;
 }

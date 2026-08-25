@@ -97,6 +97,7 @@ namespace LimitlessSquareEngine
         // 激活的着色器序列
         private uint _currentProgram;
         private readonly Dictionary<string, MaterialData> _materialCache = new(StringComparer.Ordinal);
+        private readonly Dictionary<string, Dictionary<string, float[]>> _materialParameterOverrides = new(StringComparer.Ordinal);
         private readonly Dictionary<uint, List<ActiveUniformInfo>> _programUniformCache = new();
         private readonly Dictionary<uint, ProgramUniformLocationCache> _programLocationCache = new();
         private readonly Dictionary<uint, ProgramMaterialDefaultsCache> _programMaterialDefaultsCache = new();
@@ -118,9 +119,15 @@ namespace LimitlessSquareEngine
         // 灯光集合
         private readonly Dictionary<string, LightData> _lights = new(StringComparer.Ordinal);
 
-        private const uint _clusterLightBufferBinding = 0;
-        private const uint _clusterRangeBufferBinding = 1;
-        private const uint _clusterIndexBufferBinding = 2;
+        private const uint _avatarBoneMatricesBinding = 0;
+
+        private const int _avatarMaxBonesPerModel = 128;
+        private const int _avatarMaxCount = 64;
+        private const int _avatarBoneMatrixStrideFloats = 16;
+
+        private const uint _clusterLightBufferBinding = 1;
+        private const uint _clusterRangeBufferBinding = 2;
+        private const uint _clusterIndexBufferBinding = 3;
 
         private const int _clusterGridSizeX = 16;
         private const int _clusterGridSizeY = 9;
@@ -159,7 +166,12 @@ namespace LimitlessSquareEngine
         private uint _lightingDummyTexture = 0;
         private bool _lightingSupportInitialized = false;
 
-        private const uint _directionalShadowCascadeBufferBinding = 3;
+        private uint _avatarBoneMatricesBuffer = 0;
+        private float[] _avatarBoneMatrixUploadScratch = Array.Empty<float>();
+        private int _avatarBoneMatrixUploadCount = 0;
+        private readonly Dictionary<string, int> _avatarSkinBoneBaseIndices = new(StringComparer.Ordinal);
+
+        private const uint _directionalShadowCascadeBufferBinding = 4;
 
         private const int _directionalShadowCascadeTileSize = 1024;
         private const int _maxDirectionalShadowLights = 1;
@@ -936,6 +948,9 @@ namespace LimitlessSquareEngine
             public int OutlinePass = -1;
             public int UseOutlineNormal = -1;
 
+            public int SkinEnabled = -1;
+            public int BoneBaseIndex = -1;
+
             public int FogEnabled = -1;
             public int FogMode = -1;
             public int FogColor = -1;
@@ -1029,6 +1044,7 @@ namespace LimitlessSquareEngine
             public string SceneId { get; init; } = "";
             public string ObjectId { get; init; } = "";
             public string Type { get; init; } = "Object";
+            public string AvatarId { get; init; } = "";
             public bool Active { get; init; }
             public bool Visible { get; init; }
             public string? Mesh { get; init; }
@@ -1195,6 +1211,9 @@ namespace LimitlessSquareEngine
         [MoonSharpHidden]
         public void UpsertSceneObject(SceneRenderObjectSnapshot snapshot)
         {
+            if (string.Equals(snapshot.Type, "Avatar", StringComparison.Ordinal))
+                EnsureAvatarInstanceFromSnapshot(snapshot);
+
             if (!_sceneObjectCache.TryGetValue(snapshot.SceneId, out var map))
             {
                 map = new Dictionary<string, SceneRenderObjectSnapshot>(StringComparer.Ordinal);
@@ -1207,9 +1226,45 @@ namespace LimitlessSquareEngine
                 _staticSceneObjectRenderCache.Remove(BuildSceneObjectRenderCacheKey(snapshot.SceneId, snapshot.ObjectId));
         }
 
+        private void EnsureAvatarInstanceFromSnapshot(SceneRenderObjectSnapshot snapshot)
+        {
+            string avatarId = string.IsNullOrWhiteSpace(snapshot.AvatarId) ? snapshot.ObjectId : snapshot.AvatarId;
+            string modelKey = snapshot.Mesh ?? "";
+
+            if (!AvatarRegistry.TryGet(avatarId, out Avatar? avatar))
+            {
+                avatar = new Avatar(avatarId, modelKey);
+                avatar.SceneId = snapshot.SceneId;
+
+                if (Program.TryResolveAssetPath(modelKey, out string vrmFilePath))
+                {
+                    try
+                    {
+                        VrmData data = VrmLoader.LoadFromFile(vrmFilePath);
+                        new VrmAvatar(modelKey).MapToAvatar(avatar, data);
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"[!] Failed to convert VRM '{modelKey}' for avatar '{avatarId}': {ex.Message}");
+                    }
+                }
+
+                AvatarRegistry.Register(avatar);
+            }
+
+            avatar.Active = snapshot.Active;
+            avatar.Visible = snapshot.Visible;
+            avatar.ModelKey = modelKey;
+            avatar.LocalPosition = snapshot.WorldPosition;
+            avatar.LocalRotation = snapshot.WorldRotation.ToEulerDegrees();
+            avatar.LocalScale = snapshot.WorldScale;
+        }
+
         [MoonSharpHidden]
         public void RemoveSceneObject(string sceneId, string objectId)
         {
+            AvatarRegistry.Remove(objectId);
+
             if (_sceneObjectCache.TryGetValue(sceneId, out var map))
             {
                 map.Remove(objectId);
@@ -1254,6 +1309,12 @@ namespace LimitlessSquareEngine
             _sceneObjectCache.Remove(sceneId);
             _sceneCameraCache.Remove(sceneId);
             _sceneLightCache.Remove(sceneId);
+
+            foreach (Avatar avatar in AvatarRegistry.GetAll())
+            {
+                if (string.Equals(avatar.SceneId, sceneId, StringComparison.Ordinal))
+                    AvatarRegistry.Remove(avatar.Id);
+            }
 
             string prefix = sceneId + "::";
             List<string> keys = _staticSceneObjectRenderCache.Keys
@@ -1343,6 +1404,9 @@ namespace LimitlessSquareEngine
             public bool UsePremultipliedTransparentBlend;
             public int DepthLayerIndex;
             public int DepthLayerCount;
+
+            public bool SkinEnabled;
+            public int BoneBaseIndex;
         }
         private readonly List<RenderCommand> _renderQueue = new();
         private long _submissionCounter = 0;
@@ -1562,6 +1626,9 @@ namespace LimitlessSquareEngine
 
             foreach (MeshSurfaceData surface in mesh.Surfaces)
             {
+                if (surface.IsSkinned)
+                    continue;
+
                 MaterialData material = ResolveSceneMaterial(obj, surface);
                 float materialAlpha = ReadMaterialColorAlpha(material);
                 bool transparentByColorAlpha = materialAlpha < 0.9999f;
@@ -4085,12 +4152,105 @@ namespace LimitlessSquareEngine
             UploadPointLightsForCommand(batchAnchor);
         }
 
+        private void EnsureAvatarBoneMatricesBufferCreated()
+        {
+            if (_avatarBoneMatricesBuffer != 0)
+                return;
+
+            _avatarBoneMatricesBuffer = _gl.GenBuffer();
+            _gl.BindBuffer(BufferTargetARB.ShaderStorageBuffer, _avatarBoneMatricesBuffer);
+
+            int totalFloats = _avatarMaxCount * _avatarMaxBonesPerModel * _avatarBoneMatrixStrideFloats;
+            float[] zeros = new float[totalFloats];
+            _gl.BufferData(BufferTargetARB.ShaderStorageBuffer, (ReadOnlySpan<float>)zeros, BufferUsageARB.DynamicDraw);
+
+            _gl.BindBuffer(BufferTargetARB.ShaderStorageBuffer, 0);
+        }
+
+        private void AppendMatrixToUploadScratch(in Matrix4x4 m)
+        {
+            float[] scratch = _avatarBoneMatrixUploadScratch;
+            int i = _avatarBoneMatrixUploadCount;
+
+            scratch[i++] = m.M11; scratch[i++] = m.M12; scratch[i++] = m.M13; scratch[i++] = m.M14;
+            scratch[i++] = m.M21; scratch[i++] = m.M22; scratch[i++] = m.M23; scratch[i++] = m.M24;
+            scratch[i++] = m.M31; scratch[i++] = m.M32; scratch[i++] = m.M33; scratch[i++] = m.M34;
+            scratch[i++] = m.M41; scratch[i++] = m.M42; scratch[i++] = m.M43; scratch[i++] = m.M44;
+
+            _avatarBoneMatrixUploadCount = i;
+        }
+
+        private void UploadAvatarBoneMatrices()
+        {
+            EnsureAvatarBoneMatricesBufferCreated();
+
+            _avatarSkinBoneBaseIndices.Clear();
+
+            int totalBones = _avatarMaxCount * _avatarMaxBonesPerModel;
+            int capacityFloats = totalBones * _avatarBoneMatrixStrideFloats;
+
+            if (_avatarBoneMatrixUploadScratch.Length < capacityFloats)
+                _avatarBoneMatrixUploadScratch = new float[capacityFloats];
+
+            _avatarBoneMatrixUploadCount = 0;
+
+            int baseIndex = 0;
+
+            foreach (Avatar avatar in AvatarRegistry.GetAll())
+            {
+                if (!avatar.Active || avatar.Skins.Count == 0)
+                    continue;
+
+                Matrix4x4[] nodeGlobalMatrices = avatar.Skeleton.ComputeNodeGlobalMatrices();
+
+                for (int skinIndex = 0; skinIndex < avatar.Skins.Count; skinIndex++)
+                {
+                    AvatarSkin skin = avatar.Skins[skinIndex];
+
+                    if (skin.JointBoneIndices.Length == 0)
+                        continue;
+
+                    Matrix4x4[] jointMatrices = avatar.ComputeSkinMatrices(skin, nodeGlobalMatrices);
+
+                    if (baseIndex + jointMatrices.Length > totalBones)
+                    {
+                        Console.WriteLine($"[!] Avatar bone matrix SSBO capacity exceeded at avatar '{avatar.Id}' skin {skinIndex}. Skipped.");
+                        continue;
+                    }
+
+                    _avatarSkinBoneBaseIndices[avatar.Id + "::" + skinIndex] = baseIndex;
+
+                    for (int i = 0; i < jointMatrices.Length; i++)
+                        AppendMatrixToUploadScratch(jointMatrices[i]);
+
+                    baseIndex += jointMatrices.Length;
+                }
+            }
+
+            if (_avatarBoneMatrixUploadCount > 0)
+            {
+                _gl.BindBuffer(BufferTargetARB.ShaderStorageBuffer, _avatarBoneMatricesBuffer);
+                _gl.BufferSubData(
+                    BufferTargetARB.ShaderStorageBuffer,
+                    0,
+                    (ReadOnlySpan<float>)_avatarBoneMatrixUploadScratch.AsSpan(0, _avatarBoneMatrixUploadCount));
+                _gl.BindBuffer(BufferTargetARB.ShaderStorageBuffer, 0);
+            }
+        }
+
+        internal bool TryGetAvatarSkinBoneBaseIndex(string avatarId, int skinIndex, out int boneBaseIndex)
+        {
+            return _avatarSkinBoneBaseIndices.TryGetValue(avatarId + "::" + skinIndex, out boneBaseIndex);
+        }
+
         private void ApplyLightingSupportUniforms(in RenderCommand cmd)
         {
             InitializeLightingSupportResources();
+            EnsureAvatarBoneMatricesBufferCreated();
 
             ProgramUniformLocationCache loc = GetProgramLocationCache(_currentProgram);
 
+            _gl.BindBufferBase(BufferTargetARB.ShaderStorageBuffer, _avatarBoneMatricesBinding, _avatarBoneMatricesBuffer);
             _gl.BindBufferBase(BufferTargetARB.ShaderStorageBuffer, _clusterLightBufferBinding, _clusterLightBuffer);
             _gl.BindBufferBase(BufferTargetARB.ShaderStorageBuffer, _clusterRangeBufferBinding, _clusterRangeBuffer);
             _gl.BindBufferBase(BufferTargetARB.ShaderStorageBuffer, _clusterIndexBufferBinding, _clusterIndexBuffer);
@@ -4195,6 +4355,12 @@ namespace LimitlessSquareEngine
 
             if (loc.UseOutlineNormal != -1)
                 _gl.Uniform1(loc.UseOutlineNormal, cmd.VertexStrideFloats >= 19 ? 1 : 0);
+
+            if (loc.SkinEnabled != -1)
+                _gl.Uniform1(loc.SkinEnabled, cmd.SkinEnabled ? 1 : 0);
+
+            if (loc.BoneBaseIndex != -1)
+                _gl.Uniform1(loc.BoneBaseIndex, cmd.BoneBaseIndex);
 
             ApplyCloudSupportUniforms(cmd);
 
@@ -7267,6 +7433,9 @@ namespace LimitlessSquareEngine
             cache.OutlinePass = GetLoc(_uniformOutlinePass);
             cache.UseOutlineNormal = GetLoc(_uniformUseOutlineNormal);
 
+            cache.SkinEnabled = GetLoc("uSkinEnabled");
+            cache.BoneBaseIndex = GetLoc("uBoneBaseIndex");
+
             cache.FogEnabled = GetLoc(_uniformFogEnabled);
             cache.FogMode = GetLoc(_uniformFogMode);
             cache.FogColor = GetLoc(_uniformFogColor);
@@ -7569,6 +7738,16 @@ namespace LimitlessSquareEngine
                                 y: 1f,
                                 z: 1f,
                                 w: 1f));
+                        }
+                        else if (string.Equals(uniform.Name, "uTextureScaleOffset", StringComparison.Ordinal))
+                        {
+                            cache.Commands.Add(new MaterialDefaultCommand(
+                                MaterialDefaultCommandKind.Float4,
+                                uniform.Location,
+                                x: 1f,
+                                y: 1f,
+                                z: 0f,
+                                w: 0f));
                         }
                         else
                         {
@@ -8186,7 +8365,136 @@ namespace LimitlessSquareEngine
                 }
             }
 
+            if (_materialParameterOverrides.TryGetValue(material.Id, out var overrides) && overrides.Count > 0)
+            {
+                foreach (KeyValuePair<string, float[]> pair in overrides)
+                    ApplyMaterialParameterOverride(pair.Key, pair.Value);
+            }
+
             _gl.ActiveTexture(TextureUnit.Texture0);
+        }
+
+        public void SetMaterialParameterOverride(string materialKey, string uniformName, float[] values)
+        {
+            if (string.IsNullOrWhiteSpace(materialKey) || string.IsNullOrWhiteSpace(uniformName))
+                return;
+
+            if (values == null || values.Length == 0)
+            {
+                RemoveMaterialParameterOverride(materialKey, uniformName);
+                return;
+            }
+
+            if (!_materialParameterOverrides.TryGetValue(materialKey, out var map))
+            {
+                map = new Dictionary<string, float[]>(StringComparer.Ordinal);
+                _materialParameterOverrides[materialKey] = map;
+            }
+
+            map[uniformName] = values;
+        }
+
+        public void RemoveMaterialParameterOverride(string materialKey, string uniformName)
+        {
+            if (string.IsNullOrWhiteSpace(materialKey) || string.IsNullOrWhiteSpace(uniformName))
+                return;
+
+            if (_materialParameterOverrides.TryGetValue(materialKey, out var map))
+            {
+                map.Remove(uniformName);
+
+                if (map.Count == 0)
+                    _materialParameterOverrides.Remove(materialKey);
+            }
+        }
+
+        public void ClearMaterialParameterOverrides(string materialKey)
+        {
+            if (string.IsNullOrWhiteSpace(materialKey))
+                return;
+
+            _materialParameterOverrides.Remove(materialKey);
+        }
+
+        public void ClearAllMaterialParameterOverrides()
+        {
+            _materialParameterOverrides.Clear();
+        }
+
+        public bool TryReadMaterialUniformValue(string materialKey, string uniformName, out float[] values)
+        {
+            values = Array.Empty<float>();
+
+            if (string.IsNullOrWhiteSpace(materialKey) || string.IsNullOrWhiteSpace(uniformName))
+                return false;
+
+            if (!_materialCache.TryGetValue(materialKey, out MaterialData material))
+                return false;
+
+            if (material.Parameters.ValueKind != JsonValueKind.Object)
+                return false;
+
+            if (!material.Parameters.TryGetProperty(uniformName, out JsonElement element))
+                return false;
+
+            if (!TryReadNumericArray(element, out double[] numbers) || numbers.Length == 0)
+                return false;
+
+            values = numbers.Select(v => (float)v).ToArray();
+            return true;
+        }
+
+        private void ApplyMaterialParameterOverride(string uniformName, float[] values)
+        {
+            if (!TryGetActiveUniformExact(_currentProgram, uniformName, out ActiveUniformInfo uniform))
+                return;
+
+            int location = uniform.Location;
+            if (location == -1)
+                return;
+
+            switch (uniform.Type)
+            {
+                case UniformType.Float:
+                    if (values.Length >= 1)
+                        _gl.Uniform1(location, values[0]);
+                    break;
+
+                case UniformType.Int:
+                case UniformType.Bool:
+                    if (values.Length >= 1)
+                        _gl.Uniform1(location, (int)values[0]);
+                    break;
+
+                case UniformType.FloatVec2:
+                    if (values.Length >= 2)
+                        _gl.Uniform2(location, values[0], values[1]);
+                    break;
+
+                case UniformType.FloatVec3:
+                    if (values.Length >= 3)
+                        _gl.Uniform3(location, values[0], values[1], values[2]);
+                    break;
+
+                case UniformType.FloatVec4:
+                    if (values.Length >= 4)
+                        _gl.Uniform4(location, values[0], values[1], values[2], values[3]);
+                    break;
+            }
+        }
+
+        public void TickAvatars()
+        {
+            ClearAllMaterialParameterOverrides();
+
+            foreach (Avatar avatar in AvatarRegistry.GetAll())
+            {
+                if (!avatar.Active)
+                    continue;
+
+                avatar.UpdateLookAt();
+                avatar.ApplyExpressions(this);
+            }
         }
 
         private bool ShouldRenderOutline(RenderCommand cmd)
@@ -8709,7 +9017,10 @@ namespace LimitlessSquareEngine
                         continue;
                     if (!_meshes.TryGetValue(obj.Mesh, out MeshData mesh))
                     {
-                        Program.EnsureObjMeshRegistered(obj.Mesh, this);
+                        if (obj.Mesh.EndsWith(".vrm", StringComparison.OrdinalIgnoreCase))
+                            Program.EnsureVrmRegistered(obj.Mesh, this);
+                        else
+                            Program.EnsureObjMeshRegistered(obj.Mesh, this);
                     }
                     if (!_meshes.TryGetValue(obj.Mesh, out mesh))
                     {
@@ -8730,6 +9041,29 @@ namespace LimitlessSquareEngine
                             (float)relativePosition.X,
                             (float)relativePosition.Y,
                             (float)(-relativePosition.Z));
+
+                    if (string.Equals(obj.Type, "Avatar", StringComparison.Ordinal))
+                    {
+                        BuildAvatarSceneCommands(
+                            obj,
+                            mesh,
+                            model,
+                            sceneId,
+                            cameraItem,
+                            viewport,
+                            view,
+                            projection,
+                            useReverseZ,
+                            layerIdx,
+                            layerCount,
+                            batchId,
+                            fogSettings,
+                            skybox,
+                            cameraWorld,
+                            layerNear,
+                            layerFar);
+                        continue;
+                    }
 
                     MaterialData? cloudMaterial = null;
                     foreach (MeshSurfaceData surface in mesh.Surfaces)
@@ -8914,6 +9248,122 @@ namespace LimitlessSquareEngine
                         _renderQueue.Add(cmd);
                     }
                 }
+            }
+        }
+
+        private void BuildAvatarSceneCommands(
+            SceneRenderObjectSnapshot obj,
+            MeshData mesh,
+            Matrix4x4 model,
+            string sceneId,
+            SceneRenderCameraSnapshot cameraItem,
+            ViewportRect viewport,
+            Matrix4x4 view,
+            Matrix4x4 projection,
+            bool useReverseZ,
+            int layerIdx,
+            int layerCount,
+            long batchId,
+            FogSettings? fogSettings,
+            SkyboxData? skybox,
+            SceneWorldState cameraWorld,
+            double layerNear,
+            double layerFar)
+        {
+            string avatarId = string.IsNullOrWhiteSpace(obj.AvatarId) ? obj.ObjectId : obj.AvatarId;
+
+            if (!AvatarRegistry.TryGet(avatarId, out Avatar? avatar))
+                return;
+
+            if (!avatar.Active || !avatar.Visible)
+                return;
+
+            for (int skinIndex = 0; skinIndex < avatar.Skins.Count; skinIndex++)
+            {
+                AvatarSkin skin = avatar.Skins[skinIndex];
+
+                if (string.IsNullOrWhiteSpace(skin.MeshKey) || string.IsNullOrWhiteSpace(skin.SurfaceId))
+                    continue;
+
+                MeshData skinMesh;
+                if (string.Equals(skin.MeshKey, obj.Mesh, StringComparison.Ordinal))
+                    skinMesh = mesh;
+                else if (!_meshes.TryGetValue(skin.MeshKey, out skinMesh))
+                    continue;
+
+                int surfaceIndex = -1;
+                for (int i = 0; i < skinMesh.Surfaces.Length; i++)
+                {
+                    if (string.Equals(skinMesh.Surfaces[i].Id, skin.SurfaceId, StringComparison.Ordinal))
+                    {
+                        surfaceIndex = i;
+                        break;
+                    }
+                }
+
+                if (surfaceIndex < 0)
+                    continue;
+
+                MeshSurfaceData surface = skinMesh.Surfaces[surfaceIndex];
+
+                MaterialData material = ResolveSceneMaterial(obj, surface);
+                float materialAlpha = ReadMaterialColorAlpha(material);
+                bool transparentByColorAlpha = materialAlpha < 0.9999f;
+
+                if (!TryGetAvatarSkinBoneBaseIndex(avatarId, skinIndex, out int boneBaseIndex))
+                    continue;
+
+                RenderCommand cmd = new RenderCommand
+                {
+                    Vertices = surface.Vertices,
+                    PrimitiveType = surface.PrimitiveType,
+                    Program = material.Program,
+                    UseTexture = false,
+                    TextureId = 0,
+                    VertexStrideFloats = surface.VertexStrideFloats,
+                    CameraPosition = Vector3.Zero,
+                    ClusterNear = (float)layerNear,
+                    ClusterFar = (float)layerFar,
+                    SceneId = sceneId,
+                    ObjectId = obj.ObjectId,
+                    CameraWorldPosition = cameraWorld.Position,
+                    RenderSpace = RenderSpace.Camera,
+                    Model = model,
+                    View = view,
+                    Projection = projection,
+                    QueueType = transparentByColorAlpha ? RenderQueueType.Transparent : RenderQueueType.Opaque,
+                    UsePremultipliedTransparentBlend = transparentByColorAlpha,
+                    SortDepth = ComputeSortDepth(surface.LocalCenter, model, view, RenderSpace.Camera),
+                    SubmissionIndex = _submissionCounter++,
+                    Pass = RenderPass.Scene,
+                    BatchId = batchId,
+                    BatchSubmissionOrder = cameraItem.SubmissionOrder,
+                    ViewportX = viewport.X,
+                    ViewportY = viewport.Y,
+                    UseReverseZ = useReverseZ,
+                    ViewportWidth = viewport.Width,
+                    ViewportHeight = viewport.Height,
+                    Material = material,
+                    Skybox = null,
+                    ForceWhiteVertexColor = true,
+                    IsSkybox = false,
+                    CullMode = material.CullMode,
+                    MeshId = skin.MeshKey,
+                    MeshSurfaceId = skin.SurfaceId,
+                    CameraObjectId = cameraItem.ObjectId,
+                    MeshVertexColorsAreWhite = surface.VertexColorsAreWhite,
+                    HasBoundingBox = true,
+                    BoundingLocalMin = surface.LocalBoundsMin,
+                    BoundingLocalMax = surface.LocalBoundsMax,
+                    DepthLayerIndex = layerIdx,
+                    DepthLayerCount = layerCount,
+                    SkinEnabled = true,
+                    BoneBaseIndex = boneBaseIndex
+                };
+
+                ApplyFogStateToRenderCommand(ref cmd, fogSettings, skybox);
+                WarmupSceneCommandResources(cmd);
+                _renderQueue.Add(cmd);
             }
         }
 
@@ -9127,6 +9577,8 @@ namespace LimitlessSquareEngine
         {
             _frameId++;
             _cloudTimeSeconds = _cloudTimeStopwatch.Elapsed.TotalSeconds;
+
+            UploadAvatarBoneMatrices();
 
             BeginRenderFrameDiagnostics(_renderQueue.Count);
 
@@ -11231,6 +11683,14 @@ void main()
                 _gl.DeleteBuffer(_clusterIndexBuffer);
                 _clusterIndexBuffer = 0;
             }
+
+            if (_avatarBoneMatricesBuffer != 0)
+            {
+                _gl.DeleteBuffer(_avatarBoneMatricesBuffer);
+                _avatarBoneMatricesBuffer = 0;
+            }
+
+            _avatarSkinBoneBaseIndices.Clear();
 
             if (_lightingDummyTexture != 0)
             {

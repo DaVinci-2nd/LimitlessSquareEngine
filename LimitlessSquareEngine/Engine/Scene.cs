@@ -1252,6 +1252,7 @@ namespace LimitlessSquareEngine.Engine
                         SceneId = sceneId,
                         ObjectId = node.Source.Id,
                         Type = node.Source.Type,
+                        AvatarId = ParseAvatarId(node.Source),
                         Active = node.Source.Active,
                         Visible = node.Source.Visible,
                         Mesh = node.Source.Mesh,
@@ -1349,6 +1350,34 @@ namespace LimitlessSquareEngine.Engine
                 runtime.DirtyNodes.Clear();
                 runtime.CameraCacheDirty = false;
             }
+        }
+
+        private static string ParseAvatarId(SceneObject obj)
+        {
+            if (!string.Equals(obj.Type, "Avatar", StringComparison.Ordinal))
+                return "";
+
+            if (!string.IsNullOrWhiteSpace(obj.Data))
+            {
+                try
+                {
+                    using JsonDocument doc = JsonDocument.Parse(obj.Data);
+
+                    if (doc.RootElement.ValueKind == JsonValueKind.Object &&
+                        doc.RootElement.TryGetProperty("avatarId", out JsonElement element) &&
+                        element.ValueKind == JsonValueKind.String)
+                    {
+                        string avatarId = element.GetString() ?? "";
+                        if (!string.IsNullOrWhiteSpace(avatarId))
+                            return avatarId;
+                    }
+                }
+                catch (JsonException)
+                {
+                }
+            }
+
+            return obj.Id;
         }
 
         public static void UnloadScene(string sceneId)

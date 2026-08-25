@@ -14,6 +14,8 @@ uniform sampler2D uTexture;
 uniform vec4 uColor;
 uniform int uUseTexture;
 
+uniform vec4 uTextureScaleOffset;
+
 uniform int uUseAlphaCutoff;
 uniform float uAlphaCutoff;
 
@@ -101,7 +103,7 @@ struct GPULight
     mat4 ShadowMatrix;
 };
 
-layout(std430, binding = 0) readonly buffer LightBuffer
+layout(std430, binding = 1) readonly buffer LightBuffer
 {
     GPULight uLights[];
 };
@@ -113,17 +115,17 @@ struct GPUDirectionalShadowCascade
     vec4 SplitRange;
 };
 
-layout(std430, binding = 3) readonly buffer DirectionalShadowCascadeBuffer
+layout(std430, binding = 4) readonly buffer DirectionalShadowCascadeBuffer
 {
     GPUDirectionalShadowCascade uDirectionalShadowCascades[];
 };
 
-layout(std430, binding = 1) readonly buffer ClusterRangeBuffer
+layout(std430, binding = 2) readonly buffer ClusterRangeBuffer
 {
     uvec2 uClusterRanges[];
 };
 
-layout(std430, binding = 2) readonly buffer ClusterIndexBuffer
+layout(std430, binding = 3) readonly buffer ClusterIndexBuffer
 {
     uint uClusterLightIndices[];
 };
@@ -337,7 +339,8 @@ vec3 DecodeNormal()
     if (uUseNormalTexture != 1)
         return n;
 
-    vec3 tangentNormal = texture(uNormalTexture, vTexCoord).xyz * 2.0 - 1.0;
+    vec2 textureUv = vTexCoord * uTextureScaleOffset.xy + uTextureScaleOffset.zw;
+    vec3 tangentNormal = texture(uNormalTexture, textureUv).xyz * 2.0 - 1.0;
     tangentNormal.xy *= uNormalStrength;
 
     mat3 tbn = mat3(
@@ -728,10 +731,12 @@ void BuildLight(LightRecord light, out vec3 lightDir, out float attenuation)
 
 void main()
 {
+    vec2 textureUv = vTexCoord * uTextureScaleOffset.xy + uTextureScaleOffset.zw;
+
     vec4 baseColor = vColor * uColor;
 
     if (uUseTexture == 1)
-        baseColor *= texture(uTexture, vTexCoord);
+        baseColor *= texture(uTexture, textureUv);
 
     bool isTransparentFlow = (uColor.a < 0.999999);
 
