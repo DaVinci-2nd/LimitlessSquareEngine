@@ -702,6 +702,33 @@ namespace LimitlessSquareEngine
             }
         }
 
+        internal static bool EnsureVrmRegistered(string meshKey, Graphics graphics)
+        {
+            if (string.IsNullOrWhiteSpace(meshKey))
+                return false;
+
+            string candidate = GetAssetPathFromKey(meshKey, ".vrm");
+            if (!File.Exists(candidate))
+                return false;
+
+            try
+            {
+                graphics.RegisterVrmFromFile(_assetRootPath, candidate);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[!] Failed to lazily register VRM '{meshKey}': {ex.Message}");
+                return false;
+            }
+        }
+
+        internal static bool TryResolveAssetPath(string key, out string fullPath)
+        {
+            fullPath = GetAssetPathFromKey(key, "");
+            return File.Exists(fullPath);
+        }
+
         internal static string AssetRootPathForShaderLoading => _assetRootPath;
 
         [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
@@ -1638,6 +1665,20 @@ namespace LimitlessSquareEngine
                     catch (Exception ex)
                     {
                         Console.WriteLine($"[!] Failed to scan OBJ mesh {file}: {ex.Message}");
+                    }
+
+                    continue;
+                }
+
+                if (ext.Equals(".vrm", StringComparison.OrdinalIgnoreCase))
+                {
+                    try
+                    {
+                        graphics.RegisterVrmFromFile(assetsPath, file);
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"[!] Failed to scan VRM {file}: {ex.Message}");
                     }
 
                     continue;
@@ -2802,6 +2843,8 @@ namespace LimitlessSquareEngine
                 Physics.Step(deltaTime, fixedDeltaTime);
                 // 把场景层的脏transform同步到Graphics缓存
                 Scene.FlushDirtyToRenderer();
+                // 角色更新
+                _graphics?.TickAvatars();
                 // 地形分帧流式生成
                 TerrainManager.TickAll();
             }

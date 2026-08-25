@@ -32,7 +32,7 @@ struct GPULight
     mat4 ShadowMatrix;
 };
 
-layout(std430, binding = 0) readonly buffer LightBuffer
+layout(std430, binding = 1) readonly buffer LightBuffer
 {
     GPULight uLights[];
 };
