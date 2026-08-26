@@ -40,6 +40,7 @@ namespace LimitlessSquareEngine
         private static Action<bool, int>? _setGizmoDrag;
         private static Func<string, LuaSyntaxError[]>? _checkLuaSyntax;
         private static Func<LuaApiMetadata[]>? _getLuaApiMetadata;
+        private static Func<string, SceneData?>? _loadSceneFile;
 
         internal static void Bind(
             Func<EditorHostBootstrapInfo> bootstrapInfoProvider,
@@ -71,7 +72,8 @@ namespace LimitlessSquareEngine
             Action<int> setGizmoHover,
             Action<bool, int> setGizmoDrag,
             Func<string, LuaSyntaxError[]> checkLuaSyntax,
-            Func<LuaApiMetadata[]> getLuaApiMetadata)
+            Func<LuaApiMetadata[]> getLuaApiMetadata,
+            Func<string, SceneData?> loadSceneFile)
         {
             _bootstrapInfoProvider = bootstrapInfoProvider;
             _setRenderWindowVisible = setRenderWindowVisible;
@@ -103,6 +105,7 @@ namespace LimitlessSquareEngine
             _setGizmoDrag = setGizmoDrag;
             _checkLuaSyntax = checkLuaSyntax;
             _getLuaApiMetadata = getLuaApiMetadata;
+            _loadSceneFile = loadSceneFile;
         }
 
         internal static void Unbind()
@@ -137,18 +140,19 @@ namespace LimitlessSquareEngine
             _setGizmoDrag = null;
             _checkLuaSyntax = null;
             _getLuaApiMetadata = null;
+            _loadSceneFile = null;
         }
 
         public static void SetSceneObjectLocalPosition(string sceneId, string objectId, Double3 value)
         {
             if (string.IsNullOrWhiteSpace(sceneId))
-                throw new ArgumentException("Scene ID cannot be null or empty.", nameof(sceneId));
+                throw new ArgumentException("[X] Scene ID cannot be null or empty.", nameof(sceneId));
 
             if (string.IsNullOrWhiteSpace(objectId))
-                throw new ArgumentException("Object ID cannot be null or empty.", nameof(objectId));
+                throw new ArgumentException("[X] Object ID cannot be null or empty.", nameof(objectId));
 
             if (_setSceneObjectLocalPosition == null)
-                throw new InvalidOperationException("Editor host bridge is not bound.");
+                throw new InvalidOperationException("[X] Editor host bridge is not bound.");
 
             _setSceneObjectLocalPosition(sceneId, objectId, value);
         }
@@ -156,13 +160,13 @@ namespace LimitlessSquareEngine
         public static void SetSceneObjectLocalRotation(string sceneId, string objectId, Double3 value)
         {
             if (string.IsNullOrWhiteSpace(sceneId))
-                throw new ArgumentException("Scene ID cannot be null or empty.", nameof(sceneId));
+                throw new ArgumentException("[X] Scene ID cannot be null or empty.", nameof(sceneId));
 
             if (string.IsNullOrWhiteSpace(objectId))
-                throw new ArgumentException("Object ID cannot be null or empty.", nameof(objectId));
+                throw new ArgumentException("[X] Object ID cannot be null or empty.", nameof(objectId));
 
             if (_setSceneObjectLocalRotation == null)
-                throw new InvalidOperationException("Editor host bridge is not bound.");
+                throw new InvalidOperationException("[X] Editor host bridge is not bound.");
 
             _setSceneObjectLocalRotation(sceneId, objectId, value);
         }
@@ -170,13 +174,13 @@ namespace LimitlessSquareEngine
         public static void SetSceneObjectLocalScale(string sceneId, string objectId, Double3 value)
         {
             if (string.IsNullOrWhiteSpace(sceneId))
-                throw new ArgumentException("Scene ID cannot be null or empty.", nameof(sceneId));
+                throw new ArgumentException("[X] Scene ID cannot be null or empty.", nameof(sceneId));
 
             if (string.IsNullOrWhiteSpace(objectId))
-                throw new ArgumentException("Object ID cannot be null or empty.", nameof(objectId));
+                throw new ArgumentException("[X] Object ID cannot be null or empty.", nameof(objectId));
 
             if (_setSceneObjectLocalScale == null)
-                throw new InvalidOperationException("Editor host bridge is not bound.");
+                throw new InvalidOperationException("[X] Editor host bridge is not bound.");
 
             _setSceneObjectLocalScale(sceneId, objectId, value);
         }
@@ -184,7 +188,7 @@ namespace LimitlessSquareEngine
         public static EditorRenderedFrame? ConsumeLatestFrame()
         {
             if (_consumeLatestFrame == null)
-                throw new InvalidOperationException("Editor host bridge is not bound.");
+                throw new InvalidOperationException("[X] Editor host bridge is not bound.");
 
             return _consumeLatestFrame();
         }
@@ -192,7 +196,7 @@ namespace LimitlessSquareEngine
         public static RenderedMeshRaycastHit RaycastRenderedMeshAtPixel(int screenX, int screenY)
         {
             if (_raycastRenderedMeshAtPixel == null)
-                throw new InvalidOperationException("Editor host bridge is not bound.");
+                throw new InvalidOperationException("[X] Editor host bridge is not bound.");
 
             return _raycastRenderedMeshAtPixel(screenX, screenY);
         }
@@ -207,13 +211,13 @@ namespace LimitlessSquareEngine
             float thicknessPixels)
         {
             if (string.IsNullOrWhiteSpace(sceneId))
-                throw new ArgumentException("Scene ID cannot be null or empty.", nameof(sceneId));
+                throw new ArgumentException("[X] Scene ID cannot be null or empty.", nameof(sceneId));
 
             if (string.IsNullOrWhiteSpace(objectId))
-                throw new ArgumentException("Object ID cannot be null or empty.", nameof(objectId));
+                throw new ArgumentException("[X] Object ID cannot be null or empty.", nameof(objectId));
 
             if (_setSceneObjectContour == null)
-                throw new InvalidOperationException("Editor host bridge is not bound.");
+                throw new InvalidOperationException("[X] Editor host bridge is not bound.");
 
             _setSceneObjectContour(sceneId, objectId, enabled, r, g, b, thicknessPixels);
         }
@@ -221,10 +225,10 @@ namespace LimitlessSquareEngine
         public static void ClearSceneContours(string sceneId)
         {
             if (string.IsNullOrWhiteSpace(sceneId))
-                throw new ArgumentException("Scene ID cannot be null or empty.", nameof(sceneId));
+                throw new ArgumentException("[X] Scene ID cannot be null or empty.", nameof(sceneId));
 
             if (_clearSceneContours == null)
-                throw new InvalidOperationException("Editor host bridge is not bound.");
+                throw new InvalidOperationException("[X] Editor host bridge is not bound.");
 
             _clearSceneContours(sceneId);
         }
@@ -232,10 +236,10 @@ namespace LimitlessSquareEngine
         public static void SetAssetRootAndReloadAssets(string assetRootPath)
         {
             if (string.IsNullOrWhiteSpace(assetRootPath))
-                throw new ArgumentException("Asset root path cannot be null or empty.", nameof(assetRootPath));
+                throw new ArgumentException("[X] Asset root path cannot be null or empty.", nameof(assetRootPath));
 
             if (_setAssetRootAndReloadAssets == null)
-                throw new InvalidOperationException("Editor host bridge is not bound.");
+                throw new InvalidOperationException("[X] Editor host bridge is not bound.");
 
             _setAssetRootAndReloadAssets(assetRootPath);
         }
@@ -243,7 +247,7 @@ namespace LimitlessSquareEngine
         public static EditorHostBootstrapInfo GetBootstrapInfo()
         {
             if (_bootstrapInfoProvider == null)
-                throw new InvalidOperationException("Editor host bridge is not bound.");
+                throw new InvalidOperationException("[X] Editor host bridge is not bound.");
 
             return _bootstrapInfoProvider();
         }
@@ -251,7 +255,7 @@ namespace LimitlessSquareEngine
         public static void SetRuntimePaused(bool paused)
         {
             if (_setRuntimePaused == null)
-                throw new InvalidOperationException("Editor host bridge is not bound.");
+                throw new InvalidOperationException("[X] Editor host bridge is not bound.");
 
             _setRuntimePaused(paused);
         }
@@ -259,7 +263,7 @@ namespace LimitlessSquareEngine
         public static bool GetRuntimePaused()
         {
             if (_getRuntimePaused == null)
-                throw new InvalidOperationException("Editor host bridge is not bound.");
+                throw new InvalidOperationException("[X] Editor host bridge is not bound.");
 
             return _getRuntimePaused();
         }
@@ -267,7 +271,7 @@ namespace LimitlessSquareEngine
         public static void StepRuntimeFrame()
         {
             if (_stepRuntimeFrame == null)
-                throw new InvalidOperationException("Editor host bridge is not bound.");
+                throw new InvalidOperationException("[X] Editor host bridge is not bound.");
 
             _stepRuntimeFrame();
         }
@@ -275,10 +279,10 @@ namespace LimitlessSquareEngine
         public static void SetGameStartupFolder(string folderPath)
         {
             if (string.IsNullOrWhiteSpace(folderPath))
-                throw new ArgumentException("Folder path cannot be null or empty.", nameof(folderPath));
+                throw new ArgumentException("[X] Folder path cannot be null or empty.", nameof(folderPath));
 
             if (_setGameStartupFolder == null)
-                throw new InvalidOperationException("Editor host bridge is not bound.");
+                throw new InvalidOperationException("[X] Editor host bridge is not bound.");
 
             _setGameStartupFolder(folderPath);
         }
@@ -286,7 +290,7 @@ namespace LimitlessSquareEngine
         public static string GetGameStartupFolder()
         {
             if (_getGameStartupFolder == null)
-                throw new InvalidOperationException("Editor host bridge is not bound.");
+                throw new InvalidOperationException("[X] Editor host bridge is not bound.");
 
             return _getGameStartupFolder();
         }
@@ -305,7 +309,7 @@ namespace LimitlessSquareEngine
         public static void SetRenderWindowVisible(bool visible)
         {
             if (_setRenderWindowVisible == null)
-                throw new InvalidOperationException("Editor host bridge is not bound.");
+                throw new InvalidOperationException("[X] Editor host bridge is not bound.");
 
             _setRenderWindowVisible(visible);
         }
@@ -319,7 +323,7 @@ namespace LimitlessSquareEngine
                 throw new ArgumentOutOfRangeException(nameof(height));
 
             if (_setRenderWindowSize == null)
-                throw new InvalidOperationException("Editor host bridge is not bound.");
+                throw new InvalidOperationException("[X] Editor host bridge is not bound.");
 
             _setRenderWindowSize(width, height);
         }
@@ -327,7 +331,7 @@ namespace LimitlessSquareEngine
         public static void RequestRenderWindowClose()
         {
             if (_requestRenderWindowClose == null)
-                throw new InvalidOperationException("Editor host bridge is not bound.");
+                throw new InvalidOperationException("[X] Editor host bridge is not bound.");
 
             _requestRenderWindowClose();
         }
@@ -335,7 +339,7 @@ namespace LimitlessSquareEngine
         public static void RunRenderFrame()
         {
             if (_runRenderFrame == null)
-                throw new InvalidOperationException("Editor host bridge is not bound.");
+                throw new InvalidOperationException("[X] Editor host bridge is not bound.");
 
             _runRenderFrame();
         }
@@ -343,10 +347,10 @@ namespace LimitlessSquareEngine
         public static void ReloadSceneById(string sceneId)
         {
             if (string.IsNullOrWhiteSpace(sceneId))
-                throw new ArgumentException("Scene ID cannot be null or empty.", nameof(sceneId));
+                throw new ArgumentException("[X] Scene ID cannot be null or empty.", nameof(sceneId));
 
             if (_reloadSceneById == null)
-                throw new InvalidOperationException("Editor host bridge is not bound.");
+                throw new InvalidOperationException("[X] Editor host bridge is not bound.");
 
             _reloadSceneById(sceneId);
         }
@@ -354,10 +358,10 @@ namespace LimitlessSquareEngine
         public static void RemoveSceneById(string sceneId)
         {
             if (string.IsNullOrWhiteSpace(sceneId))
-                throw new ArgumentException("Scene ID cannot be null or empty.", nameof(sceneId));
+                throw new ArgumentException("[X] Scene ID cannot be null or empty.", nameof(sceneId));
 
             if (_removeSceneById == null)
-                throw new InvalidOperationException("Editor host bridge is not bound.");
+                throw new InvalidOperationException("[X] Editor host bridge is not bound.");
 
             _removeSceneById(sceneId);
         }
@@ -365,7 +369,7 @@ namespace LimitlessSquareEngine
         public static void SetGizmoState(Double3 worldPos, int mode, int hoveredAxis, bool visible)
         {
             if (_setGizmoState == null)
-                throw new InvalidOperationException("Editor host bridge is not bound.");
+                throw new InvalidOperationException("[X] Editor host bridge is not bound.");
 
             _setGizmoState(worldPos, mode, hoveredAxis, visible);
         }
@@ -373,13 +377,13 @@ namespace LimitlessSquareEngine
         public static Double3 GetSceneObjectWorldPosition(string sceneId, string objectId)
         {
             if (string.IsNullOrWhiteSpace(sceneId))
-                throw new ArgumentException("Scene ID cannot be null or empty.", nameof(sceneId));
+                throw new ArgumentException("[X] Scene ID cannot be null or empty.", nameof(sceneId));
 
             if (string.IsNullOrWhiteSpace(objectId))
-                throw new ArgumentException("Object ID cannot be null or empty.", nameof(objectId));
+                throw new ArgumentException("[X] Object ID cannot be null or empty.", nameof(objectId));
 
             if (_getSceneObjectWorldPosition == null)
-                throw new InvalidOperationException("Editor host bridge is not bound.");
+                throw new InvalidOperationException("[X] Editor host bridge is not bound.");
 
             return _getSceneObjectWorldPosition(sceneId, objectId);
         }
@@ -387,13 +391,13 @@ namespace LimitlessSquareEngine
         public static Double3 WorldDeltaToLocalDelta(string sceneId, string objectId, Double3 worldDelta)
         {
             if (string.IsNullOrWhiteSpace(sceneId))
-                throw new ArgumentException("Scene ID cannot be null or empty.", nameof(sceneId));
+                throw new ArgumentException("[X] Scene ID cannot be null or empty.", nameof(sceneId));
 
             if (string.IsNullOrWhiteSpace(objectId))
-                throw new ArgumentException("Object ID cannot be null or empty.", nameof(objectId));
+                throw new ArgumentException("[X] Object ID cannot be null or empty.", nameof(objectId));
 
             if (_worldDeltaToLocalDelta == null)
-                throw new InvalidOperationException("Editor host bridge is not bound.");
+                throw new InvalidOperationException("[X] Editor host bridge is not bound.");
 
             return _worldDeltaToLocalDelta(sceneId, objectId, worldDelta);
         }
@@ -401,7 +405,7 @@ namespace LimitlessSquareEngine
         public static Matrix4x4 GetCameraView()
         {
             if (_getCameraView == null)
-                throw new InvalidOperationException("Editor host bridge is not bound.");
+                throw new InvalidOperationException("[X] Editor host bridge is not bound.");
 
             return _getCameraView();
         }
@@ -409,7 +413,7 @@ namespace LimitlessSquareEngine
         public static Matrix4x4 GetCameraProjection()
         {
             if (_getCameraProjection == null)
-                throw new InvalidOperationException("Editor host bridge is not bound.");
+                throw new InvalidOperationException("[X] Editor host bridge is not bound.");
 
             return _getCameraProjection();
         }
@@ -417,7 +421,7 @@ namespace LimitlessSquareEngine
         public static void SetGizmoHover(int hoveredAxis)
         {
             if (_setGizmoHover == null)
-                throw new InvalidOperationException("Editor host bridge is not bound.");
+                throw new InvalidOperationException("[X] Editor host bridge is not bound.");
 
             _setGizmoHover(hoveredAxis);
         }
@@ -425,7 +429,7 @@ namespace LimitlessSquareEngine
         public static void SetGizmoDrag(bool dragging, int activeAxis)
         {
             if (_setGizmoDrag == null)
-                throw new InvalidOperationException("Editor host bridge is not bound.");
+                throw new InvalidOperationException("[X] Editor host bridge is not bound.");
 
             _setGizmoDrag(dragging, activeAxis);
         }
@@ -444,6 +448,17 @@ namespace LimitlessSquareEngine
                 return Array.Empty<LuaApiMetadata>();
 
             return _getLuaApiMetadata();
+        }
+
+        public static SceneData? LoadSceneFile(string filePath)
+        {
+            if (string.IsNullOrWhiteSpace(filePath))
+                throw new ArgumentException("[X] Scene file path cannot be null or empty.", nameof(filePath));
+
+            if (_loadSceneFile == null)
+                throw new InvalidOperationException("[X] Editor host bridge is not bound.");
+
+            return _loadSceneFile(filePath);
         }
 
         public readonly struct LuaApiMetadata

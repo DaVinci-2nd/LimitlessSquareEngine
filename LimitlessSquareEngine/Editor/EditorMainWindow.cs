@@ -973,16 +973,16 @@ namespace LimitlessSquareEngine.Editor
         private string BuildExternalHostedGameArguments()
         {
             if (_playbackWindow == null)
-                throw new InvalidOperationException("Playback window is not ready.");
+                throw new InvalidOperationException("[X] Playback window is not ready.");
 
             if (_playbackWindowNativeHandle == 0)
-                throw new InvalidOperationException("Playback native window handle is missing.");
+                throw new InvalidOperationException("[X] Playback native window handle is missing.");
 
             if (string.IsNullOrWhiteSpace(_playbackControlFilePath))
-                throw new InvalidOperationException("Playback control file path is missing.");
+                throw new InvalidOperationException("[X] Playback control file path is missing.");
 
             if (string.IsNullOrWhiteSpace(_playbackStatusFilePath))
-                throw new InvalidOperationException("Playback status file path is missing.");
+                throw new InvalidOperationException("[X] Playback status file path is missing.");
 
             PixelSize size = GetPlaybackWindowPixelSize();
 
@@ -1019,7 +1019,7 @@ namespace LimitlessSquareEngine.Editor
                 }
             }
 
-            throw new InvalidOperationException("Unsupported playback embedding mode.");
+            throw new InvalidOperationException("[X] Unsupported playback embedding mode.");
         }
 
         private string ResolveEngineExecutablePath()
@@ -1044,7 +1044,7 @@ namespace LimitlessSquareEngine.Editor
                     return candidate;
             }
 
-            throw new FileNotFoundException("Game executable not found.");
+            throw new FileNotFoundException("[X] Game executable not found.");
         }
 
         public void TickSceneHostNavigation()
@@ -5879,31 +5879,43 @@ void main()
 
         private bool TryOpenSceneJson(string filePath)
         {
-            if (!TryReadSceneJson(filePath, out _, out _))
+            SceneData? scene = EditorHostBridge.LoadSceneFile(filePath);
+            if (scene == null)
                 return false;
 
             try
             {
                 string assetRootPath = ResolveSceneAssetRoot(filePath);
-                EditorSceneOpenResult openResult = PrepareEditorSceneCopies(filePath, assetRootPath);
+                string editorWorkingRoot = GetEditorWorkingRoot(assetRootPath);
+                string treeCopyDirectory = Path.Combine(editorWorkingRoot, EditorTreeCopyDirectoryName);
+                string previewDirectory = Path.Combine(editorWorkingRoot, EditorPreviewDirectoryName);
+
+                Directory.CreateDirectory(editorWorkingRoot);
+                Directory.CreateDirectory(treeCopyDirectory);
+                Directory.CreateDirectory(previewDirectory);
+
+                string treeCopyPath = BuildTreeCopyPath(treeCopyDirectory, filePath);
+                string previewScenePath = Path.Combine(previewDirectory, EditorPreviewSceneFileName);
+
+                File.Copy(filePath, treeCopyPath, true);
 
                 _currentSceneOriginalPath = Path.GetFullPath(filePath);
-                _currentTreeCopyPath = openResult.TreeCopyPath;
-                _currentPreviewScenePath = openResult.PreviewScenePath;
-                _currentTreeScene = openResult.TreeScene;
+                _currentTreeCopyPath = treeCopyPath;
+                _currentPreviewScenePath = previewScenePath;
+                _currentTreeScene = scene;
                 ClearSelectedSceneObjectState();
                 _sceneUndoStack.Clear();
                 _sceneRedoStack.Clear();
                 _isApplyingSceneHistory = false;
 
-                InitializePreviewCameraEditorState(openResult.TreeScene);
-                _currentPreviewScene = BuildPreviewScene(openResult.TreeScene);
+                InitializePreviewCameraEditorState(scene);
+                _currentPreviewScene = BuildPreviewScene(scene);
                 SaveSceneData(_currentPreviewScenePath, _currentPreviewScene);
 
                 RefreshCurrentPreviewCameraId();
                 ResetSceneHostNavigationState();
 
-                LeftDockSlot.Content = BuildSceneTreeControl(openResult.TreeScene);
+                LeftDockSlot.Content = BuildSceneTreeControl(scene);
 
                 UpdateSceneDirtyVisualState();
 

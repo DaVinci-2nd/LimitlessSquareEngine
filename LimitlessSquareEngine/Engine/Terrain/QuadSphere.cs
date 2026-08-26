@@ -229,7 +229,7 @@ namespace LimitlessSquareEngine.Engine.Terrain
         public static void GetChildren(in TileKey key, Span<TileKey> children)
         {
             if (children.Length < 4)
-                throw new ArgumentException("children span must have length >= 4", nameof(children));
+                throw new ArgumentException("[X] children span must have length >= 4", nameof(children));
 
             int l = key.Level + 1;
             int lx2 = key.LX << 1;

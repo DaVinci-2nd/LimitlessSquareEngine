@@ -78,18 +78,18 @@ namespace LimitlessSquareEngine
         public override Vector4 Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
         {
             if (reader.TokenType != JsonTokenType.StartArray)
-                throw new JsonException("Expected start of array.");
+                throw new JsonException("[X] Expected start of array.");
             var values = new float[4];
             for (int i = 0; i < 4; i++)
             {
                 reader.Read();
                 if (reader.TokenType == JsonTokenType.EndArray)
-                    throw new JsonException("Insufficient array elements.");
+                    throw new JsonException("[X] Insufficient array elements.");
                 values[i] = reader.GetSingle();
             }
             reader.Read();
             if (reader.TokenType != JsonTokenType.EndArray)
-                throw new JsonException("Expected end of array.");
+                throw new JsonException("[X] Expected end of array.");
             return new Vector4(values[0], values[1], values[2], values[3]);
         }
 
@@ -1181,7 +1181,7 @@ namespace LimitlessSquareEngine
                 return;
             }
 
-            throw new InvalidOperationException("Editor DLL is missing a public static entry point.");
+            throw new InvalidOperationException("[X] Editor DLL is missing a public static entry point.");
         }
 
         static void EnsureEditorAssemblyLoaded()
@@ -1193,7 +1193,7 @@ namespace LimitlessSquareEngine
                 return;
 
             if (string.IsNullOrWhiteSpace(_editorAssemblyPath) || !File.Exists(_editorAssemblyPath))
-                throw new FileNotFoundException("Editor assembly not found.", _editorAssemblyPath);
+                throw new FileNotFoundException("[X] Editor assembly not found.", _editorAssemblyPath);
 
             _editorLoadContext = new AssemblyLoadContext("LimitlessSquareEditor", false);
             _editorAssembly = _editorLoadContext.LoadFromAssemblyPath(_editorAssemblyPath);
@@ -1251,7 +1251,7 @@ namespace LimitlessSquareEngine
         static EditorHostBootstrapInfo BuildEditorHostBootstrapInfo()
         {
             if (_window == null)
-                throw new InvalidOperationException("Engine window is not initialized.");
+                throw new InvalidOperationException("[X] Engine window is not initialized.");
 
             INativeWindow nativeWindow = _window.Native;
 
@@ -1505,12 +1505,31 @@ namespace LimitlessSquareEngine
                     }
                     return errors.ToArray();
                 },
-                () => _luaApiMeta.ToArray());
+                () => _luaApiMeta.ToArray(),
+                LoadSceneFileCore);
         }
 
         static void UnbindEditorHostBridge()
         {
             EditorHostBridge.Unbind();
+        }
+
+        static SceneData? LoadSceneFileCore(string filePath)
+        {
+            if (string.IsNullOrWhiteSpace(filePath) || !File.Exists(filePath))
+                return null;
+
+            try
+            {
+                if (!TryValidateSceneFile(filePath, out _, out _))
+                    return null;
+
+                return Scene.ParseSceneFile(filePath);
+            }
+            catch (Exception)
+            {
+                return null;
+            }
         }
 
         static void ClearRegisteredAssets()
@@ -1801,20 +1820,20 @@ namespace LimitlessSquareEngine
                 return;
 
             if (_window == null || _gl == null || _graphics == null)
-                throw new InvalidOperationException("Engine host is not ready.");
+                throw new InvalidOperationException("[X] Engine host is not ready.");
 
             EnsureEditorAssemblyLoaded();
 
             if (_editorStartMethod == null)
-                throw new InvalidOperationException("Editor DLL is missing Start(EditorHostBootstrapInfo).");
+                throw new InvalidOperationException("[X] Editor DLL is missing Start(EditorHostBootstrapInfo).");
 
             EditorHostBootstrapInfo bootstrapInfo = BuildEditorHostBootstrapInfo();
 
             if (bootstrapInfo.EmbeddingMode == EditorEmbeddingMode.Unsupported)
-                throw new InvalidOperationException("Current platform does not provide a supported editor embedding mode.");
+                throw new InvalidOperationException("[X] Current platform does not provide a supported editor embedding mode.");
 
             if (bootstrapInfo.EmbeddingMode == EditorEmbeddingMode.CocoaViewHost && bootstrapInfo.CocoaContentView == 0)
-                throw new InvalidOperationException("Cocoa content view is not available.");
+                throw new InvalidOperationException("[X] Cocoa content view is not available.");
 
             Console.WriteLine($"[i] Editor embedding mode: {bootstrapInfo.EmbeddingMode}");
 
@@ -1830,7 +1849,7 @@ namespace LimitlessSquareEngine
             EnsureEditorAssemblyLoaded();
 
             if (_editorRunMethod == null)
-                throw new InvalidOperationException("Editor DLL is missing Run().");
+                throw new InvalidOperationException("[X] Editor DLL is missing Run().");
 
             _editorRunMethod.Invoke(null, null);
         }
