@@ -56,7 +56,7 @@ namespace LimitlessSquareEngine.Editor
         public static void Run()
         {
             if (EditorRuntimeState.BootstrapInfo == null)
-                throw new InvalidOperationException("Editor bootstrap info is missing.");
+                throw new InvalidOperationException("[X] Editor bootstrap info is missing.");
 
             BuildAvaloniaApp().Start(AppMain, Array.Empty<string>());
         }

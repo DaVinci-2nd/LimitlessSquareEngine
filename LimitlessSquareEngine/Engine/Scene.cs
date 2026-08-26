@@ -379,6 +379,31 @@ namespace LimitlessSquareEngine.Engine
             Converters = { new Double3JsonConverter() }
         };
 
+        internal static SceneData? ParseSceneFile(string filePath)
+        {
+            try
+            {
+                if (!File.Exists(filePath))
+                    return null;
+
+                string json = File.ReadAllText(filePath);
+                SceneData? scene = JsonSerializer.Deserialize<SceneData>(json, _jsonOptions);
+                if (scene == null)
+                    return null;
+
+                if (string.IsNullOrWhiteSpace(scene.SceneId))
+                    return null;
+
+                EnsureAvatarBonesPersisted(scene, filePath);
+
+                return scene;
+            }
+            catch (Exception)
+            {
+                return null;
+            }
+        }
+
         public static SceneData LoadScene(string sceneId)
         {
             if (string.IsNullOrWhiteSpace(sceneId))
@@ -1319,6 +1344,9 @@ namespace LimitlessSquareEngine.Engine
                     }
                 }
 
+                foreach (var node in dirtyNodes)
+                    ApplyAvatarBoneTransform(node);
+
                 if (runtime.CameraCacheDirty)
                 {
                     RebuildCameraQueue(sceneId);
@@ -1378,6 +1406,211 @@ namespace LimitlessSquareEngine.Engine
             }
 
             return obj.Id;
+        }
+
+        private static void EnsureAvatarBonesPersisted(SceneData scene, string filePath)
+        {
+            var existingBoneOwnerIds = new HashSet<string>(StringComparer.Ordinal);
+            var byId = scene.Objects
+                .Where(o => !string.IsNullOrWhiteSpace(o.Id))
+                .ToDictionary(o => o.Id, StringComparer.Ordinal);
+
+            foreach (SceneObject bone in scene.Objects)
+            {
+                if (!string.Equals(bone.Type, "Bone", StringComparison.Ordinal))
+                    continue;
+
+                SceneObject? current = bone;
+                while (current != null && !string.IsNullOrWhiteSpace(current.Transform?.ParentId))
+                {
+                    if (!byId.TryGetValue(current.Transform.ParentId, out current))
+                        break;
+                    if (string.Equals(current.Type, "Avatar", StringComparison.Ordinal))
+                    {
+                        existingBoneOwnerIds.Add(current.Id);
+                        break;
+                    }
+                }
+            }
+
+            var usedIds = new HashSet<string>(byId.Keys, StringComparer.Ordinal);
+            bool changed = false;
+
+            foreach (SceneObject obj in scene.Objects.ToList())
+            {
+                if (!string.Equals(obj.Type, "Avatar", StringComparison.Ordinal))
+                    continue;
+                if (existingBoneOwnerIds.Contains(obj.Id))
+                    continue;
+
+                string avatarId = ParseAvatarId(obj);
+                if (string.IsNullOrWhiteSpace(avatarId))
+                    continue;
+
+                Avatar? avatar;
+                if (!AvatarRegistry.TryGet(avatarId, out avatar))
+                {
+                    avatar = TryRegisterAvatarFromMesh(obj, avatarId);
+                    if (avatar == null)
+                        continue;
+                }
+
+                if (avatar == null)
+                    continue;
+
+                foreach (AvatarBone bone in avatar.Skeleton.Bones)
+                {
+                    string boneId = BuildBoneObjectId(obj.Id, bone.Name);
+                    int suffix = 1;
+                    while (!usedIds.Add(boneId))
+                        boneId = $"{BuildBoneObjectId(obj.Id, bone.Name)}_{suffix++}";
+
+                    scene.Objects.Add(new SceneObject
+                    {
+                        Id = boneId,
+                        Name = bone.Name,
+                        Type = "Bone",
+                        Active = true,
+                        Visible = true,
+                        Transform = new SceneTransform
+                        {
+                            ParentId = bone.ParentIndex >= 0
+                                ? BuildBoneObjectId(obj.Id, avatar.Skeleton.Bones[bone.ParentIndex].Name)
+                                : obj.Id,
+                            LocalPosition = bone.LocalPosition,
+                            LocalRotation = bone.LocalRotation,
+                            LocalScale = bone.LocalScale
+                        },
+                        Data = JsonSerializer.Serialize(new Dictionary<string, string>
+                        {
+                            ["boneName"] = bone.Name
+                        }),
+                        Mesh = null
+                    });
+
+                    changed = true;
+                }
+            }
+
+            if (!changed)
+                return;
+
+            try
+            {
+                JsonSerializerOptions writeOptions = new JsonSerializerOptions(_jsonOptions)
+                {
+                    WriteIndented = true
+                };
+
+                File.WriteAllText(filePath, JsonSerializer.Serialize(scene, writeOptions));
+            }
+            catch (Exception)
+            {
+            }
+        }
+
+        private static Avatar? TryRegisterAvatarFromMesh(SceneObject obj, string avatarId)
+        {
+            string? meshKey = obj.Mesh;
+            if (string.IsNullOrWhiteSpace(meshKey))
+                return null;
+
+            if (!Program.TryResolveAssetPath(meshKey, out string vrmPath))
+                return null;
+
+            try
+            {
+                VrmData data = VrmLoader.LoadFromFile(vrmPath);
+                Avatar avatar = new Avatar(avatarId, meshKey);
+                new VrmAvatar(meshKey).MapToAvatar(avatar, data);
+                AvatarRegistry.Register(avatar);
+                return avatar;
+            }
+            catch (Exception)
+            {
+                return null;
+            }
+        }
+
+        private static string BuildBoneObjectId(string avatarObjectId, string boneName)
+        {
+            return $"{avatarObjectId}__bone_{boneName.Replace(' ', '_')}";
+        }
+
+        private static DQuaternion FromBoneEulerDegrees(Double3 eulerDegrees)
+        {
+            double rx = eulerDegrees.X * Math.PI / 180.0;
+            double ry = eulerDegrees.Y * Math.PI / 180.0;
+            double rz = eulerDegrees.Z * Math.PI / 180.0;
+
+            var qx = DQuaternion.CreateAxisAngle(new Double3(1.0, 0.0, 0.0), rx);
+            var qy = DQuaternion.CreateAxisAngle(new Double3(0.0, 1.0, 0.0), ry);
+            var qz = DQuaternion.CreateAxisAngle(new Double3(0.0, 0.0, 1.0), rz);
+
+            return (qz * qy * qx).Normalized();
+        }
+
+        private static void ApplyAvatarBoneTransform(SceneRuntimeNode node)
+        {
+            if (!string.Equals(node.Source.Type, "Bone", StringComparison.Ordinal))
+                return;
+
+            SceneRuntimeNode? owner = node.Parent;
+            while (owner != null && !string.Equals(owner.Source.Type, "Avatar", StringComparison.Ordinal))
+                owner = owner.Parent;
+
+            if (owner == null)
+                return;
+
+            string avatarId = ParseAvatarId(owner.Source);
+            if (string.IsNullOrWhiteSpace(avatarId))
+                return;
+
+            if (!AvatarRegistry.TryGet(avatarId, out Avatar? avatar))
+                return;
+
+            if (avatar == null)
+                return;
+
+            string boneName = ParseBoneName(node.Source.Data);
+            if (string.IsNullOrWhiteSpace(boneName))
+                boneName = node.Source.Name;
+
+            if (string.IsNullOrWhiteSpace(boneName))
+                return;
+
+            int boneIndex = avatar.Skeleton.GetBoneIndex(boneName);
+            if (boneIndex < 0)
+                return;
+
+            AvatarBone bone = avatar.Skeleton.Bones[boneIndex];
+            bone.LocalPosition = node.Source.Transform.LocalPosition;
+            bone.LocalRotation = node.Source.Transform.LocalRotation;
+            bone.LocalRotationQuaternion = FromBoneEulerDegrees(node.Source.Transform.LocalRotation);
+            bone.LocalScale = node.Source.Transform.LocalScale;
+        }
+
+        private static string ParseBoneName(string? data)
+        {
+            if (string.IsNullOrWhiteSpace(data))
+                return "";
+
+            try
+            {
+                using JsonDocument doc = JsonDocument.Parse(data);
+
+                if (doc.RootElement.ValueKind == JsonValueKind.Object &&
+                    doc.RootElement.TryGetProperty("boneName", out JsonElement element) &&
+                    element.ValueKind == JsonValueKind.String)
+                {
+                    return element.GetString() ?? "";
+                }
+            }
+            catch (JsonException)
+            {
+            }
+
+            return "";
         }
 
         public static void UnloadScene(string sceneId)
