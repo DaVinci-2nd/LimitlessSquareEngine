@@ -975,6 +975,20 @@ namespace LimitlessSquareEngine
             public int CloudShapeNoise = -1;
             public int CloudDetailNoise = -1;
 
+            public int CloudShadowSunDir = -1;
+            public int CloudShadowBasisX = -1;
+            public int CloudShadowBasisY = -1;
+            public int CloudShadowMap = -1;
+            public int CloudShadowPlanetCenterRel = -1;
+            public int CloudShadowParamsA = -1;
+            public int CloudShadowNearMap = -1;
+            public int CloudShadowNearParamsB = -1;
+            public int CloudShadowNearCenterRel = -1;
+            public int CloudShadowNearAxisX = -1;
+            public int CloudShadowNearAxisY = -1;
+            public int CloudShadowNearHalfExtent = -1;
+            public int CloudShadowNearAnchorRel = -1;
+
             public int Texture = -1;
         }
 
@@ -4363,6 +4377,7 @@ namespace LimitlessSquareEngine
                 _gl.Uniform1(loc.BoneBaseIndex, cmd.BoneBaseIndex);
 
             ApplyCloudSupportUniforms(cmd);
+            ApplyCloudShadowSupportUniforms(cmd);
 
             _gl.ActiveTexture(TextureUnit.Texture0);
         }
@@ -7460,6 +7475,20 @@ namespace LimitlessSquareEngine
             cache.CloudShapeNoise = GetLoc(_uniformCloudShapeNoise);
             cache.CloudDetailNoise = GetLoc(_uniformCloudDetailNoise);
 
+            cache.CloudShadowSunDir = GetLoc(_uniformCloudShadowAtlasSunDir);
+            cache.CloudShadowBasisX = GetLoc(_uniformCloudShadowBasisX);
+            cache.CloudShadowBasisY = GetLoc(_uniformCloudShadowBasisY);
+            cache.CloudShadowMap = GetLoc(_uniformCloudShadowMap);
+            cache.CloudShadowPlanetCenterRel = GetLoc(_uniformCloudShadowPlanetCenterRel);
+            cache.CloudShadowParamsA = GetLoc(_uniformCloudShadowParamsA);
+            cache.CloudShadowNearMap = GetLoc(_uniformCloudShadowNearMap);
+            cache.CloudShadowNearParamsB = GetLoc(_uniformCloudShadowNearParamsB);
+            cache.CloudShadowNearCenterRel = GetLoc(_uniformCloudShadowNearCenterRel);
+            cache.CloudShadowNearAxisX = GetLoc(_uniformCloudShadowNearAxisX);
+            cache.CloudShadowNearAxisY = GetLoc(_uniformCloudShadowNearAxisY);
+            cache.CloudShadowNearHalfExtent = GetLoc("uCloudShadowNearHalfExtent");
+            cache.CloudShadowNearAnchorRel = GetLoc("uCloudShadowNearAnchorRel");
+
             cache.Texture = GetLoc("uTexture");
 
             _programLocationCache[program] = cache;
@@ -7883,8 +7912,19 @@ namespace LimitlessSquareEngine
                      string.Equals(uniformName, _uniformCloudLayerNear, StringComparison.Ordinal) ||
                      string.Equals(uniformName, _uniformCloudLayerFar, StringComparison.Ordinal) ||
                      string.Equals(uniformName, _uniformCloudShapeNoise, StringComparison.Ordinal) ||
-                     string.Equals(uniformName, _uniformCloudDetailNoise, StringComparison.Ordinal);
-        }
+                     string.Equals(uniformName, _uniformCloudDetailNoise, StringComparison.Ordinal) ||
+                     string.Equals(uniformName, _uniformCloudShadowAtlasSunDir, StringComparison.Ordinal) ||
+                     string.Equals(uniformName, _uniformCloudShadowBasisX, StringComparison.Ordinal) ||
+                     string.Equals(uniformName, _uniformCloudShadowBasisY, StringComparison.Ordinal) ||
+                     string.Equals(uniformName, _uniformCloudShadowMap, StringComparison.Ordinal) ||
+                     string.Equals(uniformName, _uniformCloudShadowPlanetCenterRel, StringComparison.Ordinal) ||
+                     string.Equals(uniformName, _uniformCloudShadowParamsA, StringComparison.Ordinal) ||
+                     string.Equals(uniformName, _uniformCloudShadowNearMap, StringComparison.Ordinal) ||
+                     string.Equals(uniformName, _uniformCloudShadowNearParamsB, StringComparison.Ordinal) ||
+                     string.Equals(uniformName, _uniformCloudShadowNearCenterRel, StringComparison.Ordinal) ||
+                     string.Equals(uniformName, _uniformCloudShadowNearAxisX, StringComparison.Ordinal) ||
+                     string.Equals(uniformName, _uniformCloudShadowNearAxisY, StringComparison.Ordinal) ||
+                     string.Equals(uniformName, "uCloudShadowNearHalfExtent", StringComparison.Ordinal);        }
 
         private bool CanReuseCapturedSkyboxReflection(in RenderCommand batchCmd, SkyboxData skybox)
         {
@@ -9577,6 +9617,7 @@ namespace LimitlessSquareEngine
         {
             _frameId++;
             _cloudTimeSeconds = _cloudTimeStopwatch.Elapsed.TotalSeconds;
+            _cloudShadowAtlasDoneThisFrame = false;
 
             UploadAvatarBoneMatrices();
 
@@ -9637,6 +9678,7 @@ namespace LimitlessSquareEngine
                     {
                         if (HasVisibleNonSkyboxSceneCommand(batch.ToList()))
                         {
+                            PrepareCloudShadowAtlasPass(layer0Anchor, batch.ToList());
                             PrepareDirectionalShadowBatch(layer0Anchor, batch.ToList());
                             PrepareLightingBuffersForBatch(layer0Anchor);
                             _layerGroupFirstLayerBatchId[layer0Anchor.CameraObjectId] = layer0Anchor.BatchId;
@@ -11699,6 +11741,8 @@ void main()
             }
 
             ReleaseCloudSupportResources();
+
+            ReleaseCloudShadowResources();
 
             foreach (TextTextureInfo info in _textTextureCache.Values)
             {

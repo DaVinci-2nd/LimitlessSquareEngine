@@ -78,6 +78,15 @@ uniform int uReflectionEnabled;
 uniform int uReflectionSource;
 uniform float uReflectionIntensity;
 
+uniform sampler2D uCloudShadowMap;
+uniform sampler2D uCloudShadowNearMap;
+uniform vec3 uCloudShadowPlanetCenterRel;
+uniform vec4 uCloudShadowParamsA;
+uniform vec4 uCloudShadowNearParamsB;
+uniform vec3 uCloudShadowNearCenterRel;
+uniform vec3 uCloudShadowNearAxisX;
+uniform vec3 uCloudShadowNearAxisY;
+
 in vec4 vColor;
 in vec2 vTexCoord;
 in vec3 vWorldPos;
@@ -588,6 +597,90 @@ float SampleShadow(LightRecord light, vec3 normalDir, vec3 lightDir)
     return SampleDirectionalShadow(light, normalDir, lightDir);
 }
 
+float SampleCloudShadow()
+{
+    if (uCloudShadowParamsA.x <= 0.5)
+        return 1.0;
+
+    if (uReceiveShadow != 1)
+        return 1.0;
+
+    vec3 pFlip = vec3(vWorldPos.x, vWorldPos.y, -vWorldPos.z);
+    vec3 p = pFlip - uCloudShadowPlanetCenterRel;
+
+    float r = max(length(p), 0.0001);
+    vec3 d = p / r;
+    vec3 dAbs = abs(d);
+
+    float fu;
+    float fv;
+    float row;
+    float col;
+
+    if (dAbs.x >= dAbs.y && dAbs.x >= dAbs.z)
+    {
+        if (d.x >= 0.0)
+        {
+            col = 2.0; row = 1.0;
+            fu = (-d.z / dAbs.x) * 0.5 + 0.5;
+            fv = (-d.y / dAbs.x) * 0.5 + 0.5;
+        }
+        else
+        {
+            col = 0.0; row = 1.0;
+            fu = (d.z / dAbs.x) * 0.5 + 0.5;
+            fv = (-d.y / dAbs.x) * 0.5 + 0.5;
+        }
+    }
+    else if (dAbs.y >= dAbs.x && dAbs.y >= dAbs.z)
+    {
+        if (d.y >= 0.0)
+        {
+            row = 2.0; col = 1.0;
+            fu = (d.x / dAbs.y) * 0.5 + 0.5;
+            fv = (d.z / dAbs.y) * 0.5 + 0.5;
+        }
+        else
+        {
+            row = 0.0; col = 1.0;
+            fu = (d.x / dAbs.y) * 0.5 + 0.5;
+            fv = (-d.z / dAbs.y) * 0.5 + 0.5;
+        }
+    }
+    else
+    {
+        if (d.z >= 0.0)
+        {
+            col = 1.0; row = 1.0;
+            fu = (d.x / dAbs.z) * 0.5 + 0.5;
+            fv = (-d.y / dAbs.z) * 0.5 + 0.5;
+        }
+        else
+        {
+            col = 3.0; row = 1.0;
+            fu = (-d.x / dAbs.z) * 0.5 + 0.5;
+            fv = (-d.y / dAbs.z) * 0.5 + 0.5;
+        }
+    }
+
+    vec2 gUv = vec2((col + fu) * 0.25, (row + fv) * (1.0 / 3.0));
+    float alpha = texture(uCloudShadowMap, gUv).r;
+
+    if (uCloudShadowNearParamsB.x > 0.5)
+    {
+        float invNearW = 1.0 / max(uCloudShadowNearParamsB.w * 2.0, 0.0001);
+        vec2 nearUv = (vec2(dot(p, uCloudShadowNearAxisX), dot(p, uCloudShadowNearAxisY)) - vec2(dot(uCloudShadowNearCenterRel, uCloudShadowNearAxisX), dot(uCloudShadowNearCenterRel, uCloudShadowNearAxisY))) * invNearW + 0.5;
+
+        vec2 nearClamped = clamp(nearUv, 0.0, 1.0);
+        float nearAlpha = texture(uCloudShadowNearMap, nearClamped).r;
+        float nearDisc = length(nearClamped - 0.5) * 2.0;
+        float nearBlend = smoothstep(uCloudShadowNearParamsB.y, uCloudShadowNearParamsB.z, nearDisc);
+        alpha = mix(nearAlpha, alpha, nearBlend);
+    }
+
+    return 1.0 - alpha;
+}
+
 void BuildPointLight(LightRecord light, out vec3 lightDir, out float attenuation)
 {
     vec3 toLight = light.Position - vWorldPos;
@@ -804,6 +897,9 @@ void main()
         }
 
         float shadowFactor = SampleShadow(light, normalDir, lightDir);
+
+        if (light.Kind == LIGHT_KIND_DIRECTIONAL && shadowFactor > 0.0)
+            shadowFactor *= SampleCloudShadow();
 
         vec3 halfVector = SafeNormalize(lightDir + viewDir);
         float ndh = Saturate(dot(normalDir, halfVector));
