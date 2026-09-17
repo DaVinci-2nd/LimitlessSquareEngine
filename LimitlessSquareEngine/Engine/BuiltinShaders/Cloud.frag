@@ -233,14 +233,20 @@ void main()
     float jitter = interleavedGradientNoise(gl_FragCoord.xy);
 
     vec3 sunDir = findSunDir();
+    vec3 cloudProbePos = camLocal + viewDirWorld * (fullEntry + (fullExit - fullEntry) * 0.5);
+    float cloudSunAngle = acos(clamp(dot(normalize(cloudProbePos), sunDir), -1.0, 1.0));
     vec3 upCam = normalize(camLocal);
-    float celSoft = clamp(uCloudCelSoftness, 0.001, 0.5);
+    float dayBlend = 1.0 - smoothstep(1.0472, 1.3963, cloudSunAngle);
+    float nightBlend = smoothstep(1.7453, 2.0944, cloudSunAngle);
+    float twilightWeight = 1.0 - dayBlend - nightBlend;
+    vec3 cloudCol = uCloudLightColor * dayBlend
+                  + uCloudTwilightColor * twilightWeight
+                  + uCloudShadeColor * nightBlend;
+
     float extinct = max(uCloudExtinction, 0.0000001);
 
     float transmittance = 1.0;
-    vec3 accumLight = vec3(0.0);
     float firstCloudT = -1.0;
-    float accumDepth = 0.0;
 
     int budget = max(uCloudMaxSteps, 8);
     float minStep = max(0.0, (fullExit - fullEntry) / float(budget));
@@ -254,6 +260,7 @@ void main()
         float stepLen = stepForT(t, minStep);
         float stride = emptyStreak >= 2 ? stepLen * 4.0 : stepLen;
         stride = min(stride, tExit - t);
+
         float sampleT = t + stride * 0.5;
 
         vec3 samplePos = camLocal + viewDirWorld * sampleT;
@@ -306,36 +313,25 @@ void main()
         if (firstCloudT < 0.0)
             firstCloudT = sampleT;
 
-        float stepTransmittance = exp(-density * stride * extinct);
-        float densityLight = density * stride * extinct;
+        float sunProbeStep = max(uCloudThickness, 1.0) * 0.25;
+        float sunThickness = 0.0;
+        for (int k = 1; k <= 4; k++)
+        {
+            vec3 probePos = samplePos + sunDir * (float(k) * sunProbeStep);
+            float probeAlt = length(probePos) - uPlanetRadius;
+            float probeH = (probeAlt - uCloudBaseAltitude) / max(uCloudThickness, 0.0001);
+            if (probeH <= 0.0 || probeH >= 1.0)
+                break;
+            sunThickness += sampleDensity(probePos, probeH, 0.0, 0.0);
+        }
+        sunThickness *= sunProbeStep;
 
-        accumDepth += density * stride;
+        float sunShadeAmount = 1.0 - exp(-sunThickness * extinct);
+        float sepShade = floor(clamp(sunShadeAmount, 0.0, 1.0) * 3.0 + 0.001) / 3.0;
+        float nightMul = mix(1.0, 0.03, 1.0 - smoothstep(-0.15, 0.05, cos(cloudSunAngle)));
+        cloudCol = mix(uCloudLightColor * dayBlend + uCloudTwilightColor * twilightWeight + uCloudShadeColor * nightBlend, uCloudShadeColor, sepShade) * nightMul;
 
-        vec3 upDir = normalize(samplePos);
-        float ndl = dot(upDir, sunDir);
-        float lit = smoothstep(0.0, celSoft, ndl);
-
-                float probe1 = sampleDensity(samplePos + sunDir * uCloudShadowProbeDist, h, sampleT, 0.0);
-                float occlusion = clamp(probe1 * 2.0 * uCloudShadowStrength, 0.0, 1.0);
-
-                float litShadow = clamp(lit - occlusion * 0.8, 0.0, 1.0);
-                float ambientKeep = mix(1.0, 1.0 - occlusion * 0.75, clamp(uCloudShadowAffectsAmbient, 0.0, 1.0));
-
-        float depthNorm = clamp(accumDepth * 0.015, 0.0, 1.0);
-        float shadeLevel = floor(depthNorm * 3.0 + 0.001) / 3.0;
-        vec3 cloudCol = mix(uCloudLightColor, uCloudShadeColor, shadeLevel);
-
-        cloudCol *= mix(0.55, 1.0, litShadow);
-        cloudCol *= mix(0.75, 1.0, ambientKeep);
-
-        float sunShade = smoothstep(0.15, 0.75, ndl);
-        cloudCol *= mix(0.03, 1.0, sunShade);
-
-        float twilightBlend = 1.0 - smoothstep(0.0, 0.35, abs(ndl - 0.25));
-        cloudCol = mix(cloudCol, uCloudTwilightColor, twilightBlend * uCloudTwilightStrength * 0.8);
-
-        accumLight += transmittance * cloudCol * densityLight;
-        transmittance *= stepTransmittance;
+        transmittance *= exp(-density * stride * extinct);
 
         if (transmittance < 0.02)
             break;
@@ -352,8 +348,6 @@ void main()
         return;
     }
 
-    vec3 cloudCol = accumLight / max(1.0 - transmittance, 0.0001);
-    cloudCol = clamp(cloudCol, 0.0, 1.0);
     FragColor = vec4(cloudCol * alpha, alpha);
 
     float depthT = firstCloudT >= 0.0 ? firstCloudT : tEntry;

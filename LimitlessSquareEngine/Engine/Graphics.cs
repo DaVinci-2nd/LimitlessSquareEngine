@@ -988,6 +988,10 @@ namespace LimitlessSquareEngine
             public int CloudShadowNearAxisY = -1;
             public int CloudShadowNearHalfExtent = -1;
             public int CloudShadowNearAnchorRel = -1;
+            public int CloudShadowNearMap1 = -1;
+            public int CloudShadowNearParamsB1 = -1;
+            public int CloudShadowNearMap2 = -1;
+            public int CloudShadowNearParamsB2 = -1;
 
             public int Texture = -1;
         }
@@ -7488,6 +7492,10 @@ namespace LimitlessSquareEngine
             cache.CloudShadowNearAxisY = GetLoc(_uniformCloudShadowNearAxisY);
             cache.CloudShadowNearHalfExtent = GetLoc("uCloudShadowNearHalfExtent");
             cache.CloudShadowNearAnchorRel = GetLoc("uCloudShadowNearAnchorRel");
+            cache.CloudShadowNearMap1 = GetLoc(_uniformCloudShadowNearMap1);
+            cache.CloudShadowNearParamsB1 = GetLoc(_uniformCloudShadowNearParamsB1);
+            cache.CloudShadowNearMap2 = GetLoc(_uniformCloudShadowNearMap2);
+            cache.CloudShadowNearParamsB2 = GetLoc(_uniformCloudShadowNearParamsB2);
 
             cache.Texture = GetLoc("uTexture");
 
@@ -7920,7 +7928,11 @@ namespace LimitlessSquareEngine
                      string.Equals(uniformName, _uniformCloudShadowPlanetCenterRel, StringComparison.Ordinal) ||
                      string.Equals(uniformName, _uniformCloudShadowParamsA, StringComparison.Ordinal) ||
                      string.Equals(uniformName, _uniformCloudShadowNearMap, StringComparison.Ordinal) ||
+                     string.Equals(uniformName, _uniformCloudShadowNearMap1, StringComparison.Ordinal) ||
+                     string.Equals(uniformName, _uniformCloudShadowNearMap2, StringComparison.Ordinal) ||
                      string.Equals(uniformName, _uniformCloudShadowNearParamsB, StringComparison.Ordinal) ||
+                     string.Equals(uniformName, _uniformCloudShadowNearParamsB1, StringComparison.Ordinal) ||
+                     string.Equals(uniformName, _uniformCloudShadowNearParamsB2, StringComparison.Ordinal) ||
                      string.Equals(uniformName, _uniformCloudShadowNearCenterRel, StringComparison.Ordinal) ||
                      string.Equals(uniformName, _uniformCloudShadowNearAxisX, StringComparison.Ordinal) ||
                      string.Equals(uniformName, _uniformCloudShadowNearAxisY, StringComparison.Ordinal) ||

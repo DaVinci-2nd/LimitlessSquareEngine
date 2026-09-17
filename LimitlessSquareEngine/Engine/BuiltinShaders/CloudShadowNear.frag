@@ -95,6 +95,8 @@ void main()
         + uCloudShadowNearAxisX * (c.x * 2.0 * uCloudShadowNearHalfExtent)
         + uCloudShadowNearAxisY * (c.y * 2.0 * uCloudShadowNearHalfExtent);
 
+    worldPoint = normalize(worldPoint) * uPlanetRadius;
+
     float baseRadius = uPlanetRadius + uCloudBaseAltitude;
     float topRadius = baseRadius + uCloudThickness;
 

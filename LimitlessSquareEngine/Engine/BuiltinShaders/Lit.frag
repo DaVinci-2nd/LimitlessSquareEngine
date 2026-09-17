@@ -80,9 +80,13 @@ uniform float uReflectionIntensity;
 
 uniform sampler2D uCloudShadowMap;
 uniform sampler2D uCloudShadowNearMap;
+uniform sampler2D uCloudShadowNearMap1;
+uniform sampler2D uCloudShadowNearMap2;
 uniform vec3 uCloudShadowPlanetCenterRel;
 uniform vec4 uCloudShadowParamsA;
 uniform vec4 uCloudShadowNearParamsB;
+uniform vec4 uCloudShadowNearParamsB1;
+uniform vec4 uCloudShadowNearParamsB2;
 uniform vec3 uCloudShadowNearCenterRel;
 uniform vec3 uCloudShadowNearAxisX;
 uniform vec3 uCloudShadowNearAxisY;
@@ -666,6 +670,30 @@ float SampleCloudShadow()
     vec2 gUv = vec2((col + fu) * 0.25, (row + fv) * (1.0 / 3.0));
     float alpha = texture(uCloudShadowMap, gUv).r;
 
+    if (uCloudShadowNearParamsB2.x > 0.5)
+    {
+        float invNearW2 = 1.0 / max(uCloudShadowNearParamsB2.w * 2.0, 0.0001);
+        vec2 nearUv2 = (vec2(dot(p, uCloudShadowNearAxisX), dot(p, uCloudShadowNearAxisY)) - vec2(dot(uCloudShadowNearCenterRel, uCloudShadowNearAxisX), dot(uCloudShadowNearCenterRel, uCloudShadowNearAxisY))) * invNearW2 + 0.5;
+
+        vec2 nearClamped2 = clamp(nearUv2, 0.0, 1.0);
+        float nearAlpha2 = texture(uCloudShadowNearMap2, nearClamped2).r;
+        float nearDisc2 = length(vWorldPos - uCameraPosition) / max(uCloudShadowNearParamsB2.w, 0.0001);
+        float nearBlend2 = smoothstep(uCloudShadowNearParamsB2.y, uCloudShadowNearParamsB2.z, nearDisc2);
+        alpha = mix(nearAlpha2, alpha, nearBlend2);
+    }
+
+    if (uCloudShadowNearParamsB1.x > 0.5)
+    {
+        float invNearW1 = 1.0 / max(uCloudShadowNearParamsB1.w * 2.0, 0.0001);
+        vec2 nearUv1 = (vec2(dot(p, uCloudShadowNearAxisX), dot(p, uCloudShadowNearAxisY)) - vec2(dot(uCloudShadowNearCenterRel, uCloudShadowNearAxisX), dot(uCloudShadowNearCenterRel, uCloudShadowNearAxisY))) * invNearW1 + 0.5;
+
+        vec2 nearClamped1 = clamp(nearUv1, 0.0, 1.0);
+        float nearAlpha1 = texture(uCloudShadowNearMap1, nearClamped1).r;
+        float nearDisc1 = length(vWorldPos - uCameraPosition) / max(uCloudShadowNearParamsB1.w, 0.0001);
+        float nearBlend1 = smoothstep(uCloudShadowNearParamsB1.y, uCloudShadowNearParamsB1.z, nearDisc1);
+        alpha = mix(nearAlpha1, alpha, nearBlend1);
+    }
+
     if (uCloudShadowNearParamsB.x > 0.5)
     {
         float invNearW = 1.0 / max(uCloudShadowNearParamsB.w * 2.0, 0.0001);
@@ -673,7 +701,7 @@ float SampleCloudShadow()
 
         vec2 nearClamped = clamp(nearUv, 0.0, 1.0);
         float nearAlpha = texture(uCloudShadowNearMap, nearClamped).r;
-        float nearDisc = length(nearClamped - 0.5) * 2.0;
+        float nearDisc = length(vWorldPos - uCameraPosition) / max(uCloudShadowNearParamsB.w, 0.0001);
         float nearBlend = smoothstep(uCloudShadowNearParamsB.y, uCloudShadowNearParamsB.z, nearDisc);
         alpha = mix(nearAlpha, alpha, nearBlend);
     }
