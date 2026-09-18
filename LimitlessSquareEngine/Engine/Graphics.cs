@@ -136,6 +136,8 @@ namespace LimitlessSquareEngine
         private const string _uniformCameraPosition = "uCameraPosition";
         private const string _uniformAmbientColor = "uAmbientColor";
         private const string _uniformAmbientIntensity = "uAmbientIntensity";
+        private const string _uniformSphereAmbientCount = "uSphereAmbientCount";
+        private const string _uniformSphereAmbientData = "uSphereAmbientData";
         private const string _uniformViewportOrigin = "uViewportOrigin";
         private const string _uniformViewportSize = "uViewportSize";
         private const string _uniformClusterGridSize = "uClusterGridSize";
@@ -970,6 +972,8 @@ namespace LimitlessSquareEngine
             public int CameraPosition = -1;
             public int AmbientColor = -1;
             public int AmbientIntensity = -1;
+            public int SphereAmbientCount = -1;
+            public int SphereAmbientData = -1;
             public int ViewportOrigin = -1;
             public int ViewportSize = -1;
             public int ClusterGridSize = -1;
@@ -1141,6 +1145,21 @@ namespace LimitlessSquareEngine
             public bool Visible { get; init; }
         }
 
+        private sealed class SphereAmbientLightData
+        {
+            public Double3 Center { get; init; } = Double3.Zero;
+            public string CenterObjectId { get; init; } = "";
+            public double InnerRadius { get; init; }
+            public double OuterRadius { get; init; }
+            public Double3 Axis { get; init; } = new(0.0, 1.0, 0.0);
+            public string AxisLightId { get; init; } = "";
+            public Vector3 ColorNight { get; init; } = Vector3.Zero;
+            public Vector3 ColorDarkTwilight { get; init; } = Vector3.Zero;
+            public Vector3 ColorTwilight { get; init; } = new(1f, 0.35f, 0.12f);
+            public Vector3 ColorDay { get; init; } = new(0.5f, 0.6f, 0.8f);
+            public float Intensity { get; init; } = 1f;
+        }
+
         private readonly Dictionary<string, Dictionary<string, SceneRenderObjectSnapshot>> _sceneObjectCache
             = new(StringComparer.Ordinal);
 
@@ -1149,6 +1168,13 @@ namespace LimitlessSquareEngine
 
         private readonly Dictionary<string, Dictionary<string, SceneRenderLightSnapshot>> _sceneLightCache
             = new(StringComparer.Ordinal);
+
+        private const int _maxSphereAmbientLights = 4;
+
+        private readonly Dictionary<string, List<SphereAmbientLightData>> _sceneSphereAmbientLights
+            = new(StringComparer.Ordinal);
+
+        private readonly float[] _sphereAmbientUploadScratch = new float[_maxSphereAmbientLights * 6 * 4];
 
         private readonly struct StaticSceneSurfaceCommandTemplate
         {
@@ -1371,6 +1397,7 @@ namespace LimitlessSquareEngine
             _sceneObjectCache.Remove(sceneId);
             _sceneCameraCache.Remove(sceneId);
             _sceneLightCache.Remove(sceneId);
+            _sceneSphereAmbientLights.Remove(sceneId);
 
             foreach (Avatar avatar in AvatarRegistry.GetAll())
             {
@@ -4328,6 +4355,8 @@ namespace LimitlessSquareEngine
             if (loc.AmbientIntensity != -1)
                 _gl.Uniform1(loc.AmbientIntensity, _ambientLightIntensity);
 
+            UploadSphereAmbientLights(cmd, loc);
+
             if (loc.ViewportOrigin != -1)
                 _gl.Uniform2(loc.ViewportOrigin, (float)cmd.ViewportX, (float)cmd.ViewportY);
 
@@ -4429,6 +4458,85 @@ namespace LimitlessSquareEngine
             ApplyCloudShadowSupportUniforms(cmd);
 
             _gl.ActiveTexture(TextureUnit.Texture0);
+        }
+
+        private void UploadSphereAmbientLights(in RenderCommand cmd, ProgramUniformLocationCache loc)
+        {
+            if (loc.SphereAmbientCount == -1 && loc.SphereAmbientData == -1)
+                return;
+
+            int count = 0;
+
+            if (_sceneSphereAmbientLights.TryGetValue(cmd.SceneId, out var lights))
+            {
+                for (int i = 0; i < lights.Count && count < _maxSphereAmbientLights; i++)
+                {
+                    SphereAmbientLightData light = lights[i];
+
+                    Double3 center = light.Center;
+                    if (!string.IsNullOrWhiteSpace(light.CenterObjectId) &&
+                        _sceneObjectCache.TryGetValue(cmd.SceneId, out var objects) &&
+                        objects.TryGetValue(light.CenterObjectId, out SceneRenderObjectSnapshot centerObject))
+                    {
+                        center = centerObject.WorldPosition;
+                    }
+
+                    Vector3 axis = new Vector3(
+                        (float)light.Axis.X,
+                        (float)light.Axis.Y,
+                        (float)(-light.Axis.Z));
+
+                    axis = axis.LengthSquared() > 0.0000001f
+                        ? Vector3.Normalize(axis)
+                        : Vector3.UnitY;
+
+                    if (!string.IsNullOrWhiteSpace(light.AxisLightId) &&
+                        _sceneLightCache.TryGetValue(cmd.SceneId, out var lightMap) &&
+                        lightMap.TryGetValue(light.AxisLightId, out SceneRenderLightSnapshot axisLight) &&
+                        axisLight.Active &&
+                        axisLight.Visible &&
+                        axisLight.Settings.LightMode == 3)
+                    {
+                        axis = -ExtractDirectionalLightDirection(axisLight);
+                    }
+
+                    Double3 relative = center - cmd.CameraWorldPosition;
+
+                    int b = count * 24;
+                    _sphereAmbientUploadScratch[b + 0] = (float)relative.X;
+                    _sphereAmbientUploadScratch[b + 1] = (float)relative.Y;
+                    _sphereAmbientUploadScratch[b + 2] = (float)(-relative.Z);
+                    _sphereAmbientUploadScratch[b + 3] = (float)light.InnerRadius;
+                    _sphereAmbientUploadScratch[b + 4] = axis.X;
+                    _sphereAmbientUploadScratch[b + 5] = axis.Y;
+                    _sphereAmbientUploadScratch[b + 6] = axis.Z;
+                    _sphereAmbientUploadScratch[b + 7] = (float)light.OuterRadius;
+                    _sphereAmbientUploadScratch[b + 8] = light.ColorDay.X;
+                    _sphereAmbientUploadScratch[b + 9] = light.ColorDay.Y;
+                    _sphereAmbientUploadScratch[b + 10] = light.ColorDay.Z;
+                    _sphereAmbientUploadScratch[b + 11] = light.Intensity;
+                    _sphereAmbientUploadScratch[b + 12] = light.ColorTwilight.X;
+                    _sphereAmbientUploadScratch[b + 13] = light.ColorTwilight.Y;
+                    _sphereAmbientUploadScratch[b + 14] = light.ColorTwilight.Z;
+                    _sphereAmbientUploadScratch[b + 15] = 0f;
+                    _sphereAmbientUploadScratch[b + 16] = light.ColorDarkTwilight.X;
+                    _sphereAmbientUploadScratch[b + 17] = light.ColorDarkTwilight.Y;
+                    _sphereAmbientUploadScratch[b + 18] = light.ColorDarkTwilight.Z;
+                    _sphereAmbientUploadScratch[b + 19] = 0f;
+                    _sphereAmbientUploadScratch[b + 20] = light.ColorNight.X;
+                    _sphereAmbientUploadScratch[b + 21] = light.ColorNight.Y;
+                    _sphereAmbientUploadScratch[b + 22] = light.ColorNight.Z;
+                    _sphereAmbientUploadScratch[b + 23] = 0f;
+
+                    count++;
+                }
+            }
+
+            if (loc.SphereAmbientCount != -1)
+                _gl.Uniform1(loc.SphereAmbientCount, count);
+
+            if (loc.SphereAmbientData != -1 && count > 0)
+                _gl.Uniform4(loc.SphereAmbientData, (uint)(count * 6), _sphereAmbientUploadScratch);
         }
 
         private void ApplyFogUniforms(in RenderCommand cmd)
@@ -7262,6 +7370,111 @@ namespace LimitlessSquareEngine
             return fallback;
         }
 
+        private List<SphereAmbientLightData> ParseSphereAmbientLights(string json)
+        {
+            var result = new List<SphereAmbientLightData>();
+
+            if (string.IsNullOrWhiteSpace(json))
+                return result;
+
+            using JsonDocument doc = JsonDocument.Parse(json);
+            if (doc.RootElement.ValueKind != JsonValueKind.Array)
+                return result;
+
+            foreach (JsonElement item in doc.RootElement.EnumerateArray())
+            {
+                if (item.ValueKind != JsonValueKind.Object)
+                    continue;
+
+                if (item.TryGetProperty("enabled", out JsonElement enabledElement) &&
+                    enabledElement.ValueKind == JsonValueKind.False)
+                    continue;
+
+                Double3 center = ReadSphereAmbientDouble3(item, "center", Double3.Zero);
+                Double3 axis = ReadSphereAmbientDouble3(item, "axis", new Double3(0.0, 1.0, 0.0));
+
+                double innerRadius = Math.Max(0.0, ReadSphereAmbientDouble(item, "innerRadius", 0.0));
+                double outerRadius = ReadSphereAmbientDouble(item, "outerRadius", innerRadius + 1.0);
+                if (outerRadius <= innerRadius)
+                    outerRadius = innerRadius + 1.0;
+
+                result.Add(new SphereAmbientLightData
+                {
+                    Center = center,
+                    CenterObjectId = ReadSphereAmbientString(item, "centerObjectId", ""),
+                    InnerRadius = innerRadius,
+                    OuterRadius = outerRadius,
+                    Axis = axis,
+                    AxisLightId = ReadSphereAmbientString(item, "axisLightId", ""),
+                    ColorNight = ReadSphereAmbientColor(item, "colorNight", Vector3.Zero),
+                    ColorDarkTwilight = ReadSphereAmbientColor(item, "colorDarkTwilight", Vector3.Zero),
+                    ColorTwilight = ReadSphereAmbientColor(item, "colorTwilight", new Vector3(1f, 0.35f, 0.12f)),
+                    ColorDay = ReadSphereAmbientColor(item, "colorDay", new Vector3(0.5f, 0.6f, 0.8f)),
+                    Intensity = MathF.Max(0f, ReadSphereAmbientFloat(item, "intensity", 1f))
+                });
+            }
+
+            if (result.Count > _maxSphereAmbientLights)
+            {
+                Console.WriteLine($"[!] Sphere ambient light count {result.Count} exceeds limit {_maxSphereAmbientLights}; extra entries ignored.");
+                result.RemoveRange(_maxSphereAmbientLights, result.Count - _maxSphereAmbientLights);
+            }
+
+            return result;
+        }
+
+        private static string ReadSphereAmbientString(JsonElement element, string name, string fallback)
+        {
+            if (element.TryGetProperty(name, out JsonElement value) && value.ValueKind == JsonValueKind.String)
+                return value.GetString() ?? fallback;
+
+            return fallback;
+        }
+
+        private static double ReadSphereAmbientDouble(JsonElement element, string name, double fallback)
+        {
+            if (element.TryGetProperty(name, out JsonElement value) &&
+                value.ValueKind == JsonValueKind.Number &&
+                value.TryGetDouble(out double number))
+                return number;
+
+            return fallback;
+        }
+
+        private static float ReadSphereAmbientFloat(JsonElement element, string name, float fallback)
+        {
+            return (float)ReadSphereAmbientDouble(element, name, fallback);
+        }
+
+        private Double3 ReadSphereAmbientDouble3(JsonElement element, string name, Double3 fallback)
+        {
+            if (!element.TryGetProperty(name, out JsonElement value))
+                return fallback;
+
+            if (value.ValueKind == JsonValueKind.Object)
+            {
+                return new Double3(
+                    ReadSphereAmbientDouble(value, "x", fallback.X),
+                    ReadSphereAmbientDouble(value, "y", fallback.Y),
+                    ReadSphereAmbientDouble(value, "z", fallback.Z));
+            }
+
+            if (TryReadNumericArray(value, out double[] numbers) && numbers.Length >= 3)
+                return new Double3(numbers[0], numbers[1], numbers[2]);
+
+            return fallback;
+        }
+
+        private Vector3 ReadSphereAmbientColor(JsonElement element, string name, Vector3 fallback)
+        {
+            Double3 value = ReadSphereAmbientDouble3(element, name, new Double3(fallback.X, fallback.Y, fallback.Z));
+
+            return new Vector3(
+                MathF.Max(0f, (float)value.X),
+                MathF.Max(0f, (float)value.Y),
+                MathF.Max(0f, (float)value.Z));
+        }
+
         private Vector3 ResolveCelestialBodyDirection(string sceneId, CelestialBodyData body)
         {
             if (!string.IsNullOrWhiteSpace(body.LightObjectId) &&
@@ -7872,6 +8085,8 @@ namespace LimitlessSquareEngine
             cache.CameraPosition = GetLoc(_uniformCameraPosition);
             cache.AmbientColor = GetLoc(_uniformAmbientColor);
             cache.AmbientIntensity = GetLoc(_uniformAmbientIntensity);
+            cache.SphereAmbientCount = GetLoc(_uniformSphereAmbientCount);
+            cache.SphereAmbientData = GetLoc(_uniformSphereAmbientData);
             cache.ViewportOrigin = GetLoc(_uniformViewportOrigin);
             cache.ViewportSize = GetLoc(_uniformViewportSize);
             cache.ClusterGridSize = GetLoc(_uniformClusterGridSize);
@@ -8327,6 +8542,8 @@ namespace LimitlessSquareEngine
                     string.Equals(uniformName, _uniformCameraPosition, StringComparison.Ordinal) ||
                     string.Equals(uniformName, _uniformAmbientColor, StringComparison.Ordinal) ||
                     string.Equals(uniformName, _uniformAmbientIntensity, StringComparison.Ordinal) ||
+                    string.Equals(uniformName, _uniformSphereAmbientCount, StringComparison.Ordinal) ||
+                    string.Equals(uniformName, _uniformSphereAmbientData, StringComparison.Ordinal) ||
                     string.Equals(uniformName, _uniformViewportOrigin, StringComparison.Ordinal) ||
                     string.Equals(uniformName, _uniformViewportSize, StringComparison.Ordinal) ||
                     string.Equals(uniformName, _uniformClusterGridSize, StringComparison.Ordinal) ||
@@ -12174,6 +12391,22 @@ void main()
         public void SetAmbientLightRGB(int r, int g, int b, float intensity = 1.0f)
         {
             SetAmbientLight(r / 255f, g / 255f, b / 255f, intensity);
+        }
+
+        public void SetSceneSphereAmbientLights(string sceneId, string json)
+        {
+            if (string.IsNullOrWhiteSpace(sceneId))
+                return;
+
+            _sceneSphereAmbientLights[sceneId] = ParseSphereAmbientLights(json);
+        }
+
+        public void ClearSceneSphereAmbientLights(string sceneId)
+        {
+            if (string.IsNullOrWhiteSpace(sceneId))
+                return;
+
+            _sceneSphereAmbientLights.Remove(sceneId);
         }
 
         /// <summary>

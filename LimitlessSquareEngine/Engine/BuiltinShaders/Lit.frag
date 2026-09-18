@@ -61,6 +61,9 @@ uniform vec3 uCameraPosition;
 uniform vec3 uAmbientColor;
 uniform float uAmbientIntensity;
 
+uniform int uSphereAmbientCount;
+uniform vec4 uSphereAmbientData[24];
+
 uniform vec2 uViewportOrigin;
 uniform vec2 uViewportSize;
 
@@ -709,6 +712,61 @@ float SampleCloudShadow()
     return 1.0 - alpha;
 }
 
+void EvaluateTwilightBlends(float sunAngle, out float dayBlend, out float twilightBlend, out float darkTwilightBlend, out float nightBlend)
+{
+    float t0 = smoothstep(1.0472, 1.3090, sunAngle);
+    float t1 = smoothstep(1.5708, 1.7104, sunAngle);
+    float t2 = smoothstep(1.8151, 1.9897, sunAngle);
+
+    dayBlend = 1.0 - t0;
+    twilightBlend = t0 * (1.0 - t1);
+    darkTwilightBlend = t1 * (1.0 - t2);
+    nightBlend = t2;
+}
+
+vec3 EvaluateSphereAmbient(vec3 worldPos)
+{
+    vec3 accum = vec3(0.0);
+
+    for (int i = 0; i < uSphereAmbientCount; i++)
+    {
+        int base = i * 6;
+
+        vec4 centerInner = uSphereAmbientData[base + 0];
+        vec4 axisOuter = uSphereAmbientData[base + 1];
+        vec4 dayIntensity = uSphereAmbientData[base + 2];
+        vec4 twilight = uSphereAmbientData[base + 3];
+        vec4 darkTwilight = uSphereAmbientData[base + 4];
+        vec4 night = uSphereAmbientData[base + 5];
+
+        vec3 offset = worldPos - centerInner.xyz;
+        float dist = length(offset);
+        float radial = 1.0 - smoothstep(centerInner.w, axisOuter.w, dist);
+
+        if (radial <= 0.000001)
+            continue;
+
+        vec3 dir = offset / max(dist, 0.000001);
+        float sunAngle = acos(clamp(dot(dir, axisOuter.xyz), -1.0, 1.0));
+
+        float dayBlend;
+        float twilightBlend;
+        float darkTwilightBlend;
+        float nightBlend;
+        EvaluateTwilightBlends(sunAngle, dayBlend, twilightBlend, darkTwilightBlend, nightBlend);
+
+        vec3 gradient =
+            dayIntensity.rgb * dayBlend +
+            twilight.rgb * twilightBlend +
+            darkTwilight.rgb * darkTwilightBlend +
+            night.rgb * nightBlend;
+
+        accum += gradient * (dayIntensity.w * radial);
+    }
+
+    return accum;
+}
+
 void BuildPointLight(LightRecord light, out vec3 lightDir, out float attenuation)
 {
     vec3 toLight = light.Position - vWorldPos;
@@ -890,6 +948,8 @@ void main()
         uAmbientColor *
         uAmbientIntensity *
         max(uAmbientStrength, 0.0);
+
+    ambientTerm += baseColor.rgb * EvaluateSphereAmbient(vWorldPos);
 
     vec3 diffuseAccum = vec3(0.0);
     vec3 specularAccum = vec3(0.0);

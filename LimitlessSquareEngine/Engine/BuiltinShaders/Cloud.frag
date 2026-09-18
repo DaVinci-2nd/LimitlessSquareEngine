@@ -17,6 +17,7 @@ uniform float uCloudAlphaMax;
 uniform vec3 uCloudLightColor;
 uniform vec3 uCloudShadeColor;
 uniform vec3 uCloudTwilightColor;
+uniform vec3 uCloudDarkTwilightColor;
 uniform float uCloudTwilightStrength;
 
 uniform vec2 uCloudWind;
@@ -165,6 +166,18 @@ vec3 findSunDir()
     return vec3(sunDir.x, sunDir.y, -sunDir.z);
 }
 
+void EvaluateTwilightBlends(float sunAngle, out float dayBlend, out float twilightBlend, out float darkTwilightBlend, out float nightBlend)
+{
+    float t0 = smoothstep(1.0472, 1.3090, sunAngle);
+    float t1 = smoothstep(1.5708, 1.7104, sunAngle);
+    float t2 = smoothstep(1.8151, 1.9897, sunAngle);
+
+    dayBlend = 1.0 - t0;
+    twilightBlend = t0 * (1.0 - t1);
+    darkTwilightBlend = t1 * (1.0 - t2);
+    nightBlend = t2;
+}
+
 float stepForT(float t, float minStep)
 {
     float footprint = t * 2.0 * max(uCloudTanHalfFov, 0.0001) / max(uCloudViewportHeight, 1.0);
@@ -236,11 +249,14 @@ void main()
     vec3 cloudProbePos = camLocal + viewDirWorld * (fullEntry + (fullExit - fullEntry) * 0.5);
     float cloudSunAngle = acos(clamp(dot(normalize(cloudProbePos), sunDir), -1.0, 1.0));
     vec3 upCam = normalize(camLocal);
-    float dayBlend = 1.0 - smoothstep(1.0472, 1.3963, cloudSunAngle);
-    float nightBlend = smoothstep(1.7453, 2.0944, cloudSunAngle);
-    float twilightWeight = 1.0 - dayBlend - nightBlend;
+    float dayBlend;
+    float twilightWeight;
+    float darkTwilightWeight;
+    float nightBlend;
+    EvaluateTwilightBlends(cloudSunAngle, dayBlend, twilightWeight, darkTwilightWeight, nightBlend);
     vec3 cloudCol = uCloudLightColor * dayBlend
                   + uCloudTwilightColor * twilightWeight
+                  + uCloudDarkTwilightColor * darkTwilightWeight
                   + uCloudShadeColor * nightBlend;
 
     float extinct = max(uCloudExtinction, 0.0000001);
@@ -329,7 +345,7 @@ void main()
         float sunShadeAmount = 1.0 - exp(-sunThickness * extinct);
         float sepShade = floor(clamp(sunShadeAmount, 0.0, 1.0) * 3.0 + 0.001) / 3.0;
         float nightMul = mix(1.0, 0.03, 1.0 - smoothstep(-0.15, 0.05, cos(cloudSunAngle)));
-        cloudCol = mix(uCloudLightColor * dayBlend + uCloudTwilightColor * twilightWeight + uCloudShadeColor * nightBlend, uCloudShadeColor, sepShade) * nightMul;
+        cloudCol = mix(uCloudLightColor * dayBlend + uCloudTwilightColor * twilightWeight + uCloudDarkTwilightColor * darkTwilightWeight + uCloudShadeColor * nightBlend, uCloudShadeColor, sepShade) * nightMul;
 
         transmittance *= exp(-density * stride * extinct);
 

@@ -315,6 +315,22 @@ namespace LimitlessSquareEngine.Engine
         public float Intensity { get; set; } = 1.0f;
     }
 
+    public class ScenePropertiesSphereAmbientLight
+    {
+        public bool Enabled { get; set; } = true;
+        public Double3 Center { get; set; } = Double3.Zero;
+        public string? CenterObjectId { get; set; }
+        public double InnerRadius { get; set; } = 0.0;
+        public double OuterRadius { get; set; } = 1.0;
+        public Double3 Axis { get; set; } = new(0.0, 1.0, 0.0);
+        public string? AxisLightId { get; set; }
+        public Double3 ColorNight { get; set; } = Double3.Zero;
+        public Double3 ColorDarkTwilight { get; set; } = Double3.Zero;
+        public Double3 ColorTwilight { get; set; } = new(1.0, 0.35, 0.12);
+        public Double3 ColorDay { get; set; } = new(0.5, 0.6, 0.8);
+        public float Intensity { get; set; } = 1.0f;
+    }
+
     public class ScenePropertiesSkybox
     {
         public bool Enabled { get; set; } = true;
@@ -357,6 +373,7 @@ namespace LimitlessSquareEngine.Engine
         public ScenePropertiesCelestialBodies? CelestialBodies { get; set; }
         public ScenePropertiesFog? Fog { get; set; }
         public ScenePropertiesAmbientLight? AmbientLight { get; set; }
+        public List<ScenePropertiesSphereAmbientLight>? SphereAmbientLights { get; set; }
     }
 
     public class SceneObject
@@ -2708,7 +2725,19 @@ namespace LimitlessSquareEngine.Engine
                 }
             }
 
-            if (result.Skybox == null && result.CelestialBodies == null && result.Fog == null && result.AmbientLight == null)
+            if (props.TryGetProperty("sphereAmbientLights", out JsonElement sphereAmbientLights) && sphereAmbientLights.ValueKind == JsonValueKind.Array)
+            {
+                try
+                {
+                    result.SphereAmbientLights = JsonSerializer.Deserialize<List<ScenePropertiesSphereAmbientLight>>(sphereAmbientLights.GetRawText(), _jsonOptions);
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[!] Failed to parse sphereAmbientLights properties: {ex.Message}");
+                }
+            }
+
+            if (result.Skybox == null && result.CelestialBodies == null && result.Fog == null && result.AmbientLight == null && result.SphereAmbientLights == null)
                 return null;
 
             return result;
@@ -2812,6 +2841,24 @@ namespace LimitlessSquareEngine.Engine
                 {
                     Console.WriteLine($"[!] Failed to apply ambientLight properties for scene '{sceneId}': {ex.Message}");
                 }
+            }
+
+            try
+            {
+                if (properties.SphereAmbientLights != null)
+                {
+                    _boundGraphics?.SetSceneSphereAmbientLights(
+                        sceneId,
+                        JsonSerializer.Serialize(properties.SphereAmbientLights, _jsonOptions));
+                }
+                else
+                {
+                    _boundGraphics?.ClearSceneSphereAmbientLights(sceneId);
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[!] Failed to apply sphereAmbientLights properties for scene '{sceneId}': {ex.Message}");
             }
         }
 

@@ -13,6 +13,7 @@ uniform float uAtmosphereRadius;
 uniform vec4 uHorizonColor;
 uniform vec4 uSkyColor;
 uniform vec4 uTwilightColor;
+uniform vec4 uDarkTwilightColor;
 uniform float uDensity;
 
 const float PI = 3.14159265358979323846;
@@ -40,6 +41,18 @@ layout(std430, binding = 1) readonly buffer LightBuffer
 float safeSqrt(float x)
 {
     return sqrt(max(x, 0.0));
+}
+
+void EvaluateTwilightBlends(float sunAngle, out float dayBlend, out float twilightBlend, out float darkTwilightBlend, out float nightBlend)
+{
+    float t0 = smoothstep(1.0472, 1.3090, sunAngle);
+    float t1 = smoothstep(1.5708, 1.7104, sunAngle);
+    float t2 = smoothstep(1.8151, 1.9897, sunAngle);
+
+    dayBlend = 1.0 - t0;
+    twilightBlend = t0 * (1.0 - t1);
+    darkTwilightBlend = t1 * (1.0 - t2);
+    nightBlend = t2;
 }
 
 void main()
@@ -154,49 +167,33 @@ void main()
 
     vec3 upDir = normalize(fragPos - planetCenter);
 
-    float totalBrightness = 0.0;
+    vec3 sunDir = vec3(0.0, 1.0, 0.0);
     for (int i = 0; i < uLights.length(); i++)
     {
         GPULight src = uLights[i];
-        int kind = int(src.Meta0.x + 0.5);
-        float intensity = src.Meta0.y;
-        vec3 lightColor = src.ColorRange.xyz;
-
-        vec3 lightDir;
-        float attenuation = 1.0;
-
-        if (kind == 3)
+        if (int(src.Meta0.x + 0.5) == 3)
         {
-            lightDir = -normalize(src.DirectionOuter.xyz);
+            sunDir = -normalize(src.DirectionOuter.xyz);
+            break;
         }
-        else
-        {
-            vec3 toLight = src.PositionInner.xyz - fragPos;
-            float dist = length(toLight);
-            lightDir = toLight / max(dist, 0.0001);
-            float rangeVal = src.ColorRange.w;
-            if (rangeVal > 0.0)
-                attenuation = clamp(1.0 - dist / rangeVal, 0.0, 1.0);
-        }
-
-        float ndotL = dot(upDir, lightDir);
-        float colorLum = dot(lightColor, vec3(0.299, 0.587, 0.114));
-        totalBrightness += max(ndotL, 0.0) * intensity * attenuation * colorLum;
     }
 
-    float clampedBrightness = clamp(totalBrightness, 0.0, 0.8);
-    float dayFactor = smoothstep(0.01, 0.5, clampedBrightness);
+    float sunAngle = acos(clamp(dot(upDir, sunDir), -1.0, 1.0));
 
-    float mid = 0.42;
-    float spread = 0.3;
-    float dist = abs(clampedBrightness - mid);
-    float twilightBlend = 1.0 - smoothstep(0.0, spread, dist);
+    float dayBlend;
+    float twilightBlend;
+    float darkTwilightBlend;
+    float nightBlend;
+    EvaluateTwilightBlends(sunAngle, dayBlend, twilightBlend, darkTwilightBlend, nightBlend);
 
-    vec3 finalColor = mix(baseColor, uTwilightColor.rgb, twilightBlend * uTwilightColor.a);
+    vec3 finalColor =
+        baseColor * dayBlend +
+        uTwilightColor.rgb * (twilightBlend * uTwilightColor.a) +
+        uDarkTwilightColor.rgb * darkTwilightBlend;
 
     float alpha = 1.0 - exp(-opticalDepth * 0.00003);
     alpha = clamp(alpha, 0.0, 1.0);
-    alpha *= dayFactor;
+    alpha *= dayBlend + twilightBlend + darkTwilightBlend;
 
     FragColor = vec4(finalColor, alpha);
 }
