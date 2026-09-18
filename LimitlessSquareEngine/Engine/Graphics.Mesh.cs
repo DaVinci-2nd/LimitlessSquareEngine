@@ -1049,6 +1049,7 @@ namespace LimitlessSquareEngine
                 return;
 
             RegisterMesh("builtin/cube_1x1x1", CreateUnitCubeVertices(), PrimitiveType.Triangles, 16);
+            RegisterMesh("builtin/quad_1x1", CreateUnitQuadVertices(), PrimitiveType.Triangles, 16);
             RegisterMesh("builtin/sphere_1x1x1", CreateUnitSphereVertices(), PrimitiveType.Triangles, 16);
         }
 
@@ -1148,6 +1149,52 @@ namespace LimitlessSquareEngine
                         tx0, 0f, tz0, 1f);
                 }
             }
+
+            return data.ToArray();
+        }
+
+        private float[] CreateUnitQuadVertices()
+        {
+            var data = new List<float>(6 * 16);
+
+            void AddVertex(
+                float x, float y,
+                float u, float v)
+            {
+                // position
+                data.Add(x);
+                data.Add(y);
+                data.Add(0f);
+
+                // color
+                data.Add(1f);
+                data.Add(1f);
+                data.Add(1f);
+                data.Add(1f);
+
+                // uv
+                data.Add(u);
+                data.Add(v);
+
+                // normal
+                data.Add(0f);
+                data.Add(0f);
+                data.Add(1f);
+
+                // tangent
+                data.Add(1f);
+                data.Add(0f);
+                data.Add(0f);
+                data.Add(1f);
+            }
+
+            AddVertex(-0.5f, -0.5f, 0f, 0f);
+            AddVertex( 0.5f, -0.5f, 1f, 0f);
+            AddVertex( 0.5f,  0.5f, 1f, 1f);
+
+            AddVertex( 0.5f,  0.5f, 1f, 1f);
+            AddVertex(-0.5f,  0.5f, 0f, 1f);
+            AddVertex(-0.5f, -0.5f, 0f, 0f);
 
             return data.ToArray();
         }

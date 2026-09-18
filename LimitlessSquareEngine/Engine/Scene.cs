@@ -322,6 +322,24 @@ namespace LimitlessSquareEngine.Engine
         public Dictionary<string, object>? Parameters { get; set; }
     }
 
+    public class ScenePropertiesCelestialBody
+    {
+        public string Id { get; set; } = "";
+        public string Texture { get; set; } = "";
+        public string? LightId { get; set; }
+        public double[]? Direction { get; set; }
+        public double Size { get; set; } = 10.0;
+        public double Intensity { get; set; } = 1.0;
+        public double[]? Color { get; set; }
+        public double Roll { get; set; } = 0.0;
+    }
+
+    public class ScenePropertiesCelestialBodies
+    {
+        public bool Enabled { get; set; } = true;
+        public List<ScenePropertiesCelestialBody> Bodies { get; set; } = new();
+    }
+
     public class ScenePropertiesFog
     {
         public bool Enabled { get; set; } = true;
@@ -336,6 +354,7 @@ namespace LimitlessSquareEngine.Engine
     public class SceneProperties
     {
         public ScenePropertiesSkybox? Skybox { get; set; }
+        public ScenePropertiesCelestialBodies? CelestialBodies { get; set; }
         public ScenePropertiesFog? Fog { get; set; }
         public ScenePropertiesAmbientLight? AmbientLight { get; set; }
     }
@@ -2653,6 +2672,18 @@ namespace LimitlessSquareEngine.Engine
                 }
             }
 
+            if (props.TryGetProperty("celestialBodies", out JsonElement celestialBodies) && celestialBodies.ValueKind == JsonValueKind.Object)
+            {
+                try
+                {
+                    result.CelestialBodies = JsonSerializer.Deserialize<ScenePropertiesCelestialBodies>(celestialBodies.GetRawText(), _jsonOptions);
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[!] Failed to parse celestialBodies properties: {ex.Message}");
+                }
+            }
+
             if (props.TryGetProperty("fog", out JsonElement fog) && fog.ValueKind == JsonValueKind.Object)
             {
                 try
@@ -2677,7 +2708,7 @@ namespace LimitlessSquareEngine.Engine
                 }
             }
 
-            if (result.Skybox == null && result.Fog == null && result.AmbientLight == null)
+            if (result.Skybox == null && result.CelestialBodies == null && result.Fog == null && result.AmbientLight == null)
                 return null;
 
             return result;
@@ -2705,6 +2736,26 @@ namespace LimitlessSquareEngine.Engine
                 catch (Exception ex)
                 {
                     Console.WriteLine($"[!] Failed to apply skybox properties for scene '{sceneId}': {ex.Message}");
+                }
+            }
+
+            if (properties.CelestialBodies != null)
+            {
+                try
+                {
+                    var celestialBodies = properties.CelestialBodies;
+                    if (!celestialBodies.Enabled)
+                    {
+                        _boundGraphics?.ClearScreenCelestialBodies();
+                    }
+                    else
+                    {
+                        _boundGraphics?.SetScreenCelestialBodies(JsonSerializer.Serialize(celestialBodies, _jsonOptions));
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[!] Failed to apply celestialBodies properties for scene '{sceneId}': {ex.Message}");
                 }
             }
 

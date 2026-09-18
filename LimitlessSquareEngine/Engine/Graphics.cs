@@ -365,6 +365,26 @@ namespace LimitlessSquareEngine
             public RenderCullMode CullMode { get; init; } = RenderCullMode.Back;
         }
 
+        private const string _celestialBodyShaderKey = "Shaders/Builtin/SkyBody";
+
+        private sealed class CelestialBodyData
+        {
+            public string Id { get; init; } = "";
+            public string TexturePath { get; init; } = "";
+            public string LightObjectId { get; init; } = "";
+            public Vector3 StaticDirection { get; init; } = Vector3.UnitY;
+            public float SizeDegrees { get; init; } = 10f;
+            public float Intensity { get; init; } = 1f;
+            public Vector3 Color { get; init; } = Vector3.One;
+            public float RollDegrees { get; init; }
+        }
+
+        private sealed class CelestialBodyCommandData
+        {
+            public CelestialBodyData Body { get; init; } = new();
+            public Vector3 Direction { get; init; } = Vector3.UnitY;
+        }
+
         private static readonly Matrix4x4[] _reflectionCaptureViews = CreateReflectionCaptureViews();
 
         private static Matrix4x4[] CreateReflectionCaptureViews()
@@ -621,6 +641,7 @@ namespace LimitlessSquareEngine
         }
 
         private SkyboxData? _screenSkybox;
+        private List<CelestialBodyData> _screenCelestialBodies = new();
         private readonly Dictionary<string, SkyboxData> _cameraSkyboxes = new(StringComparer.Ordinal);
 
         private readonly Dictionary<string, FogSettings> _cameraFogSettings = new(StringComparer.Ordinal);
@@ -663,23 +684,39 @@ namespace LimitlessSquareEngine
         private uint _postProcessSceneColorTexture = 0;
         private uint _postProcessSceneDepthTexture = 0;
 
-        private uint _postProcessPingFramebuffer = 0;
-        private uint _postProcessPingTexture = 0;
-        private uint _postProcessPongFramebuffer = 0;
-        private uint _postProcessPongTexture = 0;
+        private const int _maxPostProcessBloomLevels = 6;
+
+        private readonly uint[] _postProcessBloomDownTextures = new uint[_maxPostProcessBloomLevels];
+        private readonly uint[] _postProcessBloomUpTextures = new uint[_maxPostProcessBloomLevels];
+        private readonly uint[] _postProcessBloomDownFramebuffers = new uint[_maxPostProcessBloomLevels];
+        private readonly uint[] _postProcessBloomUpFramebuffers = new uint[_maxPostProcessBloomLevels];
+        private readonly int[] _postProcessBloomLevelWidths = new int[_maxPostProcessBloomLevels];
+        private readonly int[] _postProcessBloomLevelHeights = new int[_maxPostProcessBloomLevels];
 
         private int _postProcessSceneWidth = 0;
         private int _postProcessSceneHeight = 0;
-        private int _postProcessBloomWidth = 0;
-        private int _postProcessBloomHeight = 0;
+        private int _postProcessBloomLevelCount = 0;
+        private int _postProcessBloomBaseWidth = 0;
+        private int _postProcessBloomBaseHeight = 0;
 
         private uint _postProcessExtractProgram = 0;
         private uint _postProcessBlurProgram = 0;
+        private uint _postProcessBloomDownsampleProgram = 0;
+        private uint _postProcessBloomUpsampleProgram = 0;
         private uint _postProcessCompositeProgram = 0;
 
         private int _postProcessExtractSourceLoc = -1;
         private int _postProcessExtractThresholdLoc = -1;
         private int _postProcessExtractSoftKneeLoc = -1;
+        private int _postProcessExtractTexelSizeLoc = -1;
+        private int _postProcessExtractSampleScaleLoc = -1;
+
+        private int _postProcessBloomDownsampleSourceLoc = -1;
+        private int _postProcessBloomDownsampleTexelSizeLoc = -1;
+
+        private int _postProcessBloomUpsampleCurrentLoc = -1;
+        private int _postProcessBloomUpsampleLowerLoc = -1;
+        private int _postProcessBloomUpsampleLowerTexelSizeLoc = -1;
 
         private int _postProcessBlurSourceLoc = -1;
         private int _postProcessBlurTexelSizeLoc = -1;
@@ -994,6 +1031,13 @@ namespace LimitlessSquareEngine
             public int CloudShadowNearParamsB2 = -1;
 
             public int Texture = -1;
+
+            public int CelestialBodyTexture = -1;
+            public int CelestialBodyDirection = -1;
+            public int CelestialBodySize = -1;
+            public int CelestialBodyColor = -1;
+            public int CelestialBodyIntensity = -1;
+            public int CelestialBodyRoll = -1;
         }
 
         private enum MaterialDefaultCommandKind
@@ -1406,6 +1450,7 @@ namespace LimitlessSquareEngine
 
             public MaterialData? Material;
             public SkyboxData? Skybox;
+            public CelestialBodyCommandData? CelestialBody;
 
             public bool ForceWhiteVertexColor;
             public bool IsSkybox;
@@ -4458,6 +4503,16 @@ namespace LimitlessSquareEngine
             _pendingSkyboxReflectionRefreshAfterRender = true;
         }
 
+        public void SetScreenCelestialBodies(string parametersJson)
+        {
+            _screenCelestialBodies = ParseCelestialBodies(parametersJson);
+        }
+
+        public void ClearScreenCelestialBodies()
+        {
+            _screenCelestialBodies = new List<CelestialBodyData>();
+        }
+
         public void SetCameraSkybox(string cameraObjectId, string shaderName, string parametersJson = "{}")
         {
             if (string.IsNullOrWhiteSpace(cameraObjectId))
@@ -5489,9 +5544,17 @@ namespace LimitlessSquareEngine
                 uniform sampler2D uSource;
                 uniform float uThreshold;
                 uniform float uSoftKnee;
+                uniform vec2 uTexelSize;
+                uniform float uSampleScale;
                 void main()
                 {
-                    vec3 color = texture(uSource, vUv).rgb;
+                    vec2 offset = uTexelSize * max(uSampleScale, 1.0) * 0.5;
+                    vec3 color = texture(uSource, vUv + vec2(-offset.x, -offset.y)).rgb;
+                    color += texture(uSource, vUv + vec2(offset.x, -offset.y)).rgb;
+                    color += texture(uSource, vUv + vec2(-offset.x, offset.y)).rgb;
+                    color += texture(uSource, vUv + vec2(offset.x, offset.y)).rgb;
+                    color *= 0.25;
+
                     float brightness = max(max(color.r, color.g), color.b);
                     float knee = max(uSoftKnee, 0.0001);
                     float t = smoothstep(uThreshold - knee, uThreshold + knee, brightness);
@@ -5565,6 +5628,113 @@ namespace LimitlessSquareEngine
             {
                 string infoLog = _gl.GetProgramInfoLog(program);
                 throw new Exception($"[X] Post process blur shader link failed: {infoLog}");
+            }
+
+            _gl.DetachShader(program, vs);
+            _gl.DetachShader(program, fs);
+            _gl.DeleteShader(vs);
+            _gl.DeleteShader(fs);
+
+            return program;
+        }
+
+        private uint CreatePostProcessBloomDownsampleProgram()
+        {
+            string vertexSource = @"#version 430 core
+                layout(location = 0) in vec3 aPos;
+                layout(location = 2) in vec2 aUv;
+                out vec2 vUv;
+                void main()
+                {
+                    vUv = aUv;
+                    gl_Position = vec4(aPos.xy, 0.0, 1.0);
+                }";
+
+            string fragmentSource = @"#version 430 core
+                in vec2 vUv;
+                out vec4 FragColor;
+                uniform sampler2D uSource;
+                uniform vec2 uTexelSize;
+                void main()
+                {
+                    vec2 offset = uTexelSize * 0.5;
+                    vec3 color = texture(uSource, vUv + vec2(-offset.x, -offset.y)).rgb;
+                    color += texture(uSource, vUv + vec2(offset.x, -offset.y)).rgb;
+                    color += texture(uSource, vUv + vec2(-offset.x, offset.y)).rgb;
+                    color += texture(uSource, vUv + vec2(offset.x, offset.y)).rgb;
+                    FragColor = vec4(color * 0.25, 1.0);
+                }";
+
+            uint vs = CompileShader(ShaderType.VertexShader, vertexSource);
+            uint fs = CompileShader(ShaderType.FragmentShader, fragmentSource);
+
+            uint program = _gl.CreateProgram();
+            _gl.AttachShader(program, vs);
+            _gl.AttachShader(program, fs);
+            _gl.LinkProgram(program);
+
+            _gl.GetProgram(program, ProgramPropertyARB.LinkStatus, out int success);
+            if (success == 0)
+            {
+                string infoLog = _gl.GetProgramInfoLog(program);
+                throw new Exception($"[X] Post process bloom downsample shader link failed: {infoLog}");
+            }
+
+            _gl.DetachShader(program, vs);
+            _gl.DetachShader(program, fs);
+            _gl.DeleteShader(vs);
+            _gl.DeleteShader(fs);
+
+            return program;
+        }
+
+        private uint CreatePostProcessBloomUpsampleProgram()
+        {
+            string vertexSource = @"#version 430 core
+                layout(location = 0) in vec3 aPos;
+                layout(location = 2) in vec2 aUv;
+                out vec2 vUv;
+                void main()
+                {
+                    vUv = aUv;
+                    gl_Position = vec4(aPos.xy, 0.0, 1.0);
+                }";
+
+            string fragmentSource = @"#version 430 core
+                in vec2 vUv;
+                out vec4 FragColor;
+                uniform sampler2D uCurrent;
+                uniform sampler2D uLower;
+                uniform vec2 uLowerTexelSize;
+                void main()
+                {
+                    vec2 t = uLowerTexelSize;
+                    vec3 result = texture(uLower, vUv).rgb * 4.0;
+                    result += texture(uLower, vUv + vec2(-t.x, 0.0)).rgb * 2.0;
+                    result += texture(uLower, vUv + vec2(t.x, 0.0)).rgb * 2.0;
+                    result += texture(uLower, vUv + vec2(0.0, -t.y)).rgb * 2.0;
+                    result += texture(uLower, vUv + vec2(0.0, t.y)).rgb * 2.0;
+                    result += texture(uLower, vUv + vec2(-t.x, -t.y)).rgb;
+                    result += texture(uLower, vUv + vec2(t.x, -t.y)).rgb;
+                    result += texture(uLower, vUv + vec2(-t.x, t.y)).rgb;
+                    result += texture(uLower, vUv + vec2(t.x, t.y)).rgb;
+                    result *= 0.0625;
+                    FragColor = vec4(texture(uCurrent, vUv).rgb + result, 1.0);
+                }";
+
+            uint vs = CompileShader(ShaderType.VertexShader, vertexSource);
+            uint fs = CompileShader(ShaderType.FragmentShader, fragmentSource);
+
+            uint program = _gl.CreateProgram();
+            _gl.AttachShader(program, vs);
+            _gl.AttachShader(program, fs);
+            _gl.LinkProgram(program);
+
+            _gl.GetProgram(program, ProgramPropertyARB.LinkStatus, out int success);
+            if (success == 0)
+            {
+                string infoLog = _gl.GetProgramInfoLog(program);
+                throw new Exception($"[X] Post process bloom upsample shader link failed: {infoLog}");
             }
 
             _gl.DetachShader(program, vs);
@@ -5837,6 +6007,8 @@ namespace LimitlessSquareEngine
                 _postProcessExtractSourceLoc = _gl.GetUniformLocation(_postProcessExtractProgram, "uSource");
                 _postProcessExtractThresholdLoc = _gl.GetUniformLocation(_postProcessExtractProgram, "uThreshold");
                 _postProcessExtractSoftKneeLoc = _gl.GetUniformLocation(_postProcessExtractProgram, "uSoftKnee");
+                _postProcessExtractTexelSizeLoc = _gl.GetUniformLocation(_postProcessExtractProgram, "uTexelSize");
+                _postProcessExtractSampleScaleLoc = _gl.GetUniformLocation(_postProcessExtractProgram, "uSampleScale");
             }
 
             if (_postProcessBlurProgram == 0)
@@ -5845,6 +6017,21 @@ namespace LimitlessSquareEngine
                 _postProcessBlurSourceLoc = _gl.GetUniformLocation(_postProcessBlurProgram, "uSource");
                 _postProcessBlurTexelSizeLoc = _gl.GetUniformLocation(_postProcessBlurProgram, "uTexelSize");
                 _postProcessBlurHorizontalLoc = _gl.GetUniformLocation(_postProcessBlurProgram, "uHorizontal");
+            }
+
+            if (_postProcessBloomDownsampleProgram == 0)
+            {
+                _postProcessBloomDownsampleProgram = CreatePostProcessBloomDownsampleProgram();
+                _postProcessBloomDownsampleSourceLoc = _gl.GetUniformLocation(_postProcessBloomDownsampleProgram, "uSource");
+                _postProcessBloomDownsampleTexelSizeLoc = _gl.GetUniformLocation(_postProcessBloomDownsampleProgram, "uTexelSize");
+            }
+
+            if (_postProcessBloomUpsampleProgram == 0)
+            {
+                _postProcessBloomUpsampleProgram = CreatePostProcessBloomUpsampleProgram();
+                _postProcessBloomUpsampleCurrentLoc = _gl.GetUniformLocation(_postProcessBloomUpsampleProgram, "uCurrent");
+                _postProcessBloomUpsampleLowerLoc = _gl.GetUniformLocation(_postProcessBloomUpsampleProgram, "uLower");
+                _postProcessBloomUpsampleLowerTexelSizeLoc = _gl.GetUniformLocation(_postProcessBloomUpsampleProgram, "uLowerTexelSize");
             }
 
             if (_postProcessCompositeProgram == 0)
@@ -5863,7 +6050,7 @@ namespace LimitlessSquareEngine
             }
         }
 
-        private uint CreatePostProcessColorTexture(int width, int height)
+        private uint CreatePostProcessColorTexture(int width, int height, bool linearFilter = false)
         {
 
             uint texture = _gl.GenTexture();
@@ -5882,8 +6069,11 @@ namespace LimitlessSquareEngine
                 PixelType.Float,
                 (ReadOnlySpan<float>)emptyColor);
 
-            _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.Nearest);
-            _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMagFilter, (int)TextureMagFilter.Nearest);
+            TextureMinFilter minFilter = linearFilter ? TextureMinFilter.Linear : TextureMinFilter.Nearest;
+            TextureMagFilter magFilter = linearFilter ? TextureMagFilter.Linear : TextureMagFilter.Nearest;
+
+            _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMinFilter, (int)minFilter);
+            _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMagFilter, (int)magFilter);
             _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapS, (int)TextureWrapMode.ClampToEdge);
             _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapT, (int)TextureWrapMode.ClampToEdge);
             _gl.BindTexture(TextureTarget.Texture2D, 0);
@@ -5944,32 +6134,39 @@ namespace LimitlessSquareEngine
 
         private void DeletePostProcessBloomTargets()
         {
-            if (_postProcessPingTexture != 0)
+            for (int i = 0; i < _maxPostProcessBloomLevels; i++)
             {
-                _gl.DeleteTexture(_postProcessPingTexture);
-                _postProcessPingTexture = 0;
+                if (_postProcessBloomDownTextures[i] != 0)
+                {
+                    _gl.DeleteTexture(_postProcessBloomDownTextures[i]);
+                    _postProcessBloomDownTextures[i] = 0;
+                }
+
+                if (_postProcessBloomUpTextures[i] != 0)
+                {
+                    _gl.DeleteTexture(_postProcessBloomUpTextures[i]);
+                    _postProcessBloomUpTextures[i] = 0;
+                }
+
+                if (_postProcessBloomDownFramebuffers[i] != 0)
+                {
+                    _gl.DeleteFramebuffer(_postProcessBloomDownFramebuffers[i]);
+                    _postProcessBloomDownFramebuffers[i] = 0;
+                }
+
+                if (_postProcessBloomUpFramebuffers[i] != 0)
+                {
+                    _gl.DeleteFramebuffer(_postProcessBloomUpFramebuffers[i]);
+                    _postProcessBloomUpFramebuffers[i] = 0;
+                }
+
+                _postProcessBloomLevelWidths[i] = 0;
+                _postProcessBloomLevelHeights[i] = 0;
             }
 
-            if (_postProcessPongTexture != 0)
-            {
-                _gl.DeleteTexture(_postProcessPongTexture);
-                _postProcessPongTexture = 0;
-            }
-
-            if (_postProcessPingFramebuffer != 0)
-            {
-                _gl.DeleteFramebuffer(_postProcessPingFramebuffer);
-                _postProcessPingFramebuffer = 0;
-            }
-
-            if (_postProcessPongFramebuffer != 0)
-            {
-                _gl.DeleteFramebuffer(_postProcessPongFramebuffer);
-                _postProcessPongFramebuffer = 0;
-            }
-
-            _postProcessBloomWidth = 0;
-            _postProcessBloomHeight = 0;
+            _postProcessBloomLevelCount = 0;
+            _postProcessBloomBaseWidth = 0;
+            _postProcessBloomBaseHeight = 0;
         }
 
         private void EnsurePostProcessSceneTargets(int width, int height)
@@ -6003,42 +6200,66 @@ namespace LimitlessSquareEngine
             _postProcessSceneHeight = height;
         }
 
-        private void EnsurePostProcessBloomTargets(int width, int height)
+        private void EnsurePostProcessBloomTargets(int baseWidth, int baseHeight, int levelCount)
         {
-            if (_postProcessPingFramebuffer != 0 &&
-                _postProcessPongFramebuffer != 0 &&
-                _postProcessPingTexture != 0 &&
-                _postProcessPongTexture != 0 &&
-                _postProcessBloomWidth == width &&
-                _postProcessBloomHeight == height)
+            if (_postProcessBloomLevelCount == levelCount &&
+                _postProcessBloomBaseWidth == baseWidth &&
+                _postProcessBloomBaseHeight == baseHeight)
             {
-                return;
+                bool complete = true;
+                for (int i = 0; i < levelCount; i++)
+                {
+                    if (_postProcessBloomDownTextures[i] == 0 ||
+                        _postProcessBloomUpTextures[i] == 0 ||
+                        _postProcessBloomDownFramebuffers[i] == 0 ||
+                        _postProcessBloomUpFramebuffers[i] == 0)
+                    {
+                        complete = false;
+                        break;
+                    }
+                }
+
+                if (complete)
+                    return;
             }
 
             DeletePostProcessBloomTargets();
 
-            _postProcessPingFramebuffer = _gl.GenFramebuffer();
-            _postProcessPingTexture = CreatePostProcessColorTexture(width, height);
-            _gl.BindFramebuffer(FramebufferTarget.Framebuffer, _postProcessPingFramebuffer);
-            _gl.FramebufferTexture2D(FramebufferTarget.Framebuffer, FramebufferAttachment.ColorAttachment0, TextureTarget.Texture2D, _postProcessPingTexture, 0);
+            int width = baseWidth;
+            int height = baseHeight;
 
-            GLEnum pingStatus = _gl.CheckFramebufferStatus(FramebufferTarget.Framebuffer);
-            if (pingStatus != GLEnum.FramebufferComplete)
-                throw new Exception($"[X] Post process ping framebuffer incomplete: {pingStatus}");
+            for (int i = 0; i < levelCount; i++)
+            {
+                _postProcessBloomLevelWidths[i] = width;
+                _postProcessBloomLevelHeights[i] = height;
 
-            _postProcessPongFramebuffer = _gl.GenFramebuffer();
-            _postProcessPongTexture = CreatePostProcessColorTexture(width, height);
-            _gl.BindFramebuffer(FramebufferTarget.Framebuffer, _postProcessPongFramebuffer);
-            _gl.FramebufferTexture2D(FramebufferTarget.Framebuffer, FramebufferAttachment.ColorAttachment0, TextureTarget.Texture2D, _postProcessPongTexture, 0);
+                _postProcessBloomDownTextures[i] = CreatePostProcessColorTexture(width, height, true);
+                _postProcessBloomDownFramebuffers[i] = _gl.GenFramebuffer();
+                _gl.BindFramebuffer(FramebufferTarget.Framebuffer, _postProcessBloomDownFramebuffers[i]);
+                _gl.FramebufferTexture2D(FramebufferTarget.Framebuffer, FramebufferAttachment.ColorAttachment0, TextureTarget.Texture2D, _postProcessBloomDownTextures[i], 0);
 
-            GLEnum pongStatus = _gl.CheckFramebufferStatus(FramebufferTarget.Framebuffer);
-            if (pongStatus != GLEnum.FramebufferComplete)
-                throw new Exception($"[X] Post process pong framebuffer incomplete: {pongStatus}");
+                GLEnum downStatus = _gl.CheckFramebufferStatus(FramebufferTarget.Framebuffer);
+                if (downStatus != GLEnum.FramebufferComplete)
+                    throw new Exception($"[X] Post process bloom downsample framebuffer incomplete: {downStatus}");
+
+                _postProcessBloomUpTextures[i] = CreatePostProcessColorTexture(width, height, true);
+                _postProcessBloomUpFramebuffers[i] = _gl.GenFramebuffer();
+                _gl.BindFramebuffer(FramebufferTarget.Framebuffer, _postProcessBloomUpFramebuffers[i]);
+                _gl.FramebufferTexture2D(FramebufferTarget.Framebuffer, FramebufferAttachment.ColorAttachment0, TextureTarget.Texture2D, _postProcessBloomUpTextures[i], 0);
+
+                GLEnum upStatus = _gl.CheckFramebufferStatus(FramebufferTarget.Framebuffer);
+                if (upStatus != GLEnum.FramebufferComplete)
+                    throw new Exception($"[X] Post process bloom upsample framebuffer incomplete: {upStatus}");
+
+                width = Math.Max(1, width / 2);
+                height = Math.Max(1, height / 2);
+            }
 
             _gl.BindFramebuffer(FramebufferTarget.Framebuffer, 0);
 
-            _postProcessBloomWidth = width;
-            _postProcessBloomHeight = height;
+            _postProcessBloomLevelCount = levelCount;
+            _postProcessBloomBaseWidth = baseWidth;
+            _postProcessBloomBaseHeight = baseHeight;
         }
 
         private static float GetResolutionEffectScale(int height)
@@ -6105,13 +6326,15 @@ namespace LimitlessSquareEngine
             if (!NeedsBloom(settings))
                 return;
 
-            int bloomWidth = Math.Max(1, _postProcessSceneWidth / Math.Max(1, settings.BloomDownsample));
-            int bloomHeight = Math.Max(1, _postProcessSceneHeight / Math.Max(1, settings.BloomDownsample));
+            int downsample = Math.Max(1, settings.BloomDownsample);
+            int baseWidth = Math.Max(1, _postProcessSceneWidth / downsample);
+            int baseHeight = Math.Max(1, _postProcessSceneHeight / downsample);
             float bloomScale = GetResolutionEffectScale(_postProcessSceneHeight);
             float bloomRange = Math.Max(0f, settings.BloomRange) * bloomScale;
-            float bloomStep = bloomRange / Math.Max(1, settings.BloomIterations);
+            int levelCount = ComputeBloomLevelCount(baseWidth, baseHeight, bloomRange, downsample);
+            int blurIterations = Math.Clamp((settings.BloomIterations + 3) / 4, 1, 2);
 
-            EnsurePostProcessBloomTargets(bloomWidth, bloomHeight);
+            EnsurePostProcessBloomTargets(baseWidth, baseHeight, levelCount);
 
             _gl.Disable(GLEnum.DepthTest);
             _gl.DepthMask(false);
@@ -6122,8 +6345,8 @@ namespace LimitlessSquareEngine
             _currentProgram = _postProcessExtractProgram;
             _gl.UseProgram(_postProcessExtractProgram);
 
-            _gl.BindFramebuffer(FramebufferTarget.Framebuffer, _postProcessPingFramebuffer);
-            _gl.Viewport(0, 0, (uint)bloomWidth, (uint)bloomHeight);
+            _gl.BindFramebuffer(FramebufferTarget.Framebuffer, _postProcessBloomDownFramebuffers[0]);
+            _gl.Viewport(0, 0, (uint)baseWidth, (uint)baseHeight);
 
             _gl.ActiveTexture(TextureUnit.Texture0);
             _gl.BindTexture(TextureTarget.Texture2D, _postProcessSceneColorTexture);
@@ -6133,8 +6356,42 @@ namespace LimitlessSquareEngine
                 _gl.Uniform1(_postProcessExtractThresholdLoc, settings.BloomThreshold);
             if (_postProcessExtractSoftKneeLoc != -1)
                 _gl.Uniform1(_postProcessExtractSoftKneeLoc, settings.BloomSoftKnee);
+            if (_postProcessExtractTexelSizeLoc != -1)
+                _gl.Uniform2(_postProcessExtractTexelSizeLoc,
+                    1f / Math.Max(1, _postProcessSceneWidth),
+                    1f / Math.Max(1, _postProcessSceneHeight));
+            if (_postProcessExtractSampleScaleLoc != -1)
+                _gl.Uniform1(_postProcessExtractSampleScaleLoc, (float)downsample);
 
             DrawFullscreenQuad();
+
+            if (levelCount > 1)
+            {
+                _currentProgram = _postProcessBloomDownsampleProgram;
+                _gl.UseProgram(_postProcessBloomDownsampleProgram);
+
+                if (_postProcessBloomDownsampleSourceLoc != -1)
+                    _gl.Uniform1(_postProcessBloomDownsampleSourceLoc, 0);
+
+                for (int i = 1; i < levelCount; i++)
+                {
+                    int sourceWidth = _postProcessBloomLevelWidths[i - 1];
+                    int sourceHeight = _postProcessBloomLevelHeights[i - 1];
+
+                    _gl.BindFramebuffer(FramebufferTarget.Framebuffer, _postProcessBloomDownFramebuffers[i]);
+                    _gl.Viewport(0, 0, (uint)_postProcessBloomLevelWidths[i], (uint)_postProcessBloomLevelHeights[i]);
+
+                    _gl.ActiveTexture(TextureUnit.Texture0);
+                    _gl.BindTexture(TextureTarget.Texture2D, _postProcessBloomDownTextures[i - 1]);
+
+                    if (_postProcessBloomDownsampleTexelSizeLoc != -1)
+                        _gl.Uniform2(_postProcessBloomDownsampleTexelSizeLoc,
+                            1f / Math.Max(1, sourceWidth),
+                            1f / Math.Max(1, sourceHeight));
+
+                    DrawFullscreenQuad();
+                }
+            }
 
             _currentProgram = _postProcessBlurProgram;
             _gl.UseProgram(_postProcessBlurProgram);
@@ -6142,31 +6399,100 @@ namespace LimitlessSquareEngine
             if (_postProcessBlurSourceLoc != -1)
                 _gl.Uniform1(_postProcessBlurSourceLoc, 0);
 
-            for (int i = 0; i < settings.BloomIterations; i++)
+            for (int i = 0; i < levelCount; i++)
             {
-                _gl.BindFramebuffer(FramebufferTarget.Framebuffer, _postProcessPongFramebuffer);
-                _gl.Viewport(0, 0, (uint)bloomWidth, (uint)bloomHeight);
-                _gl.ActiveTexture(TextureUnit.Texture0);
-                _gl.BindTexture(TextureTarget.Texture2D, _postProcessPingTexture);
-                if (_postProcessBlurTexelSizeLoc != -1)
-                    _gl.Uniform2(_postProcessBlurTexelSizeLoc, bloomStep / _postProcessSceneWidth, bloomStep / _postProcessSceneHeight);
-                if (_postProcessBlurHorizontalLoc != -1)
-                    _gl.Uniform1(_postProcessBlurHorizontalLoc, 1);
-                DrawFullscreenQuad();
+                int levelWidth = _postProcessBloomLevelWidths[i];
+                int levelHeight = _postProcessBloomLevelHeights[i];
 
-                _gl.BindFramebuffer(FramebufferTarget.Framebuffer, _postProcessPingFramebuffer);
-                _gl.Viewport(0, 0, (uint)bloomWidth, (uint)bloomHeight);
-                _gl.ActiveTexture(TextureUnit.Texture0);
-                _gl.BindTexture(TextureTarget.Texture2D, _postProcessPongTexture);
-                if (_postProcessBlurTexelSizeLoc != -1)
-                    _gl.Uniform2(_postProcessBlurTexelSizeLoc, bloomStep / _postProcessSceneWidth, bloomStep / _postProcessSceneHeight);
-                if (_postProcessBlurHorizontalLoc != -1)
-                    _gl.Uniform1(_postProcessBlurHorizontalLoc, 0);
-                DrawFullscreenQuad();
+                for (int pass = 0; pass < blurIterations; pass++)
+                {
+                    _gl.BindFramebuffer(FramebufferTarget.Framebuffer, _postProcessBloomUpFramebuffers[i]);
+                    _gl.Viewport(0, 0, (uint)levelWidth, (uint)levelHeight);
+                    _gl.ActiveTexture(TextureUnit.Texture0);
+                    _gl.BindTexture(TextureTarget.Texture2D, _postProcessBloomDownTextures[i]);
+                    if (_postProcessBlurTexelSizeLoc != -1)
+                        _gl.Uniform2(_postProcessBlurTexelSizeLoc, 1f / Math.Max(1, levelWidth), 1f / Math.Max(1, levelHeight));
+                    if (_postProcessBlurHorizontalLoc != -1)
+                        _gl.Uniform1(_postProcessBlurHorizontalLoc, 1);
+                    DrawFullscreenQuad();
+
+                    _gl.BindFramebuffer(FramebufferTarget.Framebuffer, _postProcessBloomDownFramebuffers[i]);
+                    _gl.Viewport(0, 0, (uint)levelWidth, (uint)levelHeight);
+                    _gl.ActiveTexture(TextureUnit.Texture0);
+                    _gl.BindTexture(TextureTarget.Texture2D, _postProcessBloomUpTextures[i]);
+                    if (_postProcessBlurTexelSizeLoc != -1)
+                        _gl.Uniform2(_postProcessBlurTexelSizeLoc, 1f / Math.Max(1, levelWidth), 1f / Math.Max(1, levelHeight));
+                    if (_postProcessBlurHorizontalLoc != -1)
+                        _gl.Uniform1(_postProcessBlurHorizontalLoc, 0);
+                    DrawFullscreenQuad();
+                }
+            }
+
+            if (levelCount > 1)
+            {
+                _currentProgram = _postProcessBloomUpsampleProgram;
+                _gl.UseProgram(_postProcessBloomUpsampleProgram);
+
+                if (_postProcessBloomUpsampleCurrentLoc != -1)
+                    _gl.Uniform1(_postProcessBloomUpsampleCurrentLoc, 0);
+                if (_postProcessBloomUpsampleLowerLoc != -1)
+                    _gl.Uniform1(_postProcessBloomUpsampleLowerLoc, 1);
+
+                for (int i = levelCount - 2; i >= 0; i--)
+                {
+                    int lowerWidth = _postProcessBloomLevelWidths[i + 1];
+                    int lowerHeight = _postProcessBloomLevelHeights[i + 1];
+
+                    _gl.BindFramebuffer(FramebufferTarget.Framebuffer, _postProcessBloomUpFramebuffers[i]);
+                    _gl.Viewport(0, 0, (uint)_postProcessBloomLevelWidths[i], (uint)_postProcessBloomLevelHeights[i]);
+
+                    _gl.ActiveTexture(TextureUnit.Texture0);
+                    _gl.BindTexture(TextureTarget.Texture2D, _postProcessBloomDownTextures[i]);
+
+                    _gl.ActiveTexture((TextureUnit)((int)TextureUnit.Texture0 + 1));
+                    _gl.BindTexture(TextureTarget.Texture2D, _postProcessBloomDownTextures[i + 1]);
+
+                    if (_postProcessBloomUpsampleLowerTexelSizeLoc != -1)
+                        _gl.Uniform2(_postProcessBloomUpsampleLowerTexelSizeLoc,
+                            1f / Math.Max(1, lowerWidth),
+                            1f / Math.Max(1, lowerHeight));
+
+                    DrawFullscreenQuad();
+
+                    (_postProcessBloomDownTextures[i], _postProcessBloomUpTextures[i]) =
+                        (_postProcessBloomUpTextures[i], _postProcessBloomDownTextures[i]);
+                    (_postProcessBloomDownFramebuffers[i], _postProcessBloomUpFramebuffers[i]) =
+                        (_postProcessBloomUpFramebuffers[i], _postProcessBloomDownFramebuffers[i]);
+                }
+
+                _gl.ActiveTexture((TextureUnit)((int)TextureUnit.Texture0 + 1));
+                _gl.BindTexture(TextureTarget.Texture2D, 0);
             }
 
             _gl.ActiveTexture(TextureUnit.Texture0);
             _gl.BindTexture(TextureTarget.Texture2D, 0);
+        }
+
+        private static int ComputeBloomLevelCount(int baseWidth, int baseHeight, float range, int downsample)
+        {
+            int maxLevels = 1;
+            int width = baseWidth;
+            int height = baseHeight;
+
+            while (maxLevels < _maxPostProcessBloomLevels && width > 4 && height > 4)
+            {
+                width = Math.Max(1, width / 2);
+                height = Math.Max(1, height / 2);
+                maxLevels++;
+            }
+
+            float target = Math.Max(range, 0f) / (2f * Math.Max(1, downsample)) + 1f;
+
+            int levels = 1;
+            while (levels < maxLevels && (1 << levels) < target)
+                levels++;
+
+            return levels;
         }
 
         private void CompositePostProcessToBackbuffer(in RenderCommand first, CameraPostProcessSettings settings)
@@ -6191,7 +6517,7 @@ namespace LimitlessSquareEngine
                 _gl.Uniform1(_postProcessCompositeSceneLoc, 0);
 
             _gl.ActiveTexture((TextureUnit)((int)TextureUnit.Texture0 + 1));
-            _gl.BindTexture(TextureTarget.Texture2D, NeedsBloom(settings) ? _postProcessPingTexture : _postProcessSceneColorTexture);
+            _gl.BindTexture(TextureTarget.Texture2D, NeedsBloom(settings) ? _postProcessBloomDownTextures[0] : _postProcessSceneColorTexture);
             if (_postProcessCompositeBloomLoc != -1)
                 _gl.Uniform1(_postProcessCompositeBloomLoc, 1);
 
@@ -6841,6 +7167,115 @@ namespace LimitlessSquareEngine
             };
         }
 
+        private List<CelestialBodyData> ParseCelestialBodies(string parametersJson)
+        {
+            var bodies = new List<CelestialBodyData>();
+
+            string json = string.IsNullOrWhiteSpace(parametersJson) ? "{}" : parametersJson;
+
+            using JsonDocument doc = JsonDocument.Parse(json);
+            if (doc.RootElement.ValueKind != JsonValueKind.Object)
+                throw new ArgumentException("[X] Celestial body parameters must be a JSON object.");
+
+            JsonElement root = doc.RootElement;
+
+            if (root.TryGetProperty("enabled", out JsonElement enabledElement) &&
+                enabledElement.ValueKind == JsonValueKind.False)
+                return bodies;
+
+            if (!root.TryGetProperty("bodies", out JsonElement bodiesElement) ||
+                bodiesElement.ValueKind != JsonValueKind.Array)
+                return bodies;
+
+            foreach (JsonElement item in bodiesElement.EnumerateArray())
+            {
+                if (item.ValueKind != JsonValueKind.Object)
+                    continue;
+
+                string id = ReadCelestialBodyString(item, "id", "");
+                string texture = ReadCelestialBodyString(item, "texture", "");
+
+                if (string.IsNullOrWhiteSpace(texture))
+                {
+                    Console.WriteLine($"[!] Celestial body '{id}' skipped: texture is empty.");
+                    continue;
+                }
+
+                string lightId = ReadCelestialBodyString(item, "lightId", "");
+
+                Vector3 staticDirection = Vector3.UnitY;
+                if (item.TryGetProperty("direction", out JsonElement directionElement) &&
+                    TryReadNumericArray(directionElement, out double[] directionNumbers) &&
+                    directionNumbers.Length >= 3)
+                {
+                    Vector3 parsedDirection = new(
+                        (float)directionNumbers[0],
+                        (float)directionNumbers[1],
+                        (float)directionNumbers[2]);
+
+                    if (parsedDirection.LengthSquared() > 0.0000001f)
+                        staticDirection = Vector3.Normalize(parsedDirection);
+                }
+
+                Vector3 color = Vector3.One;
+                if (item.TryGetProperty("color", out JsonElement colorElement) &&
+                    TryReadNumericArray(colorElement, out double[] colorNumbers) &&
+                    colorNumbers.Length >= 3)
+                {
+                    color = new Vector3(
+                        MathF.Max(0f, (float)colorNumbers[0]),
+                        MathF.Max(0f, (float)colorNumbers[1]),
+                        MathF.Max(0f, (float)colorNumbers[2]));
+                }
+
+                bodies.Add(new CelestialBodyData
+                {
+                    Id = id,
+                    TexturePath = texture,
+                    LightObjectId = lightId,
+                    StaticDirection = staticDirection,
+                    SizeDegrees = Math.Clamp(ReadCelestialBodyFloat(item, "size", 10f), 0.01f, 179f),
+                    Intensity = MathF.Max(0f, ReadCelestialBodyFloat(item, "intensity", 1f)),
+                    Color = color,
+                    RollDegrees = ReadCelestialBodyFloat(item, "roll", 0f)
+                });
+            }
+
+            return bodies;
+        }
+
+        private static string ReadCelestialBodyString(JsonElement element, string name, string fallback)
+        {
+            if (element.TryGetProperty(name, out JsonElement value) && value.ValueKind == JsonValueKind.String)
+                return value.GetString() ?? fallback;
+
+            return fallback;
+        }
+
+        private static float ReadCelestialBodyFloat(JsonElement element, string name, float fallback)
+        {
+            if (element.TryGetProperty(name, out JsonElement value) &&
+                value.ValueKind == JsonValueKind.Number &&
+                value.TryGetDouble(out double number))
+                return (float)number;
+
+            return fallback;
+        }
+
+        private Vector3 ResolveCelestialBodyDirection(string sceneId, CelestialBodyData body)
+        {
+            if (!string.IsNullOrWhiteSpace(body.LightObjectId) &&
+                _sceneLightCache.TryGetValue(sceneId, out var lightMap) &&
+                lightMap.TryGetValue(body.LightObjectId, out SceneRenderLightSnapshot light) &&
+                light.Active &&
+                light.Visible)
+            {
+                return -ExtractDirectionalLightDirection(light);
+            }
+
+            return FlipCloudShadowZ(body.StaticDirection);
+        }
+
         private string ResolveMainScreenCameraId()
         {
             foreach (SceneData scene in Scene.GetLoadedScenes())
@@ -7451,6 +7886,13 @@ namespace LimitlessSquareEngine
             cache.ReflectionIntensity = GetLoc(_uniformReflectionIntensity);
             cache.OutlinePass = GetLoc(_uniformOutlinePass);
             cache.UseOutlineNormal = GetLoc(_uniformUseOutlineNormal);
+
+            cache.CelestialBodyTexture = GetLoc("uBodyTexture");
+            cache.CelestialBodyDirection = GetLoc("uBodyDirection");
+            cache.CelestialBodySize = GetLoc("uBodySize");
+            cache.CelestialBodyColor = GetLoc("uBodyColor");
+            cache.CelestialBodyIntensity = GetLoc("uBodyIntensity");
+            cache.CelestialBodyRoll = GetLoc("uBodyRoll");
 
             cache.SkinEnabled = GetLoc("uSkinEnabled");
             cache.BoneBaseIndex = GetLoc("uBoneBaseIndex");
@@ -8724,6 +9166,51 @@ namespace LimitlessSquareEngine
             _gl.ActiveTexture(TextureUnit.Texture0);
         }
 
+        private void ApplyCelestialBody(CelestialBodyCommandData body)
+        {
+            Dictionary<string, int> samplerUnits = ApplyMaterialDefaults(_currentProgram);
+            ApplyCoreSceneUniforms();
+
+            ProgramUniformLocationCache loc = GetProgramLocationCache(_currentProgram);
+
+            if (loc.CelestialBodyDirection != -1)
+                _gl.Uniform3(loc.CelestialBodyDirection, body.Direction.X, body.Direction.Y, body.Direction.Z);
+
+            if (loc.CelestialBodySize != -1)
+                _gl.Uniform1(loc.CelestialBodySize, body.Body.SizeDegrees);
+
+            if (loc.CelestialBodyColor != -1)
+                _gl.Uniform3(loc.CelestialBodyColor, body.Body.Color.X, body.Body.Color.Y, body.Body.Color.Z);
+
+            if (loc.CelestialBodyIntensity != -1)
+                _gl.Uniform1(loc.CelestialBodyIntensity, body.Body.Intensity);
+
+            if (loc.CelestialBodyRoll != -1)
+                _gl.Uniform1(loc.CelestialBodyRoll, body.Body.RollDegrees * MathF.PI / 180f);
+
+            if (loc.CelestialBodyTexture != -1 &&
+                samplerUnits.TryGetValue("uBodyTexture", out int textureUnit))
+            {
+                if (TryResolveTexturePath(body.Body.TexturePath, out string texturePath))
+                {
+                    TextureInfo texture = LoadTexture(texturePath);
+
+                    if (texture.Id != 0)
+                    {
+                        _gl.ActiveTexture((TextureUnit)((int)TextureUnit.Texture0 + textureUnit));
+                        _gl.BindTexture(TextureTarget.Texture2D, texture.Id);
+                        _gl.Uniform1(loc.CelestialBodyTexture, textureUnit);
+                    }
+                }
+                else
+                {
+                    Console.WriteLine($"[X] Celestial body texture not indexed: {body.Body.TexturePath}");
+                }
+            }
+
+            _gl.ActiveTexture(TextureUnit.Texture0);
+        }
+
         // ==================== UI 绘制方法 ====================
 
         /// <summary>
@@ -8981,6 +9468,8 @@ namespace LimitlessSquareEngine
             SkyboxData skybox = ResolveSkyboxForCamera(cameraItem.ObjectId, cameraItem.Settings.RenderMode, mainScreenCameraId);
             FogSettings? fogSettings = ResolveFogForCamera(cameraItem.ObjectId);
 
+            long? backgroundLayerBatchId = null;
+
             if (skybox != null)
             {
                 if (!_meshes.TryGetValue("builtin/cube_1x1x1", out MeshData skyboxMesh))
@@ -8995,6 +9484,7 @@ namespace LimitlessSquareEngine
                 bool skyboxUseReverseZ = cameraItem.Settings.ProjectionType != 1;
                 Matrix4x4 skyboxProjection = CreatePerspectiveReverseZInfinite(fovRadians, viewport.Aspect, (float)cameraNearClip);
                 long skyboxBatchId = ++_sceneBatchCounter;
+                backgroundLayerBatchId = skyboxBatchId;
 
                 _renderQueue.Add(new RenderCommand
                 {
@@ -9037,6 +9527,12 @@ namespace LimitlessSquareEngine
                     DepthLayerIndex = -1,
                     DepthLayerCount = layerCount
                 });
+            }
+
+            if (_screenCelestialBodies.Count > 0 &&
+                string.Equals(cameraItem.ObjectId, mainScreenCameraId, StringComparison.Ordinal))
+            {
+                QueueCelestialBodyCommands(sceneId, cameraItem, view, viewport, cameraNearClip, layerCount, backgroundLayerBatchId);
             }
 
             for (int layerIdx = layerCount - 1; layerIdx >= 0; layerIdx--)
@@ -9300,6 +9796,81 @@ namespace LimitlessSquareEngine
                         _renderQueue.Add(cmd);
                     }
                 }
+            }
+        }
+
+        private void QueueCelestialBodyCommands(
+            string sceneId,
+            SceneRenderCameraSnapshot cameraItem,
+            Matrix4x4 view,
+            ViewportRect viewport,
+            double cameraNearClip,
+            int layerCount,
+            long? sharedBatchId)
+        {
+            if (!_meshes.TryGetValue("builtin/quad_1x1", out MeshData quadMesh))
+                throw new Exception("[X] Builtin celestial body quad mesh not found.");
+
+            MeshSurfaceData quadSurface = quadMesh.Surfaces[0];
+
+            float fovRadians = (float)(cameraItem.Settings.FovOrSize * Math.PI / 180.0);
+            float nearClip = MathF.Max(0.0001f, (float)cameraNearClip);
+            Matrix4x4 projection = CreatePerspectiveReverseZInfinite(fovRadians, viewport.Aspect, nearClip);
+
+            bool useReverseZ = cameraItem.Settings.ProjectionType != 1;
+            long batchId = sharedBatchId ?? ++_sceneBatchCounter;
+            uint program = ResolveShaderProgramOrFallback(_celestialBodyShaderKey);
+
+            foreach (CelestialBodyData body in _screenCelestialBodies)
+            {
+                Vector3 direction = ResolveCelestialBodyDirection(sceneId, body);
+
+                _renderQueue.Add(new RenderCommand
+                {
+                    Vertices = quadSurface.Vertices,
+                    PrimitiveType = quadSurface.PrimitiveType,
+                    Program = program,
+                    UseTexture = false,
+                    TextureId = 0,
+                    VertexStrideFloats = quadSurface.VertexStrideFloats,
+                    CameraPosition = Vector3.Zero,
+                    ClusterNear = nearClip,
+                    ClusterFar = (float)_depthLayerFars[_depthLayerFars.Length - 1],
+                    RenderSpace = RenderSpace.Camera,
+                    Model = Matrix4x4.Identity,
+                    View = view,
+                    Projection = projection,
+                    QueueType = RenderQueueType.Opaque,
+                    SortDepth = 0f,
+                    SubmissionIndex = _submissionCounter++,
+                    Pass = RenderPass.Scene,
+                    BatchId = batchId,
+                    BatchSubmissionOrder = cameraItem.SubmissionOrder,
+                    ViewportX = viewport.X,
+                    ViewportY = viewport.Y,
+                    ViewportWidth = viewport.Width,
+                    ViewportHeight = viewport.Height,
+                    UseReverseZ = useReverseZ,
+                    Material = null,
+                    Skybox = null,
+                    CelestialBody = new CelestialBodyCommandData
+                    {
+                        Body = body,
+                        Direction = direction
+                    },
+                    ForceWhiteVertexColor = true,
+                    IsSkybox = true,
+                    SceneId = sceneId,
+                    ObjectId = "",
+                    CameraWorldPosition = cameraItem.World.Position,
+                    CullMode = RenderCullMode.Front,
+                    MeshId = quadMesh.Id,
+                    MeshSurfaceId = quadSurface.Id,
+                    CameraObjectId = cameraItem.ObjectId,
+                    MeshVertexColorsAreWhite = quadSurface.VertexColorsAreWhite,
+                    DepthLayerIndex = -1,
+                    DepthLayerCount = layerCount
+                });
             }
         }
 
@@ -11427,12 +11998,22 @@ void main()
             _gl.Disable(GLEnum.DepthTest);
             _gl.DepthMask(false);
 
-            ApplySkybox(cmd.Skybox);
+            if (cmd.CelestialBody != null)
+            {
+                _gl.BlendFunc(GLEnum.One, GLEnum.One);
+                ApplyCelestialBody(cmd.CelestialBody);
+            }
+            else
+            {
+                _gl.BlendFunc(GLEnum.SrcAlpha, GLEnum.OneMinusSrcAlpha);
+                ApplySkybox(cmd.Skybox);
+            }
 
             SubmitDrawArrays(cmd.PrimitiveType, 0, (uint)(cmd.Vertices.Length / cmd.VertexStrideFloats));
 
             _gl.DepthMask(true);
             _gl.Enable(GLEnum.DepthTest);
+            _gl.BlendFunc(GLEnum.SrcAlpha, GLEnum.OneMinusSrcAlpha);
 
             _gl.ActiveTexture(TextureUnit.Texture0);
             _gl.BindTexture(TextureTarget.Texture2D, 0);
@@ -11932,6 +12513,18 @@ void main()
                 _postProcessBlurProgram = 0;
             }
 
+            if (_postProcessBloomDownsampleProgram != 0)
+            {
+                _gl.DeleteProgram(_postProcessBloomDownsampleProgram);
+                _postProcessBloomDownsampleProgram = 0;
+            }
+
+            if (_postProcessBloomUpsampleProgram != 0)
+            {
+                _gl.DeleteProgram(_postProcessBloomUpsampleProgram);
+                _postProcessBloomUpsampleProgram = 0;
+            }
+
             if (_postProcessCompositeProgram != 0)
             {
                 _gl.DeleteProgram(_postProcessCompositeProgram);
@@ -11941,9 +12534,16 @@ void main()
             _postProcessExtractSourceLoc = -1;
             _postProcessExtractThresholdLoc = -1;
             _postProcessExtractSoftKneeLoc = -1;
+            _postProcessExtractTexelSizeLoc = -1;
+            _postProcessExtractSampleScaleLoc = -1;
             _postProcessBlurSourceLoc = -1;
             _postProcessBlurTexelSizeLoc = -1;
             _postProcessBlurHorizontalLoc = -1;
+            _postProcessBloomDownsampleSourceLoc = -1;
+            _postProcessBloomDownsampleTexelSizeLoc = -1;
+            _postProcessBloomUpsampleCurrentLoc = -1;
+            _postProcessBloomUpsampleLowerLoc = -1;
+            _postProcessBloomUpsampleLowerTexelSizeLoc = -1;
             _postProcessCompositeSceneLoc = -1;
             _postProcessCompositeBloomLoc = -1;
             _postProcessCompositeBloomEnabledLoc = -1;

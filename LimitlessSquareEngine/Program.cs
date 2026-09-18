@@ -1436,6 +1436,7 @@ namespace LimitlessSquareEngine
                 {
                     Scene.RemoveScene(sceneId);
                     _graphics?.ClearScreenSkybox();
+                    _graphics?.ClearScreenCelestialBodies();
                     Scene.LoadScene(sceneId);
                     Scene.RebuildCameraQueue(sceneId);
                 }),
