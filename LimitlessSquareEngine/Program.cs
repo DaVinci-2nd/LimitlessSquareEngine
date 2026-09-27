@@ -1891,6 +1891,7 @@ namespace LimitlessSquareEngine
             UserData.RegisterType<Terrain>();
             UserData.RegisterType<TerrainProfile>();
             UserData.RegisterType<TerrainStreamer>();
+            UserData.RegisterType<Water>();
             // 初始化窗口参数
             var options = WindowOptions.Default;
             options.PreferredDepthBufferBits = 32;
@@ -2032,6 +2033,13 @@ namespace LimitlessSquareEngine
                         instance.LuaScript.Globals["terrain_remove"] =
                             (Action<string, string>)((sceneId, objectId) => TerrainManager.Remove(sceneId, objectId));
                         RecordLuaApi("terrain_remove", "terrain_remove(sceneId, objectId)", "移除地形节点", "Terrain");
+                        instance.LuaScript.Globals["water_get"] =
+                            (Func<string, string, Water?>)(
+                                (sceneId, objectId) => WaterManager.GetOrCreate(sceneId, objectId));
+                        RecordLuaApi("water_get", "water_get(sceneId, objectId) -> water", "获取或创建水体节点", "Water");
+                        instance.LuaScript.Globals["water_remove"] =
+                            (Action<string, string>)((sceneId, objectId) => WaterManager.Remove(sceneId, objectId));
+                        RecordLuaApi("water_remove", "water_remove(sceneId, objectId)", "移除水体节点", "Water");
                         // 注入后台任务函数
                         instance.LuaScript.Globals["submit_task"] = submitTaskFunc;
                         RecordLuaApi("submit_task", "submit_task(luaCode) -> taskId", "提交后台任务", "Task");
@@ -2866,6 +2874,7 @@ namespace LimitlessSquareEngine
                 _graphics?.TickAvatars();
                 // 地形分帧流式生成
                 TerrainManager.TickAll();
+                WaterManager.TickAll();
             }
             // 提交场景相机渲染
             _graphics?.QueueLoadedSceneRender();

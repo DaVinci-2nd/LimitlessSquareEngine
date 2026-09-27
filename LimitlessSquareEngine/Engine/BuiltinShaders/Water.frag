@@ -1,0 +1,879 @@
+#version 430 core
+
+const float PI = 3.1415926535897932384626433832795;
+
+const int LIGHT_KIND_POINT = 0;
+const int LIGHT_KIND_BOX = 1;
+const int LIGHT_KIND_SPOT = 2;
+const int LIGHT_KIND_DIRECTIONAL = 3;
+const int LIGHT_KIND_AREA = 4;
+const int LIGHT_KIND_LINE = 5;
+const int LIGHT_KIND_RAY = 6;
+
+uniform vec4 uColor;
+uniform float uAmbientStrength;
+uniform float uSpecularIntensity;
+uniform float uSpecularRange;
+uniform vec3 uSpecularColor;
+uniform float uSmoothness;
+uniform int uReceiveShadow;
+uniform int uReceiveReflection;
+uniform float uWaterFresnelPower;
+uniform float uWaterFresnelStrength;
+
+uniform int uFogEnabled;
+uniform int uFogMode;
+uniform vec4 uFogColor;
+uniform float uFogStart;
+uniform float uFogEnd;
+uniform int uFogEdgeTransitionToSkybox;
+
+uniform sampler2D uFogCylindricalTexture;
+uniform samplerCube uFogSkyboxCube;
+uniform mat4 uFogInvViewRotation;
+
+uniform vec3 uCameraPosition;
+uniform vec3 uAmbientColor;
+uniform float uAmbientIntensity;
+
+uniform int uSphereAmbientCount;
+uniform vec4 uSphereAmbientData[24];
+
+uniform vec2 uViewportOrigin;
+uniform vec2 uViewportSize;
+
+uniform ivec3 uClusterGridSize;
+uniform float uClusterNear;
+uniform float uClusterFar;
+
+uniform int uLightCount;
+
+uniform sampler2DShadow uShadowAtlasTexture;
+
+uniform samplerCube uReflectionSkyboxCube;
+uniform int uReflectionEnabled;
+uniform float uReflectionIntensity;
+
+uniform sampler2D uCloudShadowMap;
+uniform sampler2D uCloudShadowNearMap;
+uniform sampler2D uCloudShadowNearMap1;
+uniform sampler2D uCloudShadowNearMap2;
+uniform vec3 uCloudShadowPlanetCenterRel;
+uniform vec4 uCloudShadowParamsA;
+uniform vec4 uCloudShadowNearParamsB;
+uniform vec4 uCloudShadowNearParamsB1;
+uniform vec4 uCloudShadowNearParamsB2;
+uniform vec3 uCloudShadowNearCenterRel;
+uniform vec3 uCloudShadowNearAxisX;
+uniform vec3 uCloudShadowNearAxisY;
+
+in vec4 vColor;
+in vec2 vTexCoord;
+in vec3 vWorldPos;
+in vec3 vViewPos;
+in vec3 vWorldNormal;
+in vec3 vWorldTangent;
+in vec3 vWorldBitangent;
+flat in int vRenderSpace;
+
+out vec4 FragColor;
+
+struct GPULight
+{
+    vec4 Meta0;
+    vec4 ColorRange;
+    vec4 PositionInner;
+    vec4 DirectionOuter;
+    vec4 BoxSizeAreaWidth;
+    vec4 AreaRightAreaHeight;
+    vec4 AreaUpLineLength;
+    vec4 LineDirectionReserved;
+    vec4 ShadowAtlasRect;
+    mat4 ShadowMatrix;
+};
+
+layout(std430, binding = 1) readonly buffer LightBuffer
+{
+    GPULight uLights[];
+};
+
+struct GPUDirectionalShadowCascade
+{
+    vec4 AtlasRect;
+    mat4 ShadowMatrix;
+    vec4 SplitRange;
+};
+
+layout(std430, binding = 4) readonly buffer DirectionalShadowCascadeBuffer
+{
+    GPUDirectionalShadowCascade uDirectionalShadowCascades[];
+};
+
+layout(std430, binding = 2) readonly buffer ClusterRangeBuffer
+{
+    uvec2 uClusterRanges[];
+};
+
+layout(std430, binding = 3) readonly buffer ClusterIndexBuffer
+{
+    uint uClusterLightIndices[];
+};
+
+struct LightRecord
+{
+    int Kind;
+    float Intensity;
+    float CastShadow;
+    float AttenuationCurve;
+
+    vec3 Color;
+    float Range;
+
+    vec3 Position;
+    float InnerAngle;
+
+    vec3 Direction;
+    float OuterAngle;
+
+    vec3 BoxSize;
+    float AreaWidth;
+
+    vec3 AreaRight;
+    float AreaHeight;
+
+    vec3 AreaUp;
+    float LineLength;
+
+    vec3 LineDirection;
+    float Reserved0;
+
+    int ShadowCascadeStart;
+    int ShadowCascadeCount;
+
+    vec4 ShadowAtlasRect;
+    mat4 ShadowMatrix;
+};
+
+float Saturate(float x)
+{
+    return clamp(x, 0.0, 1.0);
+}
+
+vec3 SafeNormalize(vec3 v)
+{
+    float lenSq = dot(v, v);
+    if (lenSq <= 0.0000001)
+        return vec3(0.0, 0.0, 1.0);
+    return v * inversesqrt(lenSq);
+}
+
+vec2 DirectionToCylindricalUv(vec3 worldDir)
+{
+    vec3 d = SafeNormalize(worldDir);
+    float u = atan(d.z, d.x) / (2.0 * PI) + 0.5;
+    float v = clamp(d.y * 0.5 + 0.5, 0.0, 1.0);
+    return vec2(u, v);
+}
+
+vec4 SampleFogSkyboxColor(vec3 viewDir)
+{
+    vec3 worldDir = SafeNormalize((uFogInvViewRotation * vec4(viewDir, 0.0)).xyz);
+    vec3 skyRgb = texture(uFogSkyboxCube, worldDir).rgb;
+    return vec4(skyRgb, 1.0);
+}
+
+vec4 EvaluateFogColorByMode(vec3 viewPos)
+{
+    vec3 viewDir = SafeNormalize(viewPos);
+
+    if (uFogMode == 1)
+    {
+        vec3 worldDir = SafeNormalize((uFogInvViewRotation * vec4(viewDir, 0.0)).xyz);
+        vec2 fogUv = DirectionToCylindricalUv(worldDir);
+        return texture(uFogCylindricalTexture, fogUv);
+    }
+    else if (uFogMode == 2)
+    {
+        return SampleFogSkyboxColor(viewDir);
+    }
+
+    return uFogColor;
+}
+
+vec4 EvaluateFogBackgroundColor(vec3 viewPos)
+{
+    vec3 viewDir = SafeNormalize(viewPos);
+    return SampleFogSkyboxColor(viewDir);
+}
+
+vec4 ApplyMaterialFogExact(vec4 srcColor, vec3 viewPos)
+{
+    if (uFogEnabled != 1)
+        return srcColor;
+
+    float distanceToCamera = length(viewPos);
+
+    float fogFactor = clamp(
+        (distanceToCamera - uFogStart) / max(uFogEnd - uFogStart, 0.0001),
+        0.0,
+        1.0);
+
+    vec4 fogColor = EvaluateFogColorByMode(viewPos);
+    vec4 backgroundColor = EvaluateFogBackgroundColor(viewPos);
+
+    if (uFogMode != 2 && uFogEdgeTransitionToSkybox != 0)
+    {
+        float fogRange = max(uFogEnd - uFogStart, 0.0001);
+        float skyboxBlendStart = uFogEnd - fogRange * 0.25;
+
+        float skyboxBlendFactor = clamp(
+            (distanceToCamera - skyboxBlendStart) / max(uFogEnd - skyboxBlendStart, 0.0001),
+            0.0,
+            1.0);
+
+        skyboxBlendFactor = smoothstep(0.0, 1.0, skyboxBlendFactor);
+        fogColor = mix(fogColor, backgroundColor, skyboxBlendFactor);
+    }
+
+    vec3 fogColorPM = fogColor.rgb * srcColor.a;
+    vec3 foggedForeground = mix(srcColor.rgb, fogColorPM, fogFactor);
+
+    return vec4(foggedForeground, srcColor.a);
+}
+
+LightRecord ReadLight(uint lightIndex)
+{
+    GPULight src = uLights[lightIndex];
+
+    LightRecord light;
+    light.Kind = int(src.Meta0.x + 0.5);
+    light.Intensity = src.Meta0.y;
+    light.CastShadow = src.Meta0.z;
+    light.AttenuationCurve = src.Meta0.w;
+
+    light.Color = src.ColorRange.xyz;
+    light.Range = src.ColorRange.w;
+
+    light.Position = src.PositionInner.xyz;
+    light.InnerAngle = src.PositionInner.w;
+
+    light.Direction = SafeNormalize(src.DirectionOuter.xyz);
+    light.OuterAngle = src.DirectionOuter.w;
+
+    light.BoxSize = src.BoxSizeAreaWidth.xyz;
+    light.AreaWidth = src.BoxSizeAreaWidth.w;
+    light.ShadowCascadeStart = (light.Kind == LIGHT_KIND_DIRECTIONAL) ? int(src.BoxSizeAreaWidth.x + 0.5) : 0;
+    light.ShadowCascadeCount = (light.Kind == LIGHT_KIND_DIRECTIONAL) ? int(src.BoxSizeAreaWidth.y + 0.5) : 0;
+
+    light.AreaRight = SafeNormalize(src.AreaRightAreaHeight.xyz);
+    light.AreaHeight = src.AreaRightAreaHeight.w;
+
+    light.AreaUp = SafeNormalize(src.AreaUpLineLength.xyz);
+    light.LineLength = src.AreaUpLineLength.w;
+
+    light.LineDirection = SafeNormalize(src.LineDirectionReserved.xyz);
+    light.Reserved0 = src.LineDirectionReserved.w;
+
+    light.ShadowAtlasRect = src.ShadowAtlasRect;
+    light.ShadowMatrix = src.ShadowMatrix;
+
+    return light;
+}
+
+float EvaluateCurveAttenuation(float distance01, float curve01)
+{
+    float x = Saturate(distance01);
+    float c = Saturate(curve01);
+
+    if (abs(c - 0.5) <= 0.000001)
+        return 1.0 - x;
+
+    if (c < 0.5)
+    {
+        float k = c / 0.5;
+        float powerValue = 0.25 + (k * 0.75);
+        return 1.0 - pow(x, powerValue);
+    }
+    else
+    {
+        float k = (c - 0.5) / 0.5;
+        float powerValue = 1.0 + (k * 3.0);
+        return 1.0 - pow(x, powerValue);
+    }
+}
+
+float ComputeDistanceAttenuation(float distanceValue, float rangeValue, float curveValue)
+{
+    if (rangeValue <= 0.000001)
+        return 0.0;
+
+    float t = distanceValue / rangeValue;
+    return EvaluateCurveAttenuation(t, curveValue);
+}
+
+mat3 BuildDirectionBasis(vec3 forwardDir)
+{
+    vec3 forwardAxis = SafeNormalize(forwardDir);
+    vec3 referenceUp = abs(forwardAxis.y) > 0.999 ? vec3(1.0, 0.0, 0.0) : vec3(0.0, 1.0, 0.0);
+    vec3 rightAxis = SafeNormalize(cross(referenceUp, forwardAxis));
+    vec3 upAxis = SafeNormalize(cross(forwardAxis, rightAxis));
+    return mat3(rightAxis, upAxis, forwardAxis);
+}
+
+int GetClusterIndex()
+{
+    vec2 localFrag = gl_FragCoord.xy - uViewportOrigin;
+    vec2 tileSize = uViewportSize / vec2(uClusterGridSize.xy);
+
+    int clusterX = clamp(int(floor(localFrag.x / tileSize.x)), 0, uClusterGridSize.x - 1);
+    int clusterY = clamp(int(floor(localFrag.y / tileSize.y)), 0, uClusterGridSize.y - 1);
+
+    float nearValue = max(uClusterNear, 0.0001);
+    float farValue = max(uClusterFar, nearValue + 0.0001);
+    float viewDepth = clamp(-vViewPos.z, nearValue, farValue);
+
+    float linearDepth = (viewDepth - nearValue) / (farValue - nearValue);
+    int clusterZ = clamp(int(floor(linearDepth * float(uClusterGridSize.z))), 0, uClusterGridSize.z - 1);
+
+    return
+        clusterX +
+        clusterY * uClusterGridSize.x +
+        clusterZ * uClusterGridSize.x * uClusterGridSize.y;
+}
+
+float SampleDirectionalShadowCascadeAtIndex(int cascadeBufferIndex, vec3 normalDir, vec3 lightDir)
+{
+    GPUDirectionalShadowCascade cascade = uDirectionalShadowCascades[cascadeBufferIndex];
+
+    if (cascade.AtlasRect.z <= 0.0 || cascade.AtlasRect.w <= 0.0)
+        return 1.0;
+
+    vec4 clipPos = cascade.ShadowMatrix * vec4(vWorldPos, 1.0);
+    if (abs(clipPos.w) <= 0.000001)
+        return 1.0;
+
+    vec3 ndc = clipPos.xyz / clipPos.w;
+    vec2 localUv = ndc.xy * 0.5 + 0.5;
+    float currentDepth = ndc.z * 0.5 + 0.5;
+
+    if (localUv.x < 0.0 || localUv.x > 1.0 || localUv.y < 0.0 || localUv.y > 1.0)
+        return 1.0;
+
+    if (currentDepth < 0.0 || currentDepth > 1.0)
+        return 1.0;
+
+    vec2 atlasUvMin = cascade.AtlasRect.xy;
+    vec2 atlasUvSize = cascade.AtlasRect.zw;
+    vec2 atlasUv = atlasUvMin + localUv * atlasUvSize;
+
+    vec2 shadowTexSize = vec2(textureSize(uShadowAtlasTexture, 0));
+    vec2 texelSize = 1.0 / shadowTexSize;
+
+    vec2 tileMin = atlasUvMin + texelSize * 0.5;
+    vec2 tileMax = atlasUvMin + atlasUvSize - texelSize * 0.5;
+
+    float ndl = Saturate(dot(normalDir, lightDir));
+    float bias = mix(0.002, 0.0001, ndl);
+
+    vec2 offsets[9] = vec2[](
+        vec2(-1.0, -1.0),
+        vec2( 0.0, -1.0),
+        vec2( 1.0, -1.0),
+        vec2(-1.0,  0.0),
+        vec2( 0.0,  0.0),
+        vec2( 1.0,  0.0),
+        vec2(-1.0,  1.0),
+        vec2( 0.0,  1.0),
+        vec2( 1.0,  1.0)
+    );
+
+    float weights[9] = float[](
+        1.0, 2.0, 1.0,
+        2.0, 4.0, 2.0,
+        1.0, 2.0, 1.0
+    );
+
+    const float weightSum = 16.0;
+    float shadow = 0.0;
+
+    for (int i = 0; i < 9; i++)
+    {
+        vec2 sampleUv = clamp(atlasUv + offsets[i] * texelSize, tileMin, tileMax);
+        float lit = texture(uShadowAtlasTexture, vec3(sampleUv, currentDepth - bias));
+        shadow += lit * weights[i];
+    }
+
+    return shadow / weightSum;
+}
+
+float SampleDirectionalShadow(LightRecord light, vec3 normalDir, vec3 lightDir)
+{
+    if (light.ShadowCascadeCount <= 0)
+        return 1.0;
+
+    float viewDepth = max(-vViewPos.z, 0.0);
+    int selectedCascadeOffset = -1;
+
+    for (int i = 0; i < light.ShadowCascadeCount; i++)
+    {
+        int cascadeBufferIndex = light.ShadowCascadeStart + i;
+        GPUDirectionalShadowCascade cascade = uDirectionalShadowCascades[cascadeBufferIndex];
+
+        if (viewDepth <= cascade.SplitRange.y)
+        {
+            selectedCascadeOffset = i;
+            break;
+        }
+    }
+
+    if (selectedCascadeOffset < 0)
+        return 1.0;
+
+    int currentCascadeIndex = light.ShadowCascadeStart + selectedCascadeOffset;
+    GPUDirectionalShadowCascade currentCascade = uDirectionalShadowCascades[currentCascadeIndex];
+
+    float shadowCurrent = SampleDirectionalShadowCascadeAtIndex(currentCascadeIndex, normalDir, lightDir);
+
+    int lastCascadeOffset = light.ShadowCascadeCount - 1;
+    int lastCascadeIndex = light.ShadowCascadeStart + lastCascadeOffset;
+
+    if (selectedCascadeOffset == lastCascadeOffset)
+    {
+        float fadeWidth = max((currentCascade.SplitRange.y - currentCascade.SplitRange.x) * 0.15, 0.05);
+        float fadeT = 1.0 - smoothstep(currentCascade.SplitRange.y - fadeWidth, currentCascade.SplitRange.y, viewDepth);
+        return mix(1.0, shadowCurrent, fadeT);
+    }
+
+    float blendWidth = max((currentCascade.SplitRange.y - currentCascade.SplitRange.x) * 0.15, 0.05);
+
+    if (viewDepth < currentCascade.SplitRange.y - blendWidth)
+        return shadowCurrent;
+
+    int nextCascadeIndex = light.ShadowCascadeStart + selectedCascadeOffset + 1;
+    float shadowNext = SampleDirectionalShadowCascadeAtIndex(nextCascadeIndex, normalDir, lightDir);
+    float blendT = smoothstep(currentCascade.SplitRange.y - blendWidth, currentCascade.SplitRange.y, viewDepth);
+
+    return mix(shadowCurrent, shadowNext, blendT);
+}
+
+float SampleShadow(LightRecord light, vec3 normalDir, vec3 lightDir)
+{
+    if (uReceiveShadow != 1)
+        return 1.0;
+
+    if (light.CastShadow < 0.5)
+        return 1.0;
+
+    if (light.Kind != LIGHT_KIND_DIRECTIONAL)
+        return 1.0;
+
+    return SampleDirectionalShadow(light, normalDir, lightDir);
+}
+
+float SampleCloudShadow()
+{
+    if (uCloudShadowParamsA.x <= 0.5)
+        return 1.0;
+
+    if (uReceiveShadow != 1)
+        return 1.0;
+
+    vec3 pFlip = vec3(vWorldPos.x, vWorldPos.y, -vWorldPos.z);
+    vec3 p = pFlip - uCloudShadowPlanetCenterRel;
+
+    float r = max(length(p), 0.0001);
+    vec3 d = p / r;
+    vec3 dAbs = abs(d);
+
+    float fu;
+    float fv;
+    float row;
+    float col;
+
+    if (dAbs.x >= dAbs.y && dAbs.x >= dAbs.z)
+    {
+        if (d.x >= 0.0)
+        {
+            col = 2.0; row = 1.0;
+            fu = (-d.z / dAbs.x) * 0.5 + 0.5;
+            fv = (-d.y / dAbs.x) * 0.5 + 0.5;
+        }
+        else
+        {
+            col = 0.0; row = 1.0;
+            fu = (d.z / dAbs.x) * 0.5 + 0.5;
+            fv = (-d.y / dAbs.x) * 0.5 + 0.5;
+        }
+    }
+    else if (dAbs.y >= dAbs.x && dAbs.y >= dAbs.z)
+    {
+        if (d.y >= 0.0)
+        {
+            row = 2.0; col = 1.0;
+            fu = (d.x / dAbs.y) * 0.5 + 0.5;
+            fv = (d.z / dAbs.y) * 0.5 + 0.5;
+        }
+        else
+        {
+            row = 0.0; col = 1.0;
+            fu = (d.x / dAbs.y) * 0.5 + 0.5;
+            fv = (-d.z / dAbs.y) * 0.5 + 0.5;
+        }
+    }
+    else
+    {
+        if (d.z >= 0.0)
+        {
+            col = 1.0; row = 1.0;
+            fu = (d.x / dAbs.z) * 0.5 + 0.5;
+            fv = (-d.y / dAbs.z) * 0.5 + 0.5;
+        }
+        else
+        {
+            col = 3.0; row = 1.0;
+            fu = (-d.x / dAbs.z) * 0.5 + 0.5;
+            fv = (-d.y / dAbs.z) * 0.5 + 0.5;
+        }
+    }
+
+    vec2 gUv = vec2((col + fu) * 0.25, (row + fv) * (1.0 / 3.0));
+    float alpha = texture(uCloudShadowMap, gUv).r;
+
+    if (uCloudShadowNearParamsB2.x > 0.5)
+    {
+        float invNearW2 = 1.0 / max(uCloudShadowNearParamsB2.w * 2.0, 0.0001);
+        vec2 nearUv2 = (vec2(dot(p, uCloudShadowNearAxisX), dot(p, uCloudShadowNearAxisY)) - vec2(dot(uCloudShadowNearCenterRel, uCloudShadowNearAxisX), dot(uCloudShadowNearCenterRel, uCloudShadowNearAxisY))) * invNearW2 + 0.5;
+
+        vec2 nearClamped2 = clamp(nearUv2, 0.0, 1.0);
+        float nearAlpha2 = texture(uCloudShadowNearMap2, nearClamped2).r;
+        float nearDisc2 = length(vWorldPos - uCameraPosition) / max(uCloudShadowNearParamsB2.w, 0.0001);
+        float nearBlend2 = smoothstep(uCloudShadowNearParamsB2.y, uCloudShadowNearParamsB2.z, nearDisc2);
+        alpha = mix(nearAlpha2, alpha, nearBlend2);
+    }
+
+    if (uCloudShadowNearParamsB1.x > 0.5)
+    {
+        float invNearW1 = 1.0 / max(uCloudShadowNearParamsB1.w * 2.0, 0.0001);
+        vec2 nearUv1 = (vec2(dot(p, uCloudShadowNearAxisX), dot(p, uCloudShadowNearAxisY)) - vec2(dot(uCloudShadowNearCenterRel, uCloudShadowNearAxisX), dot(uCloudShadowNearCenterRel, uCloudShadowNearAxisY))) * invNearW1 + 0.5;
+
+        vec2 nearClamped1 = clamp(nearUv1, 0.0, 1.0);
+        float nearAlpha1 = texture(uCloudShadowNearMap1, nearClamped1).r;
+        float nearDisc1 = length(vWorldPos - uCameraPosition) / max(uCloudShadowNearParamsB1.w, 0.0001);
+        float nearBlend1 = smoothstep(uCloudShadowNearParamsB1.y, uCloudShadowNearParamsB1.z, nearDisc1);
+        alpha = mix(nearAlpha1, alpha, nearBlend1);
+    }
+
+    if (uCloudShadowNearParamsB.x > 0.5)
+    {
+        float invNearW = 1.0 / max(uCloudShadowNearParamsB.w * 2.0, 0.0001);
+        vec2 nearUv = (vec2(dot(p, uCloudShadowNearAxisX), dot(p, uCloudShadowNearAxisY)) - vec2(dot(uCloudShadowNearCenterRel, uCloudShadowNearAxisX), dot(uCloudShadowNearCenterRel, uCloudShadowNearAxisY))) * invNearW + 0.5;
+
+        vec2 nearClamped = clamp(nearUv, 0.0, 1.0);
+        float nearAlpha = texture(uCloudShadowNearMap, nearClamped).r;
+        float nearDisc = length(vWorldPos - uCameraPosition) / max(uCloudShadowNearParamsB.w, 0.0001);
+        float nearBlend = smoothstep(uCloudShadowNearParamsB.y, uCloudShadowNearParamsB.z, nearDisc);
+        alpha = mix(nearAlpha, alpha, nearBlend);
+    }
+
+    return 1.0 - alpha;
+}
+
+void EvaluateTwilightBlends(float sunAngle, out float dayBlend, out float twilightBlend, out float darkTwilightBlend, out float nightBlend)
+{
+    float t0 = smoothstep(1.0472, 1.3090, sunAngle);
+    float t1 = smoothstep(1.5708, 1.7104, sunAngle);
+    float t2 = smoothstep(1.8151, 1.9897, sunAngle);
+
+    dayBlend = 1.0 - t0;
+    twilightBlend = t0 * (1.0 - t1);
+    darkTwilightBlend = t1 * (1.0 - t2);
+    nightBlend = t2;
+}
+
+vec3 EvaluateSphereAmbient(vec3 worldPos)
+{
+    vec3 accum = vec3(0.0);
+
+    for (int i = 0; i < uSphereAmbientCount; i++)
+    {
+        int base = i * 6;
+
+        vec4 centerInner = uSphereAmbientData[base + 0];
+        vec4 axisOuter = uSphereAmbientData[base + 1];
+        vec4 dayIntensity = uSphereAmbientData[base + 2];
+        vec4 twilight = uSphereAmbientData[base + 3];
+        vec4 darkTwilight = uSphereAmbientData[base + 4];
+        vec4 night = uSphereAmbientData[base + 5];
+
+        vec3 offset = worldPos - centerInner.xyz;
+        float dist = length(offset);
+        float radial = 1.0 - smoothstep(centerInner.w, axisOuter.w, dist);
+
+        if (radial <= 0.000001)
+            continue;
+
+        vec3 dir = offset / max(dist, 0.000001);
+        float sunAngle = acos(clamp(dot(dir, axisOuter.xyz), -1.0, 1.0));
+
+        float dayBlend;
+        float twilightBlend;
+        float darkTwilightBlend;
+        float nightBlend;
+        EvaluateTwilightBlends(sunAngle, dayBlend, twilightBlend, darkTwilightBlend, nightBlend);
+
+        vec3 gradient =
+            dayIntensity.rgb * dayBlend +
+            twilight.rgb * twilightBlend +
+            darkTwilight.rgb * darkTwilightBlend +
+            night.rgb * nightBlend;
+
+        accum += gradient * (dayIntensity.w * radial);
+    }
+
+    return accum;
+}
+
+void BuildPointLight(LightRecord light, out vec3 lightDir, out float attenuation)
+{
+    vec3 toLight = light.Position - vWorldPos;
+    float distanceValue = length(toLight);
+
+    lightDir = (distanceValue > 0.000001) ? (toLight / distanceValue) : vec3(0.0, 0.0, 1.0);
+    attenuation = ComputeDistanceAttenuation(distanceValue, light.Range, light.AttenuationCurve);
+}
+
+void BuildBoxLight(LightRecord light, out vec3 lightDir, out float attenuation)
+{
+    mat3 basis = BuildDirectionBasis(light.Direction);
+    vec3 localPos = transpose(basis) * (vWorldPos - light.Position);
+
+    vec3 halfSize = max(light.BoxSize * 0.5, vec3(0.000001));
+    vec3 clampedLocal = clamp(localPos, -halfSize, halfSize);
+    vec3 closestWorld = light.Position + basis * clampedLocal;
+
+    vec3 toLight = closestWorld - vWorldPos;
+    float distanceValue = length(toLight);
+
+    lightDir = (distanceValue > 0.000001) ? (toLight / distanceValue) : SafeNormalize(light.Position - vWorldPos);
+    attenuation = ComputeDistanceAttenuation(distanceValue, light.Range, light.AttenuationCurve);
+}
+
+void BuildSpotLight(LightRecord light, out vec3 lightDir, out float attenuation)
+{
+    vec3 toLight = light.Position - vWorldPos;
+    float distanceValue = length(toLight);
+
+    lightDir = (distanceValue > 0.000001) ? (toLight / distanceValue) : vec3(0.0, 0.0, 1.0);
+
+    float distanceAtt = ComputeDistanceAttenuation(distanceValue, light.Range, light.AttenuationCurve);
+
+    vec3 spotForward = SafeNormalize(-light.Direction);
+    float angleCos = dot(spotForward, lightDir);
+
+    float innerCos = cos(radians(light.InnerAngle));
+    float outerCos = cos(radians(light.OuterAngle));
+
+    float coneAtt = 0.0;
+    if (innerCos != outerCos)
+        coneAtt = clamp((angleCos - outerCos) / (innerCos - outerCos), 0.0, 1.0);
+    else
+        coneAtt = step(outerCos, angleCos);
+
+    attenuation = distanceAtt * coneAtt;
+}
+
+void BuildDirectionalLight(LightRecord light, out vec3 lightDir, out float attenuation)
+{
+    lightDir = SafeNormalize(-light.Direction);
+    attenuation = 1.0;
+}
+
+void BuildAreaLight(LightRecord light, out vec3 lightDir, out float attenuation)
+{
+    vec3 rightAxis = SafeNormalize(light.AreaRight);
+    vec3 upAxis = SafeNormalize(light.AreaUp);
+    vec3 centerToPixel = vWorldPos - light.Position;
+
+    float halfWidth = max(light.AreaWidth * 0.5, 0.000001);
+    float halfHeight = max(light.AreaHeight * 0.5, 0.000001);
+
+    float localX = clamp(dot(centerToPixel, rightAxis), -halfWidth, halfWidth);
+    float localY = clamp(dot(centerToPixel, upAxis), -halfHeight, halfHeight);
+
+    vec3 closestPoint = light.Position + rightAxis * localX + upAxis * localY;
+
+    vec3 toLight = closestPoint - vWorldPos;
+    float distanceValue = length(toLight);
+
+    lightDir = (distanceValue > 0.000001) ? (toLight / distanceValue) : SafeNormalize(light.Position - vWorldPos);
+
+    vec3 emitNormal = SafeNormalize(cross(rightAxis, upAxis));
+    float facing = Saturate(dot(emitNormal, -lightDir));
+
+    attenuation = ComputeDistanceAttenuation(distanceValue, light.Range, light.AttenuationCurve) * facing;
+}
+
+void BuildLineLight(LightRecord light, out vec3 lightDir, out float attenuation)
+{
+    vec3 lineDir = SafeNormalize(light.LineDirection);
+    float halfLength = max(light.LineLength * 0.5, 0.000001);
+
+    vec3 a = light.Position - lineDir * halfLength;
+    vec3 b = light.Position + lineDir * halfLength;
+
+    vec3 ab = b - a;
+    float abLenSq = max(dot(ab, ab), 0.000001);
+    float t = clamp(dot(vWorldPos - a, ab) / abLenSq, 0.0, 1.0);
+    vec3 closestPoint = a + ab * t;
+
+    vec3 toLight = closestPoint - vWorldPos;
+    float distanceValue = length(toLight);
+
+    lightDir = (distanceValue > 0.000001) ? (toLight / distanceValue) : SafeNormalize(light.Position - vWorldPos);
+    attenuation = ComputeDistanceAttenuation(distanceValue, light.Range, light.AttenuationCurve);
+}
+
+void BuildRayLight(LightRecord light, out vec3 lightDir, out float attenuation)
+{
+    vec3 toLight = light.Position - vWorldPos;
+    float distanceValue = length(toLight);
+
+    lightDir = (distanceValue > 0.000001) ? (toLight / distanceValue) : vec3(0.0, 0.0, 1.0);
+    attenuation = 1.0;
+}
+
+void BuildLight(LightRecord light, out vec3 lightDir, out float attenuation)
+{
+    if (light.Kind == LIGHT_KIND_POINT)
+    {
+        BuildPointLight(light, lightDir, attenuation);
+    }
+    else if (light.Kind == LIGHT_KIND_BOX)
+    {
+        BuildBoxLight(light, lightDir, attenuation);
+    }
+    else if (light.Kind == LIGHT_KIND_SPOT)
+    {
+        BuildSpotLight(light, lightDir, attenuation);
+    }
+    else if (light.Kind == LIGHT_KIND_DIRECTIONAL)
+    {
+        BuildDirectionalLight(light, lightDir, attenuation);
+    }
+    else if (light.Kind == LIGHT_KIND_AREA)
+    {
+        BuildAreaLight(light, lightDir, attenuation);
+    }
+    else if (light.Kind == LIGHT_KIND_LINE)
+    {
+        BuildLineLight(light, lightDir, attenuation);
+    }
+    else
+    {
+        BuildRayLight(light, lightDir, attenuation);
+    }
+}
+
+vec3 SampleReflectionEnvironmentSurfaceBlur(vec3 dir, float perceptualRoughness)
+{
+    vec3 d = SafeNormalize(dir);
+
+    int mipCount = textureQueryLevels(uReflectionSkyboxCube);
+    if (mipCount <= 1)
+        return texture(uReflectionSkyboxCube, d).rgb;
+
+    float lod = Saturate(perceptualRoughness) * float(mipCount - 1);
+    return textureLod(uReflectionSkyboxCube, d, lod).rgb;
+}
+
+void main()
+{
+    if (vRenderSpace == 0)
+    {
+        FragColor = vColor * uColor;
+        return;
+    }
+
+    vec3 normalDir = SafeNormalize(vWorldNormal);
+    if (!gl_FrontFacing)
+        normalDir = -normalDir;
+
+    vec3 viewDir = SafeNormalize(uCameraPosition - vWorldPos);
+    float ndv = Saturate(dot(normalDir, viewDir));
+
+    vec3 baseColor = vColor.rgb * uColor.rgb;
+
+    vec3 ambientTerm =
+        baseColor *
+        uAmbientColor *
+        uAmbientIntensity *
+        max(uAmbientStrength, 0.0);
+
+    ambientTerm += baseColor * EvaluateSphereAmbient(vWorldPos);
+
+    vec3 diffuseAccum = vec3(0.0);
+    vec3 specularAccum = vec3(0.0);
+
+    int clusterIndex = GetClusterIndex();
+    uvec2 clusterRange = uClusterRanges[clusterIndex];
+    uint start = clusterRange.x;
+    uint count = clusterRange.y;
+
+    for (uint i = 0u; i < count; i++)
+    {
+        uint lightIndex = uClusterLightIndices[start + i];
+        if (lightIndex >= uint(uLightCount))
+            continue;
+
+        LightRecord light = ReadLight(lightIndex);
+
+        vec3 lightDir;
+        float attenuation;
+        BuildLight(light, lightDir, attenuation);
+
+        if (attenuation <= 0.000001)
+            continue;
+
+        float ndl = Saturate(dot(normalDir, lightDir));
+
+        if (ndl <= 0.000001)
+            continue;
+
+        float shadowFactor = SampleShadow(light, normalDir, lightDir);
+
+        if (light.Kind == LIGHT_KIND_DIRECTIONAL && shadowFactor > 0.0)
+            shadowFactor *= SampleCloudShadow();
+
+        vec3 lightColor = light.Color * light.Intensity;
+        float lightFactor = attenuation * shadowFactor;
+
+        diffuseAccum += baseColor * lightColor * ndl * lightFactor;
+
+        vec3 halfVector = SafeNormalize(lightDir + viewDir);
+        float ndh = Saturate(dot(normalDir, halfVector));
+        float specularExponent = mix(256.0, 4.0, Saturate(uSpecularRange));
+        float specularValue = pow(ndh, specularExponent) * max(uSpecularIntensity, 0.0);
+
+        specularAccum += (lightColor * uSpecularColor) * specularValue * lightFactor;
+    }
+
+    vec3 reflectionAccum = vec3(0.0);
+    float fresnel = 0.0;
+
+    if (uReceiveReflection == 1 && uReflectionEnabled == 1 && uReflectionIntensity > 0.0)
+    {
+        vec3 reflectDir = SafeNormalize(reflect(-viewDir, normalDir));
+        float perceptualRoughness = 1.0 - Saturate(uSmoothness);
+        vec3 reflectionColor = SampleReflectionEnvironmentSurfaceBlur(reflectDir, perceptualRoughness);
+
+        float f0 = 0.02;
+        float fresnelShape = f0 + (1.0 - f0) * pow(1.0 - ndv, max(uWaterFresnelPower, 0.0001));
+        fresnel = Saturate(fresnelShape * uWaterFresnelStrength) * uReflectionIntensity;
+
+        reflectionAccum = reflectionColor * fresnel;
+    }
+
+    vec3 surfaceRgb = (ambientTerm + diffuseAccum) * (1.0 - fresnel) + reflectionAccum + specularAccum;
+
+    FragColor = ApplyMaterialFogExact(vec4(surfaceRgb, uColor.a), vViewPos);
+}
