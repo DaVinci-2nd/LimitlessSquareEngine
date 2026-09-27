@@ -4,7 +4,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Threading;
 
-namespace LimitlessSquareEngine.Engine.Terrain
+namespace LimitlessSquareEngine.Engine
 {
     // 后台构建委托
     public delegate object? TerrainBuildDelegate(TerrainTile tile, int lod, object? buildParams);

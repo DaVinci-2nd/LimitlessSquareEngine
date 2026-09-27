@@ -1,5 +1,4 @@
 ﻿using LimitlessSquareEngine.Engine;
-using LimitlessSquareEngine.Engine.Terrain;
 using MoonSharp.Interpreter;
 using MoonSharp.Interpreter.Platforms;
 using Silk.NET.Core;
@@ -1889,9 +1888,9 @@ namespace LimitlessSquareEngine
             UserData.RegisterType<Double3>();
             UserData.RegisterType<Input>();
             UserData.RegisterType<PhysicsRaycastHit>();
-            UserData.RegisterType<LimitlessSquareEngine.Engine.Terrain.Terrain>();
-            UserData.RegisterType<LimitlessSquareEngine.Engine.Terrain.TerrainProfile>();
-            UserData.RegisterType<LimitlessSquareEngine.Engine.Terrain.TerrainStreamer>();
+            UserData.RegisterType<Terrain>();
+            UserData.RegisterType<TerrainProfile>();
+            UserData.RegisterType<TerrainStreamer>();
             // 初始化窗口参数
             var options = WindowOptions.Default;
             options.PreferredDepthBufferBits = 32;
@@ -2027,7 +2026,7 @@ namespace LimitlessSquareEngine
                         RecordLuaApi("graphics", "graphics", "图形系统对象", "Graphics");
                         // 注入地形系统
                         instance.LuaScript.Globals["terrain_get"] =
-                            (Func<string, string, LimitlessSquareEngine.Engine.Terrain.Terrain?>)(
+                            (Func<string, string, Terrain?>)(
                                 (sceneId, objectId) => TerrainManager.GetOrCreate(sceneId, objectId));
                         RecordLuaApi("terrain_get", "terrain_get(sceneId, objectId) -> terrain", "获取或创建地形节点", "Terrain");
                         instance.LuaScript.Globals["terrain_remove"] =

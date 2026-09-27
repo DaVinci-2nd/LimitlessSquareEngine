@@ -4,7 +4,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text.Json;
 
-namespace LimitlessSquareEngine.Engine.Terrain
+namespace LimitlessSquareEngine.Engine
 {
     // 地形节点管理器
     public static class TerrainManager

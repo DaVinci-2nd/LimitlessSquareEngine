@@ -5,7 +5,7 @@ using MoonSharp.Interpreter;
 using SixLabors.ImageSharp;
 using SixLabors.ImageSharp.PixelFormats;
 
-namespace LimitlessSquareEngine.Engine.Terrain
+namespace LimitlessSquareEngine.Engine
 {
     // 地形节点
     [MoonSharpUserData]

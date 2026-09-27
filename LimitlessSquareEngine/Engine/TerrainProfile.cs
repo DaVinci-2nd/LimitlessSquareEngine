@@ -1,6 +1,6 @@
 using System;
 
-namespace LimitlessSquareEngine.Engine.Terrain
+namespace LimitlessSquareEngine.Engine
 {
     // 渲染流与物理流的LOD参数配置
     public sealed class TerrainProfile

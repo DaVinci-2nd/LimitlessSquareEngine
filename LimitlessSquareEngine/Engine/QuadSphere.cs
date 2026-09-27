@@ -1,7 +1,7 @@
 using System;
 using System.Collections.Generic;
 
-namespace LimitlessSquareEngine.Engine.Terrain
+namespace LimitlessSquareEngine.Engine
 {
     // 立方体贴面四叉树区块键
     public readonly struct TileKey : IEquatable<TileKey>

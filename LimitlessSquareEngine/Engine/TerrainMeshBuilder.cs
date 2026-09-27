@@ -1,7 +1,7 @@
 using System;
 using System.Collections.Generic;
 
-namespace LimitlessSquareEngine.Engine.Terrain
+namespace LimitlessSquareEngine.Engine
 {
     // 单层网格数据
     public sealed class TerrainLayerMesh

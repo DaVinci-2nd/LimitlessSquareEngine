@@ -1,6 +1,6 @@
 using System;
 
-namespace LimitlessSquareEngine.Engine.Terrain
+namespace LimitlessSquareEngine.Engine
 {
     public enum TileArtifactState
     {

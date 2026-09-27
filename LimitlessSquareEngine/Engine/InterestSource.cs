@@ -1,7 +1,7 @@
 using System;
 using System.Collections.Generic;
 
-namespace LimitlessSquareEngine.Engine.Terrain
+namespace LimitlessSquareEngine.Engine
 {
     // 地形流兴趣点
     public readonly struct TerrainInterest

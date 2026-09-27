@@ -1,6 +1,6 @@
 using System;
 
-namespace LimitlessSquareEngine.Engine.Terrain
+namespace LimitlessSquareEngine.Engine
 {
     /// <summary>
     /// 整体地形高度规则接口

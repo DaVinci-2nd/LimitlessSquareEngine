@@ -1,7 +1,7 @@
 using System;
 using System.Collections.Generic;
 
-namespace LimitlessSquareEngine.Engine.Terrain
+namespace LimitlessSquareEngine.Engine
 {
     /// <summary>
     /// 按单位方向返回地形高度的接口

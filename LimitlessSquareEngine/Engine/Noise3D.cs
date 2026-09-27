@@ -1,6 +1,6 @@
 using System;
 
-namespace LimitlessSquareEngine.Engine.Terrain
+namespace LimitlessSquareEngine.Engine
 {
     // 确定性三维噪声
     public sealed class Noise3D
