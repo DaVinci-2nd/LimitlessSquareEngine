@@ -734,6 +734,8 @@ namespace LimitlessSquareEngine
         private int _postProcessCompositeHueDegreesLoc = -1;
         private int _postProcessCompositeTemperatureLoc = -1;
         private int _postProcessCompositeSmaaEnabledLoc = -1;
+        private int _postProcessCompositeBlendLoc = -1;
+        private int _postProcessCompositeSmaaRtMetricsLoc = -1;
 
         private readonly List<RenderCommand> _postProcessSceneCommandsScratch = new();
 
@@ -5874,6 +5876,8 @@ namespace LimitlessSquareEngine
                 uniform int uBloomEnabled;
                 uniform float uBloomIntensity;
                 uniform int uSmaaEnabled;
+                uniform sampler2D uBlendTexture;
+                uniform vec4 uSmaaRtMetrics;
 
                 uniform float uBrightness;
                 uniform float uContrast;
@@ -5881,149 +5885,7 @@ namespace LimitlessSquareEngine
                 uniform float uHueDegrees;
                 uniform float uTemperature;
 
-                const float SMAA_THRESHOLD = 0.075;
-                const float SMAA_LOCAL_CONTRAST_ADAPTATION = 3.5;
-                const int SMAA_MAX_SEARCH_STEPS = 16;
-
-                float SmaaLuma(vec3 color)
-                {
-                    return dot(color, vec3(0.2126, 0.7152, 0.0722));
-                }
-
-                float SmaaColorDistance(vec3 a, vec3 b)
-                {
-                    vec3 d = abs(a - b);
-                    return max(max(d.r, d.g), d.b);
-                }
-
-                vec2 SmaaDetectEdges(vec2 uv, vec2 texelSize)
-                {
-                    vec3 c = texture(uSceneTexture, uv).rgb;
-                    vec3 l = texture(uSceneTexture, uv + vec2(-texelSize.x, 0.0)).rgb;
-                    vec3 r = texture(uSceneTexture, uv + vec2(texelSize.x, 0.0)).rgb;
-                    vec3 t = texture(uSceneTexture, uv + vec2(0.0, texelSize.y)).rgb;
-                    vec3 b = texture(uSceneTexture, uv + vec2(0.0, -texelSize.y)).rgb;
-
-                    float dl = SmaaColorDistance(c, l);
-                    float dr = SmaaColorDistance(c, r);
-                    float dt = SmaaColorDistance(c, t);
-                    float db = SmaaColorDistance(c, b);
-
-                    vec3 l2 = texture(uSceneTexture, uv + vec2(-2.0 * texelSize.x, 0.0)).rgb;
-                    vec3 r2 = texture(uSceneTexture, uv + vec2(2.0 * texelSize.x, 0.0)).rgb;
-                    vec3 t2 = texture(uSceneTexture, uv + vec2(0.0, 2.0 * texelSize.y)).rgb;
-                    vec3 b2 = texture(uSceneTexture, uv + vec2(0.0, -2.0 * texelSize.y)).rgb;
-
-                    float maxDelta = max(max(max(dl, dr), max(dt, db)), 0.000001);
-                    float localMax = max(max(SmaaColorDistance(l, l2), SmaaColorDistance(r, r2)), max(SmaaColorDistance(t, t2), SmaaColorDistance(b, b2)));
-
-                    float vertical = max(dl, dr);
-                    float horizontal = max(dt, db);
-
-                    vec2 edges = vec2(0.0);
-
-                    if (vertical >= SMAA_THRESHOLD && vertical * SMAA_LOCAL_CONTRAST_ADAPTATION >= localMax)
-                        edges.x = 1.0;
-
-                    if (horizontal >= SMAA_THRESHOLD && horizontal * SMAA_LOCAL_CONTRAST_ADAPTATION >= localMax)
-                        edges.y = 1.0;
-
-                    return edges;
-                }
-
-                float SmaaSearchVertical(vec2 uv, vec2 texelSize, float direction)
-                {
-                    float distanceValue = 0.0;
-
-                    for (int i = 1; i <= SMAA_MAX_SEARCH_STEPS; i++)
-                    {
-                        vec2 sampleUv = uv + vec2(0.0, direction * texelSize.y * float(i));
-                        vec2 edges = SmaaDetectEdges(sampleUv, texelSize);
-
-                        if (edges.x < 0.5)
-                            break;
-
-                        distanceValue = float(i);
-                    }
-
-                    return distanceValue;
-                }
-
-                float SmaaSearchHorizontal(vec2 uv, vec2 texelSize, float direction)
-                {
-                    float distanceValue = 0.0;
-
-                    for (int i = 1; i <= SMAA_MAX_SEARCH_STEPS; i++)
-                    {
-                        vec2 sampleUv = uv + vec2(direction * texelSize.x * float(i), 0.0);
-                        vec2 edges = SmaaDetectEdges(sampleUv, texelSize);
-
-                        if (edges.y < 0.5)
-                            break;
-
-                        distanceValue = float(i);
-                    }
-
-                    return distanceValue;
-                }
-
-                float SmaaAreaApprox(float negativeDistance, float positiveDistance)
-                {
-                    float span = negativeDistance + positiveDistance + 1.0;
-                    float symmetry = 1.0 - abs(negativeDistance - positiveDistance) / max(span, 1.0);
-                    float lengthFactor = clamp(span / float(SMAA_MAX_SEARCH_STEPS * 2 + 1), 0.0, 1.0);
-                    return clamp((0.18 + 0.42 * lengthFactor) * symmetry, 0.0, 0.60);
-                }
-
-                vec3 SmaaNeighborhoodBlend(vec2 uv, vec2 texelSize, vec2 edges)
-                {
-                    vec3 c = texture(uSceneTexture, uv).rgb;
-
-                    if (edges.x <= 0.0 && edges.y <= 0.0)
-                        return c;
-
-                    vec3 l = texture(uSceneTexture, uv + vec2(-texelSize.x, 0.0)).rgb;
-                    vec3 r = texture(uSceneTexture, uv + vec2(texelSize.x, 0.0)).rgb;
-                    vec3 t = texture(uSceneTexture, uv + vec2(0.0, texelSize.y)).rgb;
-                    vec3 b = texture(uSceneTexture, uv + vec2(0.0, -texelSize.y)).rgb;
-
-                    float dl = SmaaColorDistance(c, l);
-                    float dr = SmaaColorDistance(c, r);
-                    float dt = SmaaColorDistance(c, t);
-                    float db = SmaaColorDistance(c, b);
-
-                    float verticalStrength = edges.x * max(dl, dr);
-                    float horizontalStrength = edges.y * max(dt, db);
-
-                    if (verticalStrength >= horizontalStrength)
-                    {
-                        float negativeDistance = SmaaSearchVertical(uv, texelSize, -1.0);
-                        float positiveDistance = SmaaSearchVertical(uv, texelSize, 1.0);
-                        float area = SmaaAreaApprox(negativeDistance, positiveDistance);
-                        vec3 neighbor = dl > dr ? l : r;
-                        float contrast = max(dl, dr);
-                        float weight = area * smoothstep(SMAA_THRESHOLD, SMAA_THRESHOLD * 4.0, contrast);
-                        return mix(c, neighbor, weight);
-                    }
-                    else
-                    {
-                        float negativeDistance = SmaaSearchHorizontal(uv, texelSize, -1.0);
-                        float positiveDistance = SmaaSearchHorizontal(uv, texelSize, 1.0);
-                        float area = SmaaAreaApprox(negativeDistance, positiveDistance);
-                        vec3 neighbor = db > dt ? b : t;
-                        float contrast = max(dt, db);
-                        float weight = area * smoothstep(SMAA_THRESHOLD, SMAA_THRESHOLD * 4.0, contrast);
-                        return mix(c, neighbor, weight);
-                    }
-                }
-
-                vec3 ApplySmaa(vec2 uv)
-                {
-                    ivec2 textureSizeValue = textureSize(uSceneTexture, 0);
-                    vec2 texelSize = 1.0 / vec2(max(textureSizeValue.x, 1), max(textureSizeValue.y, 1));
-                    vec2 edges = SmaaDetectEdges(uv, texelSize);
-                    return SmaaNeighborhoodBlend(uv, texelSize, edges);
-                }
+" + _smaaCommonSource + @"
 
                 vec3 ApplyContrast(vec3 color, float contrast)
                 {
@@ -6071,7 +5933,17 @@ namespace LimitlessSquareEngine
 
                 void main()
                 {
-                    vec3 color = uSmaaEnabled == 1 ? ApplySmaa(vUv) : texture(uSceneTexture, vUv).rgb;
+                    vec3 color;
+                    if (uSmaaEnabled == 1)
+                    {
+                        float4 smaaOffset;
+                        SMAANeighborhoodBlendingVS(vUv, smaaOffset);
+                        color = SMAANeighborhoodBlendingPS(vUv, smaaOffset, uSceneTexture, uBlendTexture).rgb;
+                    }
+                    else
+                    {
+                        color = texture(uSceneTexture, vUv).rgb;
+                    }
 
                     if (uBloomEnabled == 1)
                         color += texture(uBloomTexture, vUv).rgb * uBloomIntensity;
@@ -6155,7 +6027,11 @@ namespace LimitlessSquareEngine
                 _postProcessCompositeHueDegreesLoc = _gl.GetUniformLocation(_postProcessCompositeProgram, "uHueDegrees");
                 _postProcessCompositeTemperatureLoc = _gl.GetUniformLocation(_postProcessCompositeProgram, "uTemperature");
                 _postProcessCompositeSmaaEnabledLoc = _gl.GetUniformLocation(_postProcessCompositeProgram, "uSmaaEnabled");
+                _postProcessCompositeBlendLoc = _gl.GetUniformLocation(_postProcessCompositeProgram, "uBlendTexture");
+                _postProcessCompositeSmaaRtMetricsLoc = _gl.GetUniformLocation(_postProcessCompositeProgram, "uSmaaRtMetrics");
             }
+
+            InitializeSmaaResources();
         }
 
         private uint CreatePostProcessColorTexture(int width, int height, bool linearFilter = false)
@@ -6291,7 +6167,7 @@ namespace LimitlessSquareEngine
             DeletePostProcessSceneTargets();
 
             _postProcessSceneFramebuffer = _gl.GenFramebuffer();
-            _postProcessSceneColorTexture = CreatePostProcessColorTexture(width, height);
+            _postProcessSceneColorTexture = CreatePostProcessColorTexture(width, height, true);
             _postProcessSceneDepthTexture = CreatePostProcessDepthTexture(width, height);
 
             _gl.BindFramebuffer(FramebufferTarget.Framebuffer, _postProcessSceneFramebuffer);
@@ -6629,6 +6505,18 @@ namespace LimitlessSquareEngine
             if (_postProcessCompositeBloomLoc != -1)
                 _gl.Uniform1(_postProcessCompositeBloomLoc, 1);
 
+            _gl.ActiveTexture((TextureUnit)((int)TextureUnit.Texture0 + 2));
+            _gl.BindTexture(TextureTarget.Texture2D, _smaaBlendTexture);
+            if (_postProcessCompositeBlendLoc != -1)
+                _gl.Uniform1(_postProcessCompositeBlendLoc, 2);
+            if (_postProcessCompositeSmaaRtMetricsLoc != -1)
+                _gl.Uniform4(
+                    _postProcessCompositeSmaaRtMetricsLoc,
+                    1f / Math.Max(1, _postProcessSceneWidth),
+                    1f / Math.Max(1, _postProcessSceneHeight),
+                    _postProcessSceneWidth,
+                    _postProcessSceneHeight);
+
             if (_postProcessCompositeBloomEnabledLoc != -1)
                 _gl.Uniform1(_postProcessCompositeBloomEnabledLoc, NeedsBloom(settings) ? 1 : 0);
 
@@ -6673,6 +6561,8 @@ namespace LimitlessSquareEngine
 
             DrawFullscreenQuad();
 
+            _gl.ActiveTexture((TextureUnit)((int)TextureUnit.Texture0 + 2));
+            _gl.BindTexture(TextureTarget.Texture2D, 0);
             _gl.ActiveTexture((TextureUnit)((int)TextureUnit.Texture0 + 1));
             _gl.BindTexture(TextureTarget.Texture2D, 0);
             _gl.ActiveTexture(TextureUnit.Texture0);
@@ -10555,6 +10445,9 @@ namespace LimitlessSquareEngine
 
                     if (isLastLayer)
                     {
+                        if (postSettings != null && postSettings.SmaaEnabled)
+                            ExecuteSmaaPasses();
+
                         if (NeedsBloom(postSettings))
                             ExecuteBloomPasses(postSettings);
 
@@ -12733,6 +12626,7 @@ void main()
 
             DeletePostProcessSceneTargets();
             DeletePostProcessBloomTargets();
+            DeleteSmaaResources();
 
             if (_postProcessExtractProgram != 0)
             {
@@ -12787,6 +12681,8 @@ void main()
             _postProcessCompositeHueDegreesLoc = -1;
             _postProcessCompositeTemperatureLoc = -1;
             _postProcessCompositeSmaaEnabledLoc = -1;
+            _postProcessCompositeBlendLoc = -1;
+            _postProcessCompositeSmaaRtMetricsLoc = -1;
 
             _cameraPostProcessSettings.Clear();
 
