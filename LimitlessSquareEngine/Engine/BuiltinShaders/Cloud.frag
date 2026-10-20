@@ -107,7 +107,7 @@ float remap01(float x, float a)
 
 float cloudLodBias(float t)
 {
-    return clamp(log2(1.0 + t * 0.0008), 0.0, 4.5);
+    return clamp(log2(1.0 + t * 0.00000015), 0.0, 4.5);
 }
 
 float sampleDensity(vec3 planetLocal, float h, float t, float detailScale)
@@ -133,6 +133,12 @@ float sampleDensity(vec3 planetLocal, float h, float t, float detailScale)
 
     float conc = clamp(coarse, 0.0, 1.0) * clamp(shapeTex.r, 0.0, 1.0);
     conc = clamp(conc * 8.0, 0.0, 1.0);
+
+    if (detailScale > 0.5)
+    {
+        float detailNoise = textureLod(uCloudDetailNoise, warpedCoord * (uCloudShapeTile / max(uCloudDetailTile, 1.0)), lod).r;
+        conc *= mix(1.0, clamp((detailNoise - 0.5) * 2.0 + 0.5, 0.0, 1.0), uCloudDetailStrength);
+    }
 
     float threshold = 0.1;
     float density;
@@ -182,7 +188,7 @@ float stepForT(float t, float minStep)
 {
     float footprint = t * 2.0 * max(uCloudTanHalfFov, 0.0001) / max(uCloudViewportHeight, 1.0);
     float s = max(max(uCloudStepSize, footprint * 2.0), minStep);
-    return min(s, max(uCloudThickness * 0.35, minStep));
+    return min(s, max(uCloudThickness * 0.12, minStep));
 }
 
 void main()
@@ -228,6 +234,14 @@ void main()
     float fullEntry = tEntry;
     float fullExit = tExit;
 
+    float tGroundNear;
+    float tGroundFar;
+    if (raySphere(cameraPos, viewDir, planetCenter, uPlanetRadius, tGroundNear, tGroundFar))
+    {
+        if (tGroundNear > tEntry)
+            tExit = min(tExit, tGroundNear);
+    }
+
     float cosTheta = max((uCloudViewProjection * vec4(viewDir, 0.0)).w, 0.000001);
     float tLayerNear = uCloudLayerNear / cosTheta;
     float tLayerFar = uCloudLayerFar / cosTheta;
@@ -268,13 +282,13 @@ void main()
     float minStep = max(0.0, (fullExit - fullEntry) / float(budget));
     int emptyStreak = 0;
 
-    float grid = max(uCloudStepSize, 1.0);
-    float t = (ceil(tEntry / grid) + jitter) * grid;
+    float grid = max(min(stepForT(tEntry, minStep), tExit - tEntry), 1.0);
+    float t = tEntry + jitter * grid;
 
     for (int i = 0; i < budget && t < tExit; i++)
     {
         float stepLen = stepForT(t, minStep);
-        float stride = emptyStreak >= 2 ? stepLen * 4.0 : stepLen;
+        float stride = emptyStreak >= 2 ? stepLen * 2.0 : stepLen;
         stride = min(stride, tExit - t);
 
         float sampleT = t + stride * 0.5;

@@ -17,8 +17,11 @@ uniform float uCloudCoverageScale;
 uniform float uCloudStepSize;
 uniform int uCloudMaxSteps;
 uniform float uCloudWarpStrength;
+uniform float uCloudDetailTile;
+uniform float uCloudDetailStrength;
 
 uniform sampler3D uCloudShapeNoise;
+uniform sampler3D uCloudDetailNoise;
 
 uniform vec3 uCloudShadowSunDir;
 uniform vec3 uCloudShadowNearAnchorRel;
@@ -33,7 +36,7 @@ float safeSqrt(float x)
 
 float cloudLodBias(float t)
 {
-    return clamp(log2(1.0 + t * 0.0008), 0.0, 4.5);
+    return clamp(log2(1.0 + t * 0.00000015), 0.0, 4.5);
 }
 
 float sampleDensity(vec3 planetLocal, float h, float t, float detailScale)
@@ -59,6 +62,12 @@ float sampleDensity(vec3 planetLocal, float h, float t, float detailScale)
 
     float conc = clamp(coarse, 0.0, 1.0) * clamp(shapeTex.r, 0.0, 1.0);
     conc = clamp(conc * 8.0, 0.0, 1.0);
+
+    if (detailScale > 0.5)
+    {
+        float detailNoise = textureLod(uCloudDetailNoise, warpedCoord * (uCloudShapeTile / max(uCloudDetailTile, 1.0)), lod).r;
+        conc *= mix(1.0, clamp((detailNoise - 0.5) * 2.0 + 0.5, 0.0, 1.0), uCloudDetailStrength);
+    }
 
     float threshold = 0.1;
     float density;

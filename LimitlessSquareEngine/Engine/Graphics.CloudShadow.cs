@@ -420,6 +420,15 @@ namespace LimitlessSquareEngine
                         if (loc.CloudShadowNearHalfExtent != -1)
                             _gl.Uniform1(loc.CloudShadowNearHalfExtent, _cloudShadowNearHalfExtents[0]);
 
+                        if (loc.CloudDetailNoise != -1 && _cloudNoiseDetailTexture != 0)
+                        {
+                            const int detailNoiseUnit = 19;
+                            _gl.ActiveTexture((TextureUnit)((int)TextureUnit.Texture0 + detailNoiseUnit));
+                            _gl.BindTexture(TextureTarget.Texture3D, _cloudNoiseDetailTexture);
+                            _gl.Uniform1(loc.CloudDetailNoise, detailNoiseUnit);
+                            _gl.ActiveTexture(TextureUnit.Texture0);
+                        }
+
                         SubmitDrawArrays(PrimitiveType.Triangles, 0, (uint)(cloudSource.Vertices.Length / cloudSource.VertexStrideFloats));
 
                         _gl.ActiveTexture(TextureUnit.Texture0);
@@ -542,6 +551,15 @@ namespace LimitlessSquareEngine
                         if (loc.CloudShadowNearHalfExtent != -1)
                             _gl.Uniform1(loc.CloudShadowNearHalfExtent, _cloudShadowNearHalfExtents[1]);
 
+                        if (loc.CloudDetailNoise != -1 && _cloudNoiseDetailTexture != 0)
+                        {
+                            const int detailNoiseUnit = 19;
+                            _gl.ActiveTexture((TextureUnit)((int)TextureUnit.Texture0 + detailNoiseUnit));
+                            _gl.BindTexture(TextureTarget.Texture3D, _cloudNoiseDetailTexture);
+                            _gl.Uniform1(loc.CloudDetailNoise, detailNoiseUnit);
+                            _gl.ActiveTexture(TextureUnit.Texture0);
+                        }
+
                         SubmitDrawArrays(PrimitiveType.Triangles, 0, (uint)(cloudSource.Vertices.Length / cloudSource.VertexStrideFloats));
 
                         _gl.ActiveTexture(TextureUnit.Texture0);
@@ -663,6 +681,15 @@ namespace LimitlessSquareEngine
 
                         if (loc.CloudShadowNearHalfExtent != -1)
                             _gl.Uniform1(loc.CloudShadowNearHalfExtent, _cloudShadowNearHalfExtents[2]);
+
+                        if (loc.CloudDetailNoise != -1 && _cloudNoiseDetailTexture != 0)
+                        {
+                            const int detailNoiseUnit = 19;
+                            _gl.ActiveTexture((TextureUnit)((int)TextureUnit.Texture0 + detailNoiseUnit));
+                            _gl.BindTexture(TextureTarget.Texture3D, _cloudNoiseDetailTexture);
+                            _gl.Uniform1(loc.CloudDetailNoise, detailNoiseUnit);
+                            _gl.ActiveTexture(TextureUnit.Texture0);
+                        }
 
                         SubmitDrawArrays(PrimitiveType.Triangles, 0, (uint)(cloudSource.Vertices.Length / cloudSource.VertexStrideFloats));
 
