@@ -46,6 +46,7 @@ uniform dvec3 uCloudPlanetCenterWorld;
 uniform dvec3 uCloudCameraWorldPos;
 uniform mat4 uCloudInvViewProjection;
 uniform mat4 uCloudViewProjection;
+uniform float uCloudFarDepth;
 uniform float uCloudTanHalfFov;
 uniform float uCloudViewportHeight;
 uniform float uCloudLayerNear;
@@ -127,9 +128,9 @@ float sampleDensity(vec3 planetLocal, float h, float t, float detailScale)
 
     vec4 shapeTex = textureLod(uCloudShapeNoise, warpedCoord, lod);
 
-    float heightGrad = smoothstep(0.0, 0.10, h) * (1.0 - smoothstep(0.35, 0.9, h));
-
     float coarse = textureLod(uCloudShapeNoise, shapeCoord * max(uCloudCoverageScale, 0.0001), 1.5).r;
+
+    float heightGrad = smoothstep(0.0, 0.10, h) * (1.0 - smoothstep(0.35, 0.9, h));
 
     float conc = clamp(coarse, 0.0, 1.0) * clamp(shapeTex.r, 0.0, 1.0);
     conc = clamp(conc * 8.0, 0.0, 1.0);
@@ -137,7 +138,7 @@ float sampleDensity(vec3 planetLocal, float h, float t, float detailScale)
     if (detailScale > 0.5)
     {
         float detailNoise = textureLod(uCloudDetailNoise, warpedCoord * (uCloudShapeTile / max(uCloudDetailTile, 1.0)), lod).r;
-        conc *= mix(1.0, clamp((detailNoise - 0.5) * 2.0 + 0.5, 0.0, 1.0), uCloudDetailStrength);
+        conc *= mix(1.0, clamp((detailNoise - 0.5) * 2.0 + 0.5, 0.15, 1.0), uCloudDetailStrength);
     }
 
     float threshold = 0.1;
@@ -209,11 +210,13 @@ void main()
     float tFar;
     if (!raySphere(cameraPos, viewDir, planetCenter, topRadius, tNear, tFar))
     {
+        gl_FragDepth = uCloudFarDepth * 0.5 + 0.5;
         FragColor = vec4(0.0);
         return;
     }
     if (tFar <= 0.0)
     {
+        gl_FragDepth = uCloudFarDepth * 0.5 + 0.5;
         FragColor = vec4(0.0);
         return;
     }
@@ -251,6 +254,7 @@ void main()
     float chord = tExit - tEntry;
     if (chord <= 0.0001)
     {
+        gl_FragDepth = uCloudFarDepth * 0.5 + 0.5;
         FragColor = vec4(0.0);
         return;
     }
@@ -277,6 +281,8 @@ void main()
 
     float transmittance = 1.0;
     float firstCloudT = -1.0;
+    float firstShade = 0.0;
+    float cloudTopRadius = uPlanetRadius + uCloudBaseAltitude + uCloudThickness;
 
     int budget = max(uCloudMaxSteps, 8);
     float minStep = max(0.0, (fullExit - fullEntry) / float(budget));
@@ -343,7 +349,8 @@ void main()
         if (firstCloudT < 0.0)
             firstCloudT = sampleT;
 
-        float sunProbeStep = max(uCloudThickness, 1.0) * 0.25;
+        float cosIncident = max(dot(normalize(samplePos), sunDir), 0.1);
+        float sunProbeStep = max(uCloudThickness, 1.0) * 0.25 / cosIncident;
         float sunThickness = 0.0;
         for (int k = 1; k <= 4; k++)
         {
@@ -357,9 +364,9 @@ void main()
         sunThickness *= sunProbeStep;
 
         float sunShadeAmount = 1.0 - exp(-sunThickness * extinct);
-        float sepShade = floor(clamp(sunShadeAmount, 0.0, 1.0) * 3.0 + 0.001) / 3.0;
+        firstShade = floor(clamp(sunShadeAmount, 0.0, 1.0) * 3.0 + 0.001) / 3.0;
         float nightMul = mix(1.0, 0.03, 1.0 - smoothstep(-0.15, 0.05, cos(cloudSunAngle)));
-        cloudCol = mix(uCloudLightColor * dayBlend + uCloudTwilightColor * twilightWeight + uCloudDarkTwilightColor * darkTwilightWeight + uCloudShadeColor * nightBlend, uCloudShadeColor, sepShade) * nightMul;
+        cloudCol = mix(uCloudLightColor * dayBlend + uCloudTwilightColor * twilightWeight + uCloudDarkTwilightColor * darkTwilightWeight + uCloudShadeColor * nightBlend, uCloudShadeColor, firstShade) * nightMul;
 
         transmittance *= exp(-density * stride * extinct);
 
@@ -374,6 +381,7 @@ void main()
 
     if (alpha <= 0.001)
     {
+        gl_FragDepth = uCloudFarDepth * 0.5 + 0.5;
         FragColor = vec4(0.0);
         return;
     }

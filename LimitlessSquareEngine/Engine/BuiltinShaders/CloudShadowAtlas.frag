@@ -53,7 +53,7 @@ bool raySphere(vec3 ro, vec3 rd, vec3 center, float radius, out float tNear, out
 
 float cloudLodBias(float t)
 {
-    return clamp(log2(1.0 + t * 0.0008), 0.0, 4.5);
+    return clamp(log2(1.0 + t * 0.000375), 0.0, 1.32);
 }
 
 float sampleDensity(vec3 planetLocal, float h, float t, float detailScale)

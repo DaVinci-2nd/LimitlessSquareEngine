@@ -1,4 +1,4 @@
-﻿using LimitlessSquareEngine.Editor;
+using LimitlessSquareEngine.Editor;
 using LimitlessSquareEngine.Engine;
 using MoonSharp.Interpreter;
 using Silk.NET.OpenGL;
@@ -12156,7 +12156,7 @@ void main()
                 if (isTransparentQueue)
                 {
                     _gl.DepthFunc(transparentDepthFunc);
-                    _gl.DepthMask(false);
+                    _gl.DepthMask(_cloudDepthWritePass);
                 }
                 else
                 {

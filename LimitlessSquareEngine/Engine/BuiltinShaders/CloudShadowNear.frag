@@ -66,7 +66,7 @@ float sampleDensity(vec3 planetLocal, float h, float t, float detailScale)
     if (detailScale > 0.5)
     {
         float detailNoise = textureLod(uCloudDetailNoise, warpedCoord * (uCloudShapeTile / max(uCloudDetailTile, 1.0)), lod).r;
-        conc *= mix(1.0, clamp((detailNoise - 0.5) * 2.0 + 0.5, 0.0, 1.0), uCloudDetailStrength);
+        conc *= mix(1.0, clamp((detailNoise - 0.5) * 2.0 + 0.5, 0.15, 1.0), uCloudDetailStrength);
     }
 
     float threshold = 0.1;

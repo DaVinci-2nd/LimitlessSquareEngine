@@ -40,10 +40,13 @@ namespace LimitlessSquareEngine
 
         private uint _cloudDownsampleFramebuffer = 0;
         private uint _cloudDownsampleTexture = 0;
+        private uint _cloudDownsampleDepthTexture = 0;
         private int _cloudDownsampleWidth = 0;
         private int _cloudDownsampleHeight = 0;
         private uint _cloudCompositeProgram = 0;
         private int _cloudCompositeTextureLoc = -1;
+        private int _cloudCompositeDepthLoc = -1;
+        private bool _cloudDepthWritePass = false;
         private readonly List<RenderCommand> _cloudCommandsScratch = new List<RenderCommand>();
 
         private const string _cloudCompositeVertexSource = @"#version 430 core
@@ -59,9 +62,18 @@ void main()
 in vec2 vUv;
 out vec4 FragColor;
 uniform sampler2D uCloudTexture;
+uniform sampler2D uCloudDepth;
 void main()
 {
-    FragColor = texture(uCloudTexture, vUv);
+    vec4 cloud = texture(uCloudTexture, vUv);
+    float depth = texture(uCloudDepth, vUv).r;
+    if (depth <= 0.0)
+    {
+        FragColor = vec4(0.0);
+        return;
+    }
+    gl_FragDepth = depth;
+    FragColor = cloud;
 }";
 
         private double _cloudTimeSeconds = 0.0;
@@ -203,6 +215,12 @@ void main()
                 _cloudDownsampleFramebuffer = 0;
             }
 
+            if (_cloudDownsampleDepthTexture != 0)
+            {
+                _gl.DeleteTexture(_cloudDownsampleDepthTexture);
+                _cloudDownsampleDepthTexture = 0;
+            }
+
             _cloudDownsampleWidth = width;
             _cloudDownsampleHeight = height;
 
@@ -223,6 +241,23 @@ void main()
             _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapS, (int)TextureWrapMode.ClampToEdge);
             _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapT, (int)TextureWrapMode.ClampToEdge);
 
+            _cloudDownsampleDepthTexture = _gl.GenTexture();
+            _gl.BindTexture(TextureTarget.Texture2D, _cloudDownsampleDepthTexture);
+            _gl.TexImage2D(
+                TextureTarget.Texture2D,
+                0,
+                InternalFormat.DepthComponent32f,
+                (uint)width,
+                (uint)height,
+                0,
+                PixelFormat.DepthComponent,
+                PixelType.Float,
+                ReadOnlySpan<float>.Empty);
+            _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.Linear);
+            _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMagFilter, (int)TextureMagFilter.Linear);
+            _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapS, (int)TextureWrapMode.ClampToEdge);
+            _gl.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapT, (int)TextureWrapMode.ClampToEdge);
+
             _cloudDownsampleFramebuffer = _gl.GenFramebuffer();
             _gl.BindFramebuffer(FramebufferTarget.Framebuffer, _cloudDownsampleFramebuffer);
             _gl.FramebufferTexture2D(
@@ -230,6 +265,12 @@ void main()
                 FramebufferAttachment.ColorAttachment0,
                 TextureTarget.Texture2D,
                 _cloudDownsampleTexture,
+                0);
+            _gl.FramebufferTexture2D(
+                FramebufferTarget.Framebuffer,
+                FramebufferAttachment.DepthAttachment,
+                TextureTarget.Texture2D,
+                _cloudDownsampleDepthTexture,
                 0);
             _gl.BindFramebuffer(FramebufferTarget.Framebuffer, 0);
             _gl.BindTexture(TextureTarget.Texture2D, 0);
@@ -268,12 +309,13 @@ void main()
 
             _cloudCompositeProgram = program;
             _cloudCompositeTextureLoc = _gl.GetUniformLocation(program, "uCloudTexture");
+            _cloudCompositeDepthLoc = _gl.GetUniformLocation(program, "uCloudDepth");
         }
 
         private void ExecuteCloudDownsampleAndComposite(in RenderCommand first)
         {
-            int cloudWidth = Math.Max(1, first.ViewportWidth / 4);
-            int cloudHeight = Math.Max(1, first.ViewportHeight / 4);
+            int cloudWidth = Math.Max(1, first.ViewportWidth / 2);
+            int cloudHeight = Math.Max(1, first.ViewportHeight / 2);
 
             EnsureCloudDownsampleResources(cloudWidth, cloudHeight);
             EnsureCloudCompositeProgram();
@@ -282,12 +324,15 @@ void main()
 
             _gl.BindFramebuffer(FramebufferTarget.Framebuffer, _cloudDownsampleFramebuffer);
             _gl.Viewport(0, 0, (uint)cloudWidth, (uint)cloudHeight);
-            _gl.Disable(GLEnum.DepthTest);
+            _gl.Enable(GLEnum.DepthTest);
             _gl.Enable(GLEnum.Blend);
             _gl.BlendFunc(GLEnum.One, GLEnum.OneMinusSrcAlpha);
             _gl.ClearColor(0f, 0f, 0f, 0f);
-            _gl.Clear(ClearBufferMask.ColorBufferBit);
+            _gl.DepthMask(true);
+            _gl.ClearDepth(first.UseReverseZ ? 0.0 : 1.0);
+            _gl.Clear(ClearBufferMask.ColorBufferBit | ClearBufferMask.DepthBufferBit);
 
+            _cloudDepthWritePass = true;
             foreach (RenderCommand source in _cloudCommandsScratch)
             {
                 RenderCommand cmd = source;
@@ -297,6 +342,7 @@ void main()
                 cmd.ViewportHeight = cloudHeight;
                 ExecuteCommand(cmd);
             }
+            _cloudDepthWritePass = false;
 
             _gl.BindFramebuffer(FramebufferTarget.Framebuffer, (uint)previousFbo);
             _gl.Viewport(
@@ -304,7 +350,8 @@ void main()
                 first.ViewportY,
                 (uint)Math.Max(1, first.ViewportWidth),
                 (uint)Math.Max(1, first.ViewportHeight));
-            _gl.Disable(GLEnum.DepthTest);
+            _gl.Enable(GLEnum.DepthTest);
+            _gl.DepthFunc(first.UseReverseZ ? GLEnum.Greater : GLEnum.Less);
             _gl.DepthMask(false);
             _gl.Enable(GLEnum.Blend);
             _gl.BlendFunc(GLEnum.One, GLEnum.OneMinusSrcAlpha);
@@ -313,9 +360,14 @@ void main()
             _gl.ActiveTexture(TextureUnit.Texture0);
             _gl.BindTexture(TextureTarget.Texture2D, _cloudDownsampleTexture);
             _gl.Uniform1(_cloudCompositeTextureLoc, 0);
+            _gl.ActiveTexture(TextureUnit.Texture1);
+            _gl.BindTexture(TextureTarget.Texture2D, _cloudDownsampleDepthTexture);
+            _gl.Uniform1(_cloudCompositeDepthLoc, 1);
             _gl.BindVertexArray(_cloudFullscreenVao);
             _gl.DrawArrays(PrimitiveType.Triangles, 0, 3);
 
+            _gl.ActiveTexture(TextureUnit.Texture1);
+            _gl.BindTexture(TextureTarget.Texture2D, 0);
             _gl.ActiveTexture(TextureUnit.Texture0);
             _gl.BindTexture(TextureTarget.Texture2D, 0);
             _gl.BindVertexArray(0);
@@ -339,6 +391,12 @@ void main()
             {
                 _gl.DeleteTexture(_cloudDownsampleTexture);
                 _cloudDownsampleTexture = 0;
+            }
+
+            if (_cloudDownsampleDepthTexture != 0)
+            {
+                _gl.DeleteTexture(_cloudDownsampleDepthTexture);
+                _cloudDownsampleDepthTexture = 0;
             }
 
             if (_cloudDownsampleFramebuffer != 0)
