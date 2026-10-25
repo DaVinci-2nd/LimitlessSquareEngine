@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
@@ -77,6 +77,43 @@ namespace LimitlessSquareEngine.Engine
             double len = Math.Sqrt(X * X + Y * Y + Z * Z + W * W);
             if (len <= 0.0) return Identity;
             return new DQuaternion(X / len, Y / len, Z / len, W / len);
+        }
+
+        public double Dot(DQuaternion other)
+        {
+            return X * other.X + Y * other.Y + Z * other.Z + W * other.W;
+        }
+
+        public static DQuaternion Slerp(DQuaternion a, DQuaternion b, double t)
+        {
+            double cos = a.Dot(b);
+            DQuaternion end = b;
+
+            if (cos < 0.0)
+            {
+                cos = -cos;
+                end = new DQuaternion(-b.X, -b.Y, -b.Z, -b.W);
+            }
+
+            if (cos > 0.9995)
+            {
+                return new DQuaternion(
+                    a.X + (end.X - a.X) * t,
+                    a.Y + (end.Y - a.Y) * t,
+                    a.Z + (end.Z - a.Z) * t,
+                    a.W + (end.W - a.W) * t).Normalized();
+            }
+
+            double theta = Math.Acos(cos);
+            double sinTheta = Math.Sin(theta);
+            double weightA = Math.Sin((1.0 - t) * theta) / sinTheta;
+            double weightB = Math.Sin(t * theta) / sinTheta;
+
+            return new DQuaternion(
+                a.X * weightA + end.X * weightB,
+                a.Y * weightA + end.Y * weightB,
+                a.Z * weightA + end.Z * weightB,
+                a.W * weightA + end.W * weightB).Normalized();
         }
 
         public static DQuaternion operator *(DQuaternion a, DQuaternion b)
@@ -469,6 +506,8 @@ namespace LimitlessSquareEngine.Engine
 
             Physics.RegisterScene(sceneId, runtime);
 
+            RegisterSceneAnimators(sceneId, scene);
+
             MarkAllDirty(sceneId);
 
             if (scene.Properties.HasValue && scene.Properties.Value.ValueKind == JsonValueKind.Object)
@@ -491,6 +530,19 @@ namespace LimitlessSquareEngine.Engine
 
             Console.WriteLine($"[i] Loaded scene: {scene.SceneId} ({scene.Objects.Count} objects)");
             return scene;
+        }
+
+        private static void RegisterSceneAnimators(string sceneId, SceneData scene)
+        {
+            Animator.RemoveScene(sceneId);
+
+            foreach (SceneObject obj in scene.Objects)
+            {
+                if (string.IsNullOrWhiteSpace(obj.Controller))
+                    continue;
+
+                Animator.Attach(sceneId, obj.Id, obj.Controller);
+            }
         }
 
         internal static int GetObjectCount(string sceneId)
@@ -990,6 +1042,55 @@ namespace LimitlessSquareEngine.Engine
             MarkSubtreeDirty(runtime, node);
         }
 
+        internal static SceneObject? GetSceneObject(string sceneId, string objectId)
+        {
+            if (string.IsNullOrWhiteSpace(sceneId) || string.IsNullOrWhiteSpace(objectId))
+                return null;
+
+            if (!_runtimeScenes.TryGetValue(sceneId, out var runtime))
+                return null;
+
+            if (!runtime.Nodes.TryGetValue(objectId, out var node))
+                return null;
+
+            return node.Source;
+        }
+
+        internal static void ApplyAnimatedLocalTransform(
+            string sceneId,
+            string objectId,
+            Double3 position,
+            DQuaternion rotation,
+            Double3 scale)
+        {
+            if (string.IsNullOrWhiteSpace(sceneId) || string.IsNullOrWhiteSpace(objectId))
+                return;
+
+            if (!_runtimeScenes.TryGetValue(sceneId, out var runtime))
+                return;
+
+            if (!runtime.Nodes.TryGetValue(objectId, out var node))
+                return;
+
+            const double eps = 1e-12;
+
+            if (Math.Abs(scale.X) <= eps || Math.Abs(scale.Y) <= eps || Math.Abs(scale.Z) <= eps)
+                return;
+
+            node.LocalPosition = position;
+            node.LocalRotation = rotation;
+            node.LocalScale = scale;
+
+            if (node.Source.Transform == null)
+                node.Source.Transform = new SceneTransform();
+
+            node.Source.Transform.LocalPosition = position;
+            node.Source.Transform.LocalRotation = rotation.ToEulerDegrees();
+            node.Source.Transform.LocalScale = scale;
+
+            MarkSubtreeDirty(runtime, node);
+        }
+
         public static void SetScale(string sceneId, string objectId, Double3 value)
         {
             if (!TryGetNode(sceneId, objectId, out var runtime, out var node))
@@ -1416,7 +1517,7 @@ namespace LimitlessSquareEngine.Engine
             }
         }
 
-        private static string ParseAvatarId(SceneObject obj)
+        internal static string ParseAvatarId(SceneObject obj)
         {
             if (!string.Equals(obj.Type, "Avatar", StringComparison.Ordinal))
                 return "";
@@ -1652,6 +1753,7 @@ namespace LimitlessSquareEngine.Engine
         public static void UnloadScene(string sceneId)
         {
             Physics.RemoveScene(sceneId);
+            Animator.RemoveScene(sceneId);
             _loadedScenes.TryRemove(sceneId, out _);
             _cameraQueues.TryRemove(sceneId, out _);
             _runtimeScenes.TryRemove(sceneId, out _);
@@ -1665,6 +1767,7 @@ namespace LimitlessSquareEngine.Engine
                 _boundGraphics?.RemoveSceneCache(sceneId);
 
             Physics.ClearAll();
+            Animator.Clear();
 
             _loadedScenes.Clear();
             _cameraQueues.Clear();
@@ -1674,6 +1777,7 @@ namespace LimitlessSquareEngine.Engine
 
         public static void RemoveScene(string sceneId)
         {
+            Animator.RemoveScene(sceneId);
             _loadedScenes.TryRemove(sceneId, out _);
             _cameraQueues.TryRemove(sceneId, out _);
             _runtimeScenes.TryRemove(sceneId, out _);

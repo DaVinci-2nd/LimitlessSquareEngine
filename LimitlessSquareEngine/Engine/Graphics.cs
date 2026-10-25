@@ -112,7 +112,7 @@ namespace LimitlessSquareEngine
 
         private RenderCullMode _currentCullMode = RenderCullMode.Front;
 
-        // 主环境光，默认灰色
+        // 主环境光
         private Vector3 _ambientLightColor = new Vector3(0.5f, 0.5f, 0.5f);
         private float _ambientLightIntensity = 1f;
 
@@ -1256,29 +1256,29 @@ namespace LimitlessSquareEngine
             public Double3 Position { get; set; } = new Double3(0, 0, 0);
             public Double3 Direction { get; set; } = new Double3(0, -1, 0);
 
-            // 点光源、盒状灯、聚光灯常用范围
+            // 常用范围
             public double Range { get; set; } = 1.0;
 
-            // 点光源、聚光灯、面光灯、线光灯的衰减曲线
+            // 衰减曲线
             // 0.5 = 线性衰减
             // 越接近 0 = 前快后慢
             // 越接近 1 = 前慢后快
             public double AttenuationCurve { get; set; } = 0.5;
 
-            // 盒状灯：长方体尺寸
+            // 盒状灯
             public Double3 BoxSize { get; set; } = new Double3(1, 1, 1);
 
-            // 聚光灯：内外角
+            // 聚光灯
             public double InnerAngle { get; set; } = 15.0;
             public double OuterAngle { get; set; } = 30.0;
 
-            // 面光灯：一个方形面
+            // 面光灯
             public Double3 AreaRight { get; set; } = new Double3(1, 0, 0);
             public Double3 AreaUp { get; set; } = new Double3(0, 1, 0);
             public double AreaWidth { get; set; } = 1.0;
             public double AreaHeight { get; set; } = 1.0;
 
-            // 线光灯：一条线段
+            // 线光灯
             public Double3 LineDirection { get; set; } = new Double3(1, 0, 0);
             public double LineLength { get; set; } = 1.0;
 
@@ -3717,7 +3717,7 @@ namespace LimitlessSquareEngine
                 buffer.Add(0f); buffer.Add(0f); buffer.Add(0f); buffer.Add(1f);
             }
 
-            // Meta0: x=Kind, y=Intensity, z=CastShadow, w=AttenuationCurve
+            // Meta0
             AddVec4(
                 dst,
                 0f,
@@ -3725,7 +3725,7 @@ namespace LimitlessSquareEngine
                 light.Settings.CastShadow ? 1f : 0f,
                 (float)light.Settings.AttenuationCurve);
 
-            // ColorRange: xyz=Color, w=Range
+            // ColorRange
             AddVec4(
                 dst,
                 (float)light.Settings.Color.X,
@@ -3733,7 +3733,7 @@ namespace LimitlessSquareEngine
                 (float)light.Settings.Color.Z,
                 (float)light.Settings.Range);
 
-            // PositionInner: xyz=Position, w=InnerAngle
+            // PositionInner
             AddVec4(
                 dst,
                 relativePosition.X,
@@ -5074,7 +5074,7 @@ namespace LimitlessSquareEngine
             _gl.BindVertexArray(_vertexArrayObject);
             _gl.BindBuffer(BufferTargetARB.ArrayBuffer, _vertexBufferObject);
 
-            // 设置顶点属性指针 (位置: 3 floats, 颜色: 4 floats)
+            // 设置顶点属性指针
             _gl.VertexAttribPointer(0, 3, VertexAttribPointerType.Float, false, 9 * sizeof(float), 0);
             _gl.EnableVertexAttribArray(0);
 
@@ -6596,7 +6596,7 @@ namespace LimitlessSquareEngine
         }
 
         /// <summary>
-        /// 设置当前绘制颜色 (分量0-1)
+        /// 设置当前绘制颜色
         /// </summary>
         public void SetColor(float r, float g, float b, float a = 1.0f)
         {
@@ -6604,7 +6604,7 @@ namespace LimitlessSquareEngine
         }
 
         /// <summary>
-        /// 设置当前绘制颜色 (整数0-255)
+        /// 设置当前绘制颜色整数
         /// </summary>
         public void SetColorRGB(int r, int g, int b, int a = 255)
         {
@@ -6665,7 +6665,7 @@ namespace LimitlessSquareEngine
         }
 
         /// <summary>
-        /// 绘制线条（两点一线）
+        /// 绘制线条
         /// </summary>
         public void DrawLine(float x1, float y1, float z1, float x2, float y2, float z2)
         {
@@ -6677,7 +6677,7 @@ namespace LimitlessSquareEngine
         }
 
         /// <summary>
-        /// 绘制连续线条（折线）
+        /// 绘制连续线条
         /// </summary>
         public void DrawLineStrip(Table points)
         {
@@ -6737,7 +6737,7 @@ namespace LimitlessSquareEngine
         }
 
         /// <summary>
-        /// 绘制矩形（2D平面）
+        /// 绘制矩形
         /// </summary>
         public void DrawRect(float x, float y, float width, float height)
         {

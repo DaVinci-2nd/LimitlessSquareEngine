@@ -1,4 +1,4 @@
-﻿using MoonSharp.Interpreter;
+using MoonSharp.Interpreter;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -88,10 +88,10 @@ namespace LimitlessSquareEngine.Engine
         public string Content { get; set; }
         public Vector4 TextColor { get; set; }
 
-        // 字体家族名，空则系统默认
+        // 字体家族名
         public string FontFamily { get; set; }
 
-        // 字号（像素）
+        // 字号
         public float FontSize { get; set; }
 
         public bool FontBold { get; set; }

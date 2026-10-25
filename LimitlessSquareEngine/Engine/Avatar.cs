@@ -163,6 +163,26 @@ namespace LimitlessSquareEngine.Engine
 
         public AvatarMeta Meta { get; } = new();
 
+        public HumanoidRig Rig { get; set; } = new();
+
+        internal void ApplyRig(HumanoidRig rig)
+        {
+            if (rig == null)
+                return;
+
+            Rig = rig;
+
+            Humanoid.Clear();
+
+            foreach (KeyValuePair<string, HumanoidBoneBinding> pair in rig.Bones)
+            {
+                if (pair.Value.BoneIndex < 0 || pair.Value.BoneIndex >= Skeleton.Bones.Count)
+                    continue;
+
+                Humanoid.SetBoneIndex(pair.Key, pair.Value.BoneIndex);
+            }
+        }
+
         public bool LookAtEnabled { get; set; } = false;
 
         public Double3? LookAtTarget { get; set; } = null;

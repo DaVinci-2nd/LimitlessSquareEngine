@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Numerics;
 using LimitlessSquareEngine;
 
@@ -69,11 +70,12 @@ namespace LimitlessSquareEngine.Engine
                     avatar.Skins.Add(skin);
             }
 
-            foreach (VrmHumanoidBone humanoidBone in data.HumanoidBones)
-            {
-                if (humanoidBone.NodeIndex >= 0 && humanoidBone.NodeIndex < avatar.Skeleton.Bones.Count)
-                    avatar.Humanoid.SetBoneIndex(humanoidBone.BoneName, humanoidBone.NodeIndex);
-            }
+            avatar.ApplyRig(HumanoidRigBuilder.Build(
+                avatar.ModelKey,
+                avatar.Skeleton,
+                data.HumanoidBones.Select(humanoidBone =>
+                    new KeyValuePair<string, int>(humanoidBone.BoneName, humanoidBone.NodeIndex)),
+                HumanoidProfiles.Vrm1));
 
             foreach (VrmRawExpression rawExpression in data.Expressions)
             {

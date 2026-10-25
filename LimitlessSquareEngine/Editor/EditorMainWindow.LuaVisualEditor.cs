@@ -1323,14 +1323,14 @@ namespace LimitlessSquareEngine.Editor
             var items = new List<LuaCompletionItem>();
             var seen = new HashSet<string>();
 
-            // 1. Lua keywords (priority 10)
+            // Lua关键字
             foreach (string kw in LuaKeywords)
             {
                 if (seen.Add(kw))
                     items.Add(new LuaCompletionItem(kw, kw, "Lua关键字", "Keyword", 10));
             }
 
-            // 2. Built-in engine APIs - dynamically synced from EditorHostBridge (priority 5)
+            // 内置引擎API
             EditorHostBridge.LuaApiMetadata[] apiMeta = EditorHostBridge.GetLuaApiMetadata();
             foreach (var meta in apiMeta)
             {
@@ -1338,21 +1338,21 @@ namespace LimitlessSquareEngine.Editor
                     items.Add(new LuaCompletionItem(meta.Name, meta.Signature, meta.Description, meta.Category, 5));
             }
 
-            // 3. Lua standard library (priority 8)
+            // Lua标准库
             foreach (var (name, signature, description, category) in LuaStdLibEntries)
             {
                 if (seen.Add(name))
                     items.Add(new LuaCompletionItem(name, signature, description, category, 8));
             }
 
-            // 4. Code snippets (priority 9)
+            // 代码片段
             foreach (var (name, signature, description, category, insertText) in LuaSnippetEntries)
             {
                 if (seen.Add(name))
                     items.Add(new LuaCompletionItem(name, signature, description, category, 9, insertText));
             }
 
-            // 5. Document-local variables and functions (priority 6)
+            // 文档本地变量与函数
             string documentText = _luaSourceEditor?.Text ?? "";
             foreach (var (name, kind) in ParseDocumentLocals(documentText))
             {
@@ -1454,7 +1454,7 @@ namespace LimitlessSquareEngine.Editor
         }
 
         // ========================================
-        // Lua Diagnostics (Error Squiggly Lines)
+        // Lua Diagnostics
         // ========================================
 
         private sealed class LuaDiagnosticsState

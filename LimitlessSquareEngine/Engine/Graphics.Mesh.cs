@@ -1,4 +1,4 @@
-﻿using MoonSharp.Interpreter;
+using MoonSharp.Interpreter;
 using LimitlessSquareEngine.Engine;
 using SharpGLTF.Memory;
 using SharpGLTF.Transforms;
@@ -540,6 +540,11 @@ namespace LimitlessSquareEngine
 
             var avatar = new Avatar(meshKey, meshKey);
             new VrmAvatar(meshKey).MapToAvatar(avatar, data);
+
+            if (HumanoidRigBuilder.TryLoadRig(vrmFilePath, out HumanoidRig? savedRig))
+                avatar.ApplyRig(savedRig!);
+            else
+                HumanoidRigBuilder.SaveRig(vrmFilePath, avatar.Rig);
 
             Dictionary<int, string> materialKeysByIndex =
                 RegisterVrmGeneratedMaterials(meshKey, assetsRoot, vrmFilePath, data);

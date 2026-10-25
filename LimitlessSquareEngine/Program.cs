@@ -274,6 +274,7 @@ namespace LimitlessSquareEngine
         // 噪声定义注册表
         internal static Dictionary<string, string> _noiseFieldFileRegistry = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         static readonly HashSet<string> _lazyNoiseFieldKeyDiscoveryCompleted = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        static readonly HashSet<string> _lazyAnimationKeyDiscoveryCompleted = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         // 场景文件显示名表
         static Dictionary<string, string> _sceneFileDisplayName = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
@@ -585,6 +586,42 @@ namespace LimitlessSquareEngine
                 }
 
                 _lazyNoiseFieldKeyDiscoveryCompleted.Add(_assetRootPath);
+            }
+        }
+
+        internal static void EnsureAllAnimationKeysDiscovered()
+        {
+            lock (_assetDiscoveryLock)
+            {
+                if (_lazyAnimationKeyDiscoveryCompleted.Contains(_assetRootPath))
+                    return;
+
+                if (!Directory.Exists(_assetRootPath))
+                {
+                    _lazyAnimationKeyDiscoveryCompleted.Add(_assetRootPath);
+                    return;
+                }
+
+                string[] files = Directory.GetFiles(_assetRootPath, "*.json", SearchOption.AllDirectories);
+                Array.Sort(files, StringComparer.OrdinalIgnoreCase);
+
+                foreach (string file in files)
+                {
+                    if (AnimationJson.TryLoadClip(file, out AnimationClipData? clipData, out _))
+                    {
+                        string key = BuildAssetKey(_assetRootPath, file, removeExtension: true);
+                        AnimationClipRegistry.Register(key, clipData!);
+                        continue;
+                    }
+
+                    if (AnimationJson.TryLoadController(file, out AnimatorControllerData? controllerData, out _))
+                    {
+                        string key = BuildAssetKey(_assetRootPath, file, removeExtension: true);
+                        Animator.RegisterController(key, controllerData!);
+                    }
+                }
+
+                _lazyAnimationKeyDiscoveryCompleted.Add(_assetRootPath);
             }
         }
 
@@ -1590,6 +1627,36 @@ namespace LimitlessSquareEngine
                     catch (Exception ex)
                     {
                         Console.WriteLine($"[!] Scene scan failed for {file}: {ex.Message}");
+                    }
+
+                    try
+                    {
+                        if (AnimationJson.TryLoadClip(file, out AnimationClipData? clipData, out _))
+                        {
+                            string clipKey = BuildAssetKey(assetsPath, file, removeExtension: true);
+
+                            AnimationClipRegistry.Register(clipKey, clipData!);
+                            continue;
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"[!] Animation clip scan failed for {file}: {ex.Message}");
+                    }
+
+                    try
+                    {
+                        if (AnimationJson.TryLoadController(file, out AnimatorControllerData? controllerData, out _))
+                        {
+                            string controllerKey = BuildAssetKey(assetsPath, file, removeExtension: true);
+
+                            Animator.RegisterController(controllerKey, controllerData!);
+                            continue;
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"[!] Animator controller scan failed for {file}: {ex.Message}");
                     }
 
                     try
@@ -2815,7 +2882,7 @@ namespace LimitlessSquareEngine
             // 处理窗口事件
             _window.DoEvents();
 
-            // 如果OpenGL未初始化、窗口准备关闭，跳过渲染
+            // 如果OpenGL未初始化或窗口准备关闭则跳过渲染
             if (_gl == null || _window.IsClosing)
                 return;
 
@@ -2834,6 +2901,8 @@ namespace LimitlessSquareEngine
             _audio?.Update(deltaTime);
             if (shouldAdvanceSimulation)
             {
+                // 动画求解
+                Animator.TickAll(deltaTime);
                 // 遍历所有脚本实例
                 foreach (var instance in _luaScriptInstances)
                 {
@@ -3213,7 +3282,7 @@ namespace LimitlessSquareEngine
         }
 
         /// <summary>
-        /// 解析当前运行模式。
+        /// 解析当前运行模式
         /// </summary>
         /// <returns></returns>
         static bool ResolveEditorMode()
@@ -3320,7 +3389,7 @@ namespace LimitlessSquareEngine
         }
 
         /// <summary>
-        /// 验证场景文件结构是否合法。
+        /// 验证场景文件结构是否合法
         /// </summary>
         /// <param name="filePath"></param>
         /// <param name="sceneId"></param>
@@ -3531,7 +3600,7 @@ namespace LimitlessSquareEngine
         }
 
         /// <summary>
-        /// 验证材质文件结构是否合法。
+        /// 验证材质文件结构是否合法
         /// </summary>
         static bool TryValidateMaterialFile(string filePath, out string reason)
         {
