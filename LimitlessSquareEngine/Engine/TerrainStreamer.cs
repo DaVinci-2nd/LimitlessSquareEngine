@@ -48,7 +48,7 @@ namespace LimitlessSquareEngine.Engine
 
         public double PlanetRadius = 6371000.0;
 
-        public double UnloadGraceSeconds = 1.0;
+        public double UnloadGraceSeconds = 0.5;
 
         public TerrainBuildDelegate? RenderBuilder;
         public TerrainCommitDelegate? RenderCommitter;

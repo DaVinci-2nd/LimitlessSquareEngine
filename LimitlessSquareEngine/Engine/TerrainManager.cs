@@ -71,6 +71,19 @@ namespace LimitlessSquareEngine.Engine
         // 每帧推进所有地形
         public static void TickAll()
         {
+            foreach (SceneData scene in Scene.GetLoadedScenes())
+            {
+                foreach (SceneObject obj in scene.Objects)
+                {
+                    if (!string.Equals(obj.Type, "Terrain", StringComparison.Ordinal))
+                        continue;
+
+                    Terrain? terrain = GetOrCreate(scene.SceneId, obj.Id);
+                    if (terrain != null)
+                        terrain.SetStreamingEnabled(obj.Active);
+                }
+            }
+
             foreach (Terrain terrain in _terrains.Values)
                 terrain.Tick();
         }

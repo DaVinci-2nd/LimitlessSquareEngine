@@ -709,6 +709,9 @@ float SampleCloudShadow()
         alpha = mix(nearAlpha, alpha, nearBlend);
     }
 
+    if (uCloudShadowParamsA.z > 0.0 && r > uCloudShadowParamsA.z)
+        return 1.0;
+
     return 1.0 - alpha;
 }
 

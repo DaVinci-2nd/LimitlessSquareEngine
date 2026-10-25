@@ -66,6 +66,19 @@ namespace LimitlessSquareEngine.Engine
 
         public static void TickAll()
         {
+            foreach (SceneData scene in Scene.GetLoadedScenes())
+            {
+                foreach (SceneObject obj in scene.Objects)
+                {
+                    if (!string.Equals(obj.Type, "Water", StringComparison.Ordinal))
+                        continue;
+
+                    Water? water = GetOrCreate(scene.SceneId, obj.Id);
+                    if (water != null)
+                        water.SetStreamingEnabled(obj.Active);
+                }
+            }
+
             foreach (Water water in _waters.Values)
                 water.Tick();
         }

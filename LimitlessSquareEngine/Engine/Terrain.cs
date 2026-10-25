@@ -423,7 +423,7 @@ namespace LimitlessSquareEngine.Engine
             }
             else
             {
-                Height.AddLayer(new ConstantHeightSource(0.0), 1.0, 0.0);
+                Height.AddLayer(new RuleHeightSource(TerrainMapGenerator.CreatePerlinRule(Seed)), 1.0, 0.0);
             }
 
             if (_detailNoiseConfigured)

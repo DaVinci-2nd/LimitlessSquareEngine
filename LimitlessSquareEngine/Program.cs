@@ -1,4 +1,4 @@
-﻿using LimitlessSquareEngine.Engine;
+using LimitlessSquareEngine.Engine;
 using MoonSharp.Interpreter;
 using MoonSharp.Interpreter.Platforms;
 using Silk.NET.Core;
@@ -2025,21 +2025,6 @@ namespace LimitlessSquareEngine
                         RecordLuaApi("game_data", "game_data", "游戏数据对象", "Data");
                         instance.LuaScript.Globals["graphics"] = graphics;
                         RecordLuaApi("graphics", "graphics", "图形系统对象", "Graphics");
-                        // 注入地形系统
-                        instance.LuaScript.Globals["terrain_get"] =
-                            (Func<string, string, Terrain?>)(
-                                (sceneId, objectId) => TerrainManager.GetOrCreate(sceneId, objectId));
-                        RecordLuaApi("terrain_get", "terrain_get(sceneId, objectId) -> terrain", "获取或创建地形节点", "Terrain");
-                        instance.LuaScript.Globals["terrain_remove"] =
-                            (Action<string, string>)((sceneId, objectId) => TerrainManager.Remove(sceneId, objectId));
-                        RecordLuaApi("terrain_remove", "terrain_remove(sceneId, objectId)", "移除地形节点", "Terrain");
-                        instance.LuaScript.Globals["water_get"] =
-                            (Func<string, string, Water?>)(
-                                (sceneId, objectId) => WaterManager.GetOrCreate(sceneId, objectId));
-                        RecordLuaApi("water_get", "water_get(sceneId, objectId) -> water", "获取或创建水体节点", "Water");
-                        instance.LuaScript.Globals["water_remove"] =
-                            (Action<string, string>)((sceneId, objectId) => WaterManager.Remove(sceneId, objectId));
-                        RecordLuaApi("water_remove", "water_remove(sceneId, objectId)", "移除水体节点", "Water");
                         // 注入后台任务函数
                         instance.LuaScript.Globals["submit_task"] = submitTaskFunc;
                         RecordLuaApi("submit_task", "submit_task(luaCode) -> taskId", "提交后台任务", "Task");

@@ -876,13 +876,15 @@ namespace LimitlessSquareEngine
                 _gl.Uniform3(loc.CloudShadowPlanetCenterRel, planetCenterRel.X, planetCenterRel.Y, planetCenterRel.Z);
 
             float uvWorldSize = 1f;
+            float cloudTopRadius = 0f;
             if (enabled)
             {
-                uvWorldSize = _activeCloudShadow.CloudMaterial != null
-                    ? (ReadMaterialFloat(_activeCloudShadow.CloudMaterial, "uPlanetRadius", 6371000f)
+                cloudTopRadius = _activeCloudShadow.CloudMaterial != null
+                    ? ReadMaterialFloat(_activeCloudShadow.CloudMaterial, "uPlanetRadius", 6371000f)
                        + ReadMaterialFloat(_activeCloudShadow.CloudMaterial, "uCloudBaseAltitude", 1400f)
-                       + ReadMaterialFloat(_activeCloudShadow.CloudMaterial, "uCloudThickness", 2600f)) * 2f
                     : 1f;
+
+                uvWorldSize = cloudTopRadius * 2f;
 
                 Vector3 sunDirGpu = FlipCloudShadowZ(_activeCloudShadow.SunDir);
                 Vector3 rayDirGpu = -sunDirGpu;
@@ -896,7 +898,7 @@ namespace LimitlessSquareEngine
             }
 
             if (loc.CloudShadowParamsA != -1)
-                _gl.Uniform4(loc.CloudShadowParamsA, enabled ? 1f : 0f, 0f, 0f, uvWorldSize);
+                _gl.Uniform4(loc.CloudShadowParamsA, enabled ? 1f : 0f, 0f, cloudTopRadius, uvWorldSize);
 
             if (loc.CloudShadowMap != -1)
             {
