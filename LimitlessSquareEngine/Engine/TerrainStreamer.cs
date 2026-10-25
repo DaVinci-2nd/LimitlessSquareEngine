@@ -48,6 +48,8 @@ namespace LimitlessSquareEngine.Engine
 
         public double PlanetRadius = 6371000.0;
 
+        public double VoxelCoverRadius = 0.0;
+
         public double UnloadGraceSeconds = 0.5;
 
         public TerrainBuildDelegate? RenderBuilder;

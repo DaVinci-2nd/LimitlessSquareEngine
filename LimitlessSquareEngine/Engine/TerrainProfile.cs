@@ -8,12 +8,13 @@ namespace LimitlessSquareEngine.Engine
         // 渲染流参数
         public int RenderBaseLevel { get; set; } = 6;
         public double RenderBaseRadius { get; set; } = 200_000.0;
-        public int RenderMaxLevel { get; set; } = 9;
+        public int RenderMaxLevel { get; set; } = 17;
         public double RenderStreamRadius { get; set; } = 500_000.0;
         public double RenderBudgetMilliseconds { get; set; } = 6.0;
         public int RenderBaseTileResolution { get; set; } = 33;
         public int RenderVoxelGridSize { get; set; } = 33;
         public int RenderVoxelShellThickness { get; set; } = 32;
+        public double VoxelCoverRadius { get; set; } = 128.0;
         public int AlwaysResidentLevel { get; set; } = 2;
 
         // 物理流参数

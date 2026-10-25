@@ -20,6 +20,7 @@ namespace LimitlessSquareEngine.Engine
 
         public readonly TerrainProfile Profile = new();
         public readonly TerrainStreamer Streamer = new();
+        public readonly TerrainVoxel Voxel;
 
         public CubeMapData? HeightMap { get; private set; }
 
@@ -72,6 +73,9 @@ namespace LimitlessSquareEngine.Engine
             Streamer.RenderUnloader = UnloadRender;
             Streamer.PhysicsBuilder = null;
             Streamer.PhysicsCommitter = null;
+
+            Voxel = new TerrainVoxel(this);
+            Voxel.CoverRadius = Profile.VoxelCoverRadius;
         }
 
         // 配置
@@ -531,7 +535,11 @@ namespace LimitlessSquareEngine.Engine
 
             RefreshCameraInterests();
 
+            EnsureRenderResources();
+
             Streamer.Tick();
+
+            Voxel.Tick();
         }
 
         private void RefreshCenter()
