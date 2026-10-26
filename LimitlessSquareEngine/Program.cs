@@ -1543,7 +1543,21 @@ namespace LimitlessSquareEngine
                     return errors.ToArray();
                 },
                 () => _luaApiMeta.ToArray(),
-                LoadSceneFileCore);
+                LoadSceneFileCore,
+                LoadAnimationClipCore,
+                LoadAnimatorControllerCore,
+                (key, data) => AnimationClipRegistry.Register(key, data),
+                (key, data) => Animator.RegisterController(key, data),
+                (x, y, z) =>
+                {
+                    DQuaternion rotation = DQuaternion.FromEulerDegrees(new Double3(x, y, z));
+                    return new[] { rotation.X, rotation.Y, rotation.Z, rotation.W };
+                },
+                (x, y, z, w) =>
+                {
+                    Double3 euler = new DQuaternion(x, y, z, w).ToEulerDegrees();
+                    return new[] { euler.X, euler.Y, euler.Z };
+                });
         }
 
         static void UnbindEditorHostBridge()
@@ -1562,6 +1576,42 @@ namespace LimitlessSquareEngine
                     return null;
 
                 return Scene.ParseSceneFile(filePath);
+            }
+            catch (Exception)
+            {
+                return null;
+            }
+        }
+
+        static AnimationClipData? LoadAnimationClipCore(string filePath)
+        {
+            if (string.IsNullOrWhiteSpace(filePath) || !File.Exists(filePath))
+                return null;
+
+            try
+            {
+                if (!AnimationJson.TryLoadClip(filePath, out AnimationClipData? clipData, out _))
+                    return null;
+
+                return clipData;
+            }
+            catch (Exception)
+            {
+                return null;
+            }
+        }
+
+        static AnimatorControllerData? LoadAnimatorControllerCore(string filePath)
+        {
+            if (string.IsNullOrWhiteSpace(filePath) || !File.Exists(filePath))
+                return null;
+
+            try
+            {
+                if (!AnimationJson.TryLoadController(filePath, out AnimatorControllerData? controllerData, out _))
+                    return null;
+
+                return controllerData;
             }
             catch (Exception)
             {

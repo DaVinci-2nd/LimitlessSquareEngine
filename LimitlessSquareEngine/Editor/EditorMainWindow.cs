@@ -1,4 +1,4 @@
-﻿using Avalonia;
+using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Controls.Primitives;
 using Avalonia.Input;
@@ -23,6 +23,7 @@ using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
 using System.Threading.Tasks;
 using AvaloniaEdit;
@@ -70,6 +71,8 @@ namespace LimitlessSquareEngine.Editor
         private MenuItem? _saveSceneMenuItem;
         private MenuItem? _undoSceneMenuItem;
         private MenuItem? _redoSceneMenuItem;
+        private MenuItem? _animationClipMenuItem;
+        private MenuItem? _animatorControllerMenuItem;
         private readonly List<SceneData> _sceneUndoStack = new List<SceneData>();
         private readonly List<SceneData> _sceneRedoStack = new List<SceneData>();
         private bool _isApplyingSceneHistory;
@@ -369,6 +372,8 @@ namespace LimitlessSquareEngine.Editor
             JsonFile,
             SceneJsonFile,
             MaterialJsonFile,
+            AnimationClipJsonFile,
+            AnimatorControllerJsonFile,
             ImageFile,
             FragFile,
             VertFile,
@@ -1953,6 +1958,8 @@ namespace LimitlessSquareEngine.Editor
                 }
             };
             private static readonly IBrush MaterialBrush = new SolidColorBrush(Color.Parse("#226622"));
+            private static readonly IBrush AnimationClipBrush = new SolidColorBrush(Color.Parse("#8A5A1F"));
+            private static readonly IBrush AnimatorControllerBrush = new SolidColorBrush(Color.Parse("#5A1F6A"));
             private static readonly IBrush ImageBrush = new SolidColorBrush(Color.Parse("#66C8FF"));
             private static readonly IBrush AudioBrush = new SolidColorBrush(Color.Parse("#7B1FA2"));
             private static readonly IBrush AudioDiscBrush = new SolidColorBrush(Color.Parse("#555555"));
@@ -2010,6 +2017,16 @@ namespace LimitlessSquareEngine.Editor
                     case ResourceIconKind.MaterialJsonFile:
                         DrawFileBase(context, bounds, MaterialBrush, true);
                         DrawMaterialSphere(context, bounds);
+                        break;
+
+                    case ResourceIconKind.AnimationClipJsonFile:
+                        DrawFileBase(context, bounds, AnimationClipBrush, true);
+                        DrawAnimationClipBars(context, bounds);
+                        break;
+
+                    case ResourceIconKind.AnimatorControllerJsonFile:
+                        DrawFileBase(context, bounds, AnimatorControllerBrush, true);
+                        DrawAnimatorStateNodes(context, bounds);
                         break;
 
                     case ResourceIconKind.ImageFile:
@@ -2320,6 +2337,48 @@ namespace LimitlessSquareEngine.Editor
                     bounds.Center.Y - formattedText.Height / 2 + textYOffset);
 
                 context.DrawText(formattedText, point);
+            }
+
+            private static void DrawAnimationClipBars(DrawingContext context, Rect bounds)
+            {
+                double boxSize = Math.Min(bounds.Width, bounds.Height);
+                double rowHeight = boxSize * 0.06;
+                double gap = boxSize * 0.05;
+                double totalHeight = rowHeight * 3.0 + gap * 2.0;
+                double left = bounds.X + boxSize * 0.24;
+                double top = bounds.Y + (bounds.Height - totalHeight) / 2.0;
+
+                double[] lengths = { 0.46, 0.30, 0.40 };
+
+                for (int i = 0; i < lengths.Length; i++)
+                {
+                    double width = boxSize * lengths[i];
+                    Rect bar = new Rect(left, top + i * (rowHeight + gap), width, rowHeight);
+                    context.DrawRectangle(WhiteBrush, null, bar);
+                }
+            }
+
+            private static void DrawAnimatorStateNodes(DrawingContext context, Rect bounds)
+            {
+                double boxSize = Math.Min(bounds.Width, bounds.Height);
+                double nodeWidth = boxSize * 0.30;
+                double nodeHeight = boxSize * 0.22;
+                double left = bounds.X + boxSize * 0.24;
+                double top = bounds.Y + boxSize * 0.26;
+                double offset = boxSize * 0.22;
+
+                Rect first = new Rect(left, top, nodeWidth, nodeHeight);
+                Rect second = new Rect(left + offset, top + offset, nodeWidth, nodeHeight);
+
+                context.DrawRectangle(WhiteBrush, null, first);
+                context.DrawRectangle(WhiteBrush, null, second);
+
+                Pen linkPen = new Pen(WhiteBrush, Math.Max(1.0, boxSize * 0.03));
+
+                context.DrawLine(
+                    linkPen,
+                    new Point(first.Right, first.Center.Y),
+                    new Point(second.Left, second.Center.Y));
             }
         }
 
@@ -4000,11 +4059,50 @@ namespace LimitlessSquareEngine.Editor
 
         private IEnumerable<MenuItem> CreateToolMenuItems()
         {
+            _animationClipMenuItem = new MenuItem { Header = "动画", IsEnabled = false };
+            _animatorControllerMenuItem = new MenuItem { Header = "动画器", IsEnabled = false };
+
+            _animationClipMenuItem.Click += (_, _) => OpenSelectedAnimationAsset(true);
+            _animatorControllerMenuItem.Click += (_, _) => OpenSelectedAnimationAsset(false);
+
             return new[]
             {
+                _animationClipMenuItem,
+                _animatorControllerMenuItem,
+                new MenuItem { Header = "-" },
                 new MenuItem { Header = "性能监控" },
                 new MenuItem { Header = "帧分析" }
             };
+        }
+
+        private void OpenSelectedAnimationAsset(bool animationClip)
+        {
+            if (_selectedResourceItemState == null || _selectedResourceItemState.IsDirectory)
+                return;
+
+            string path = _selectedResourceItemState.Path;
+
+            if (animationClip)
+                ShowAnimationClipWindow(path);
+            else
+                ShowAnimatorControllerWindow(path);
+        }
+
+        private void UpdateAnimationMenuItems()
+        {
+            bool hasAnimationClip = false;
+            bool hasAnimatorController = false;
+
+            if (_selectedResourceItemState != null && !_selectedResourceItemState.IsDirectory)
+            {
+                string assetType = ReadJsonAssetType(_selectedResourceItemState.Path);
+
+                hasAnimationClip = string.Equals(assetType, "AnimationClip", StringComparison.OrdinalIgnoreCase);
+                hasAnimatorController = string.Equals(assetType, "AnimatorController", StringComparison.OrdinalIgnoreCase);
+            }
+
+            _animationClipMenuItem?.SetCurrentValue(MenuItem.IsEnabledProperty, hasAnimationClip);
+            _animatorControllerMenuItem?.SetCurrentValue(MenuItem.IsEnabledProperty, hasAnimatorController);
         }
 
         private IEnumerable<MenuItem> CreateConfigMenuItems()
@@ -4719,7 +4817,12 @@ namespace LimitlessSquareEngine.Editor
                 panel.Children.Add(CreateResourceIconItem(childDirectory, true));
 
             foreach (string childFile in files)
+            {
+                if (IsEditorConfigFile(childFile))
+                    continue;
+
                 panel.Children.Add(CreateResourceIconItem(childFile, false));
+            }
 
             Border blankArea = new Border
             {
@@ -5098,6 +5201,7 @@ namespace LimitlessSquareEngine.Editor
 
             UpdateResourceItemVisual(state);
             ShowResourceDetailsInViewer(state.Path, state.IsDirectory);
+            UpdateAnimationMenuItems();
         }
 
         private void ClearSelectedResourceItem()
@@ -5109,6 +5213,7 @@ namespace LimitlessSquareEngine.Editor
                 UpdateResourceItemVisual(previous);
 
             RightDockSlot.Content = CreatePlaceholder("未选中文件或节点");
+            UpdateAnimationMenuItems();
         }
 
         private ResourceItemState? FindResourceItemStateByPath(string path)
@@ -5188,6 +5293,9 @@ namespace LimitlessSquareEngine.Editor
                     Directory.Move(state.Path, targetPath);
                 else
                     File.Move(state.Path, targetPath);
+
+                if (!state.IsDirectory)
+                    MoveEditorConfig(state.Path, targetPath);
 
                 if (!string.IsNullOrWhiteSpace(_currentResourceDirectoryPath))
                     ShowResourceDirectory(_currentResourceDirectoryPath);
@@ -5388,6 +5496,9 @@ namespace LimitlessSquareEngine.Editor
                 else
                     File.Delete(state.Path);
 
+                if (!state.IsDirectory)
+                    RemoveEditorConfig(state.Path);
+
                 ClearSelectedResourceItem();
 
                 if (!string.IsNullOrWhiteSpace(currentDirectoryPath))
@@ -5539,6 +5650,30 @@ void main()
                     File.WriteAllText(createdPath, content, Encoding.UTF8);
                     break;
 
+                case "动画":
+                    baseName = "NewAnimationClip";
+                    fileName = GetUniqueResourceName(directoryPath, baseName, ".json");
+                    createdPath = Path.Combine(directoryPath, fileName);
+                    WriteAssetJsonFile(createdPath, "AnimationClip", new AnimationClipData
+                    {
+                        Name = Path.GetFileNameWithoutExtension(fileName),
+                        Duration = 1.0,
+                        Loop = true,
+                        FrameRate = 30f,
+                        PlayMode = "normal"
+                    });
+                    break;
+
+                case "动画器":
+                    baseName = "NewAnimatorController";
+                    fileName = GetUniqueResourceName(directoryPath, baseName, ".json");
+                    createdPath = Path.Combine(directoryPath, fileName);
+                    WriteAssetJsonFile(createdPath, "AnimatorController", new AnimatorControllerData
+                    {
+                        Name = Path.GetFileNameWithoutExtension(fileName)
+                    });
+                    break;
+
                 default:
                     return Task.CompletedTask;
             }
@@ -5625,6 +5760,8 @@ void main()
             MenuItem newMaterialItem = new MenuItem { Header = "材质" };
             MenuItem newSceneItem = new MenuItem { Header = "场景" };
             MenuItem newCanvasItem = new MenuItem { Header = "画布" };
+            MenuItem newAnimationClipItem = new MenuItem { Header = "动画" };
+            MenuItem newAnimatorControllerItem = new MenuItem { Header = "动画器" };
             MenuItem newItem = new MenuItem
             {
                 Header = "新建",
@@ -5635,7 +5772,9 @@ void main()
                     newShaderItem,
                     newMaterialItem,
                     newSceneItem,
-                    newCanvasItem
+                    newCanvasItem,
+                    newAnimationClipItem,
+                    newAnimatorControllerItem
                 }
             };
             MenuItem revealItem = new MenuItem { Header = "查看文件" };
@@ -5647,6 +5786,8 @@ void main()
             newMaterialItem.Click += async (_, _) => await CreateNewResourceAsync("材质");
             newSceneItem.Click += async (_, _) => await CreateNewResourceAsync("场景");
             newCanvasItem.Click += async (_, _) => await CreateNewResourceAsync("画布");
+            newAnimationClipItem.Click += async (_, _) => await CreateNewResourceAsync("动画");
+            newAnimatorControllerItem.Click += async (_, _) => await CreateNewResourceAsync("动画器");
 
             revealItem.Click += (_, _) =>
             {
@@ -5857,9 +5998,19 @@ void main()
                     return ResourceIconKind.SceneJsonFile;
 
                 if (root.TryGetProperty("assetType", out JsonElement assetTypeElement) &&
-                    assetTypeElement.ValueKind == JsonValueKind.String &&
-                    string.Equals(assetTypeElement.GetString(), "Material", StringComparison.OrdinalIgnoreCase))
-                    return ResourceIconKind.MaterialJsonFile;
+                    assetTypeElement.ValueKind == JsonValueKind.String)
+                {
+                    string assetType = assetTypeElement.GetString() ?? string.Empty;
+
+                    if (string.Equals(assetType, "Material", StringComparison.OrdinalIgnoreCase))
+                        return ResourceIconKind.MaterialJsonFile;
+
+                    if (string.Equals(assetType, "AnimationClip", StringComparison.OrdinalIgnoreCase))
+                        return ResourceIconKind.AnimationClipJsonFile;
+
+                    if (string.Equals(assetType, "AnimatorController", StringComparison.OrdinalIgnoreCase))
+                        return ResourceIconKind.AnimatorControllerJsonFile;
+                }
 
                 return ResourceIconKind.JsonFile;
             }
@@ -5871,10 +6022,50 @@ void main()
 
         private bool TryHandleSpecialFileOpen(string filePath, string analyzedFileType)
         {
+            if (IsEditorConfigFile(filePath))
+                return false;
+
             if (!string.Equals(analyzedFileType, ".json", StringComparison.OrdinalIgnoreCase))
                 return false;
 
+            string assetType = ReadJsonAssetType(filePath);
+
+            if (string.Equals(assetType, "AnimationClip", StringComparison.OrdinalIgnoreCase))
+            {
+                ShowAnimationClipWindow(filePath);
+                return true;
+            }
+
+            if (string.Equals(assetType, "AnimatorController", StringComparison.OrdinalIgnoreCase))
+            {
+                ShowAnimatorControllerWindow(filePath);
+                return true;
+            }
+
             return TryOpenSceneJson(filePath);
+        }
+
+        private static string ReadJsonAssetType(string filePath)
+        {
+            try
+            {
+                string json = File.ReadAllText(filePath);
+
+                using JsonDocument doc = JsonDocument.Parse(json);
+
+                if (doc.RootElement.ValueKind != JsonValueKind.Object)
+                    return string.Empty;
+
+                if (!doc.RootElement.TryGetProperty("assetType", out JsonElement element) ||
+                    element.ValueKind != JsonValueKind.String)
+                    return string.Empty;
+
+                return element.GetString() ?? string.Empty;
+            }
+            catch
+            {
+                return string.Empty;
+            }
         }
 
         private bool TryOpenSceneJson(string filePath)
@@ -8248,6 +8439,2952 @@ void main()
 
             float t = Math.Clamp(SNVec2.Dot(p - a, ab) / lenSq, 0f, 1f);
             return SNVec2.Distance(p, a + t * ab);
+        }
+
+        private sealed class EditorConfigData
+        {
+            public string AssetType { get; set; } = "EditorConfig";
+            public string Target { get; set; } = "";
+            public Dictionary<string, JsonElement> Values { get; set; } = new();
+        }
+
+        private const string EditorConfigFileSuffix = ".editor.json";
+
+        private static bool IsEditorConfigFile(string filePath)
+        {
+            return filePath.EndsWith(EditorConfigFileSuffix, StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static string BuildEditorConfigPath(string assetPath)
+        {
+            string extension = Path.GetExtension(assetPath);
+            string withoutExtension = string.IsNullOrEmpty(extension)
+                ? assetPath
+                : assetPath[..^extension.Length];
+
+            return withoutExtension + EditorConfigFileSuffix;
+        }
+
+        private string BuildAnimationAssetKey(string assetPath)
+        {
+            string rootPath = _projectAssetRootPath ?? "";
+
+            if (string.IsNullOrWhiteSpace(rootPath))
+                return Path.GetFileNameWithoutExtension(assetPath);
+
+            string key = Path.GetRelativePath(rootPath, assetPath).Replace('\\', '/');
+            string extension = Path.GetExtension(key);
+
+            if (!string.IsNullOrEmpty(extension))
+                key = key[..^extension.Length];
+
+            return key;
+        }
+
+        private EditorConfigData LoadEditorConfig(string assetPath)
+        {
+            EditorConfigData config = new EditorConfigData();
+            string configPath = BuildEditorConfigPath(assetPath);
+
+            if (!File.Exists(configPath))
+                return config;
+
+            try
+            {
+                string json = File.ReadAllText(configPath);
+                EditorConfigData? loaded = JsonSerializer.Deserialize<EditorConfigData>(json, SceneJsonReadOptions);
+
+                if (loaded != null)
+                    config = loaded;
+            }
+            catch
+            {
+            }
+
+            return config;
+        }
+
+        private void SaveEditorConfig(string assetPath, EditorConfigData config)
+        {
+            string configPath = BuildEditorConfigPath(assetPath);
+
+            try
+            {
+                config.AssetType = "EditorConfig";
+                config.Target = BuildAnimationAssetKey(assetPath);
+                string json = JsonSerializer.Serialize(config, SceneJsonWriteOptions);
+                File.WriteAllText(configPath, json);
+            }
+            catch
+            {
+            }
+        }
+
+        private void RemoveEditorConfig(string assetPath)
+        {
+            string configPath = BuildEditorConfigPath(assetPath);
+
+            try
+            {
+                if (File.Exists(configPath))
+                    File.Delete(configPath);
+            }
+            catch
+            {
+            }
+        }
+
+        private void MoveEditorConfig(string sourceAssetPath, string targetAssetPath)
+        {
+            string sourceConfigPath = BuildEditorConfigPath(sourceAssetPath);
+            string targetConfigPath = BuildEditorConfigPath(targetAssetPath);
+
+            try
+            {
+                if (File.Exists(sourceConfigPath))
+                    File.Move(sourceConfigPath, targetConfigPath, true);
+            }
+            catch
+            {
+            }
+        }
+
+        private static void WriteAssetJsonFile(string filePath, string assetType, object body)
+        {
+            JsonObject root = new JsonObject();
+            root["assetType"] = assetType;
+
+            JsonNode? node = JsonSerializer.SerializeToNode(body, SceneJsonWriteOptions);
+
+            if (node is JsonObject bodyObject)
+            {
+                foreach (KeyValuePair<string, JsonNode?> property in bodyObject)
+                    root[property.Key] = property.Value?.DeepClone();
+            }
+
+            File.WriteAllText(filePath, root.ToJsonString(SceneJsonWriteOptions));
+        }
+
+        private void SaveAnimationClipFile(string filePath, AnimationClipData data)
+        {
+            WriteAssetJsonFile(filePath, "AnimationClip", data);
+        }
+
+        private void SaveAnimatorControllerFile(string filePath, AnimatorControllerData data)
+        {
+            WriteAssetJsonFile(filePath, "AnimatorController", data);
+        }
+
+        private static string ReadEditorConfigValue(EditorConfigData config, string key)
+        {
+            if (config.Values.TryGetValue(key, out JsonElement element) && element.ValueKind == JsonValueKind.String)
+                return element.GetString() ?? string.Empty;
+
+            return string.Empty;
+        }
+
+        private static void WriteEditorConfigValue(EditorConfigData config, string key, string value)
+        {
+            config.Values[key] = JsonSerializer.SerializeToElement(value, SceneJsonWriteOptions);
+        }
+
+        private static int ResolveAnimationValueCount(string valueType)
+        {
+            switch (valueType)
+            {
+                case "float":
+                case "bool":
+                    return 1;
+
+                case "vector2":
+                    return 2;
+
+                case "vector3":
+                    return 3;
+
+                case "quaternion":
+                case "vector4":
+                    return 4;
+
+                default:
+                    return 0;
+            }
+        }
+
+        private static string BuildChannelLabel(AnimationChannel channel)
+        {
+            return channel.Binding + "/" + channel.Path + "." + channel.Property;
+        }
+
+        private static AnimationKeyframe? FindKeyframeAt(AnimationChannel channel, double time, double tolerance)
+        {
+            foreach (AnimationKeyframe keyframe in channel.Keys)
+            {
+                if (Math.Abs(keyframe.Time - time) <= tolerance)
+                    return keyframe;
+            }
+
+            return null;
+        }
+
+        private static AnimationKeyframe InsertOrGetKeyframe(AnimationChannel channel, double time, double tolerance, int valueCount)
+        {
+            AnimationKeyframe? existing = FindKeyframeAt(channel, time, tolerance);
+
+            if (existing != null)
+                return existing;
+
+            AnimationKeyframe keyframe = new AnimationKeyframe
+            {
+                Time = time,
+                Value = new float[valueCount]
+            };
+
+            channel.Keys.Add(keyframe);
+            channel.Keys.Sort((a, b) => a.Time.CompareTo(b.Time));
+
+            return keyframe;
+        }
+
+        private static double SampleChannelComponent(AnimationChannel channel, int component, double time)
+        {
+            List<AnimationKeyframe> keys = channel.Keys;
+
+            if (keys.Count == 0)
+                return 0.0;
+
+            if (time <= keys[0].Time)
+                return component < keys[0].Value.Length ? keys[0].Value[component] : 0.0;
+
+            for (int i = 1; i < keys.Count; i++)
+            {
+                if (keys[i].Time < time)
+                    continue;
+
+                AnimationKeyframe from = keys[i - 1];
+                AnimationKeyframe to = keys[i];
+                double span = to.Time - from.Time;
+
+                if (span <= 0.0)
+                    return component < to.Value.Length ? to.Value[component] : 0.0;
+
+                double ratio = (time - from.Time) / span;
+                double fromValue = component < from.Value.Length ? from.Value[component] : 0.0;
+                double toValue = component < to.Value.Length ? to.Value[component] : 0.0;
+
+                if (string.Equals(channel.Interpolation, "step", StringComparison.OrdinalIgnoreCase))
+                    return fromValue;
+
+                return fromValue + (toValue - fromValue) * ratio;
+            }
+
+            AnimationKeyframe last = keys[keys.Count - 1];
+            return component < last.Value.Length ? last.Value[component] : 0.0;
+        }
+
+        private static void ResolveDefaultKeyframeValue(AnimationChannel channel, AnimationKeyframe keyframe, int valueCount)
+        {
+            if (string.Equals(channel.Property, "rotation", StringComparison.OrdinalIgnoreCase))
+            {
+                keyframe.Value = valueCount >= 4
+                    ? new[] { 0f, 0f, 0f, 1f }
+                    : new[] { 0f, 0f, 0f };
+                return;
+            }
+
+            if (string.Equals(channel.Property, "scale", StringComparison.OrdinalIgnoreCase))
+            {
+                keyframe.Value = new[] { 1f, 1f, 1f };
+                return;
+            }
+
+            if (keyframe.Value.Length != valueCount)
+            {
+                float[] resized = keyframe.Value;
+                Array.Resize(ref resized, valueCount);
+                keyframe.Value = resized;
+            }
+        }
+
+        private static List<double> BuildChannelDisplayValues(AnimationChannel channel, List<float> values, bool eulerMode)
+        {
+            List<double> result = new List<double>();
+
+            foreach (float value in values)
+                result.Add(value);
+
+            if (!eulerMode)
+                return result;
+
+            if (!string.Equals(channel.Property, "rotation", StringComparison.OrdinalIgnoreCase))
+                return result;
+
+            if (values.Count < 4)
+                return result;
+
+            double[] euler = EditorHostBridge.QuaternionToEulerDegrees(values[0], values[1], values[2], values[3]);
+
+            result.Clear();
+
+            foreach (double value in euler)
+                result.Add(value);
+
+            return result;
+        }
+
+        private static void ApplyChannelDisplayValues(AnimationChannel channel, AnimationKeyframe keyframe, List<double> display, bool eulerMode)
+        {
+            if (eulerMode &&
+                string.Equals(channel.Property, "rotation", StringComparison.OrdinalIgnoreCase) &&
+                display.Count >= 3)
+            {
+                double[] quaternion = EditorHostBridge.EulerDegreesToQuaternion(display[0], display[1], display[2]);
+
+                keyframe.Value = new[]
+                {
+                    (float)quaternion[0],
+                    (float)quaternion[1],
+                    (float)quaternion[2],
+                    (float)quaternion[3]
+                };
+
+                return;
+            }
+
+            int count = display.Count;
+
+            if (keyframe.Value.Length != count)
+            {
+                float[] resized = keyframe.Value;
+                Array.Resize(ref resized, count);
+                keyframe.Value = resized;
+            }
+
+            for (int i = 0; i < count; i++)
+                keyframe.Value[i] = (float)display[i];
+        }
+
+        private void ShowAnimationClipWindow(string filePath)
+        {
+            AnimationClipData? clip = EditorHostBridge.LoadAnimationClip(filePath);
+
+            if (clip == null)
+            {
+                _ = ShowSimpleWarningDialogAsync("打开失败", "无法解析动画剪辑 " + Path.GetFileName(filePath));
+                return;
+            }
+
+            string fileName = Path.GetFileName(filePath);
+            EditorConfigData config = LoadEditorConfig(filePath);
+
+            bool isDirty = false;
+            bool isClosing = false;
+            bool eulerMode = string.Equals(ReadEditorConfigValue(config, "rotationMode"), "euler", StringComparison.OrdinalIgnoreCase);
+            bool curvesMode = string.Equals(ReadEditorConfigValue(config, "timelineMode"), "curves", StringComparison.OrdinalIgnoreCase);
+
+            AnimationTimelineControl timeline = new AnimationTimelineControl
+            {
+                Clip = clip,
+                CurvesMode = curvesMode
+            };
+
+            StackPanel rowPanel = new StackPanel { Orientation = Orientation.Vertical };
+            List<Action> rowRefreshActions = new List<Action>();
+            DispatcherTimer? playTimer = null;
+            Window window = null!;
+
+            TextBlock statusText = new TextBlock
+            {
+                Foreground = new SolidColorBrush(Color.Parse("#9A9A9A")),
+                VerticalAlignment = VerticalAlignment.Center
+            };
+
+            Button firstButton = CreateTextCommandButton("首帧", 64);
+            Button previousFrameButton = CreateTextCommandButton("上一帧", 64);
+            Button previousKeyButton = CreateTextCommandButton("上一关键帧", 96);
+            Button playButton = CreateTextCommandButton("播放", 64);
+            Button nextKeyButton = CreateTextCommandButton("下一关键帧", 96);
+            Button nextFrameButton = CreateTextCommandButton("下一帧", 64);
+            Button lastButton = CreateTextCommandButton("末帧", 64);
+
+            TextBox positionBox = CreateInspectorTextBox("0");
+            positionBox.Width = 96;
+
+            TextBox frameRateBox = CreateInspectorTextBox(clip.FrameRate.ToString(CultureInfo.InvariantCulture));
+            frameRateBox.Width = 64;
+
+            TextBox durationBox = CreateInspectorTextBox(clip.Duration.ToString(CultureInfo.InvariantCulture));
+            durationBox.Width = 96;
+
+            CheckBox loopCheckBox = new CheckBox
+            {
+                Content = "循环",
+                IsChecked = clip.Loop,
+                Foreground = Brushes.White,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+
+            CheckBox steppedCheckBox = new CheckBox
+            {
+                Content = "抽帧",
+                IsChecked = string.Equals(clip.PlayMode, "stepped", StringComparison.OrdinalIgnoreCase),
+                Foreground = Brushes.White,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+
+            Button dopesheetButton = CreateTextCommandButton("关键帧", 80);
+            Button curvesButton = CreateTextCommandButton("曲线", 80);
+            Button addChannelButton = CreateTextCommandButton("加通道", 80);
+            Button addKeyButton = CreateTextCommandButton("加关键帧", 96);
+            Button deleteKeyButton = CreateTextCommandButton("删关键帧", 96);
+            Button rotationModeButton = CreateTextCommandButton(eulerMode ? "欧拉" : "四元数", 80);
+            Button saveButton = CreateTextCommandButton("保存", 80);
+
+            void RefreshTitle()
+            {
+                window.Title = isDirty ? fileName + " *" : fileName;
+            }
+
+            void RefreshStatus()
+            {
+                statusText.Text = string.Format(
+                    CultureInfo.InvariantCulture,
+                    "位置 {0:0.###} 选中 {1}",
+                    timeline.PlayheadTime,
+                    timeline.SelectedKeys.Count);
+            }
+
+            void RefreshRows()
+            {
+                foreach (Action action in rowRefreshActions)
+                    action();
+            }
+
+            void MarkDirty()
+            {
+                isDirty = true;
+                RefreshTitle();
+            }
+
+            void StopPlay()
+            {
+                if (playTimer == null)
+                    return;
+
+                playTimer.Stop();
+                playTimer = null;
+                playButton.Content = "播放";
+            }
+
+            void SeekTo(double time)
+            {
+                double duration = clip.Duration > 0.0 ? clip.Duration : 0.0;
+
+                timeline.PlayheadTime = Math.Clamp(time, 0.0, duration);
+                timeline.InvalidateVisual();
+
+                positionBox.Text = timeline.PlayheadTime.ToString("0.###", CultureInfo.InvariantCulture);
+
+                RefreshRows();
+                RefreshStatus();
+            }
+
+            void SeekToKey(int direction)
+            {
+                double current = timeline.PlayheadTime;
+                double best = direction < 0 ? -1.0 : double.MaxValue;
+
+                foreach (AnimationChannel channel in clip.Channels)
+                {
+                    foreach (AnimationKeyframe keyframe in channel.Keys)
+                    {
+                        if (direction < 0)
+                        {
+                            if (keyframe.Time < current - 1e-6 && keyframe.Time > best)
+                                best = keyframe.Time;
+                        }
+                        else
+                        {
+                            if (keyframe.Time > current + 1e-6 && keyframe.Time < best)
+                                best = keyframe.Time;
+                        }
+                    }
+                }
+
+                if (direction < 0 && best < 0.0)
+                    return;
+
+                if (direction > 0 && Math.Abs(best - double.MaxValue) < 1e-6)
+                    return;
+
+                SeekTo(best);
+            }
+
+            void RebuildRows()
+            {
+                rowPanel.Children.Clear();
+                rowRefreshActions.Clear();
+
+                for (int index = 0; index < clip.Channels.Count; index++)
+                {
+                    AnimationChannel channel = clip.Channels[index];
+                    rowPanel.Children.Add(BuildAnimationChannelRow(
+                        channel,
+                        index,
+                        timeline,
+                        () => eulerMode,
+                        () =>
+                        {
+                            MarkDirty();
+                            timeline.InvalidateVisual();
+                        },
+                        rowRefreshActions));
+                }
+            }
+
+            void RefreshModeButtons()
+            {
+                dopesheetButton.Background = new SolidColorBrush(Color.Parse(curvesMode ? "#333333" : "#225588"));
+                dopesheetButton.BorderBrush = new SolidColorBrush(Color.Parse(curvesMode ? "#555555" : "#4488CC"));
+                curvesButton.Background = new SolidColorBrush(Color.Parse(curvesMode ? "#225588" : "#333333"));
+                curvesButton.BorderBrush = new SolidColorBrush(Color.Parse(curvesMode ? "#4488CC" : "#555555"));
+                rotationModeButton.Content = eulerMode ? "欧拉" : "四元数";
+            }
+
+            firstButton.Click += (_, _) => SeekTo(0.0);
+            lastButton.Click += (_, _) => SeekTo(clip.Duration);
+            previousKeyButton.Click += (_, _) => SeekToKey(-1);
+            nextKeyButton.Click += (_, _) => SeekToKey(1);
+            previousFrameButton.Click += (_, _) => SeekTo(timeline.PlayheadTime - 1.0 / Math.Max(clip.FrameRate, 1.0));
+            nextFrameButton.Click += (_, _) => SeekTo(timeline.PlayheadTime + 1.0 / Math.Max(clip.FrameRate, 1.0));
+
+            playButton.Click += (_, _) =>
+            {
+                if (playTimer != null)
+                {
+                    StopPlay();
+                    return;
+                }
+
+                playTimer = new DispatcherTimer
+                {
+                    Interval = TimeSpan.FromMilliseconds(16)
+                };
+
+                playTimer.Tick += (_, _) =>
+                {
+                    double duration = clip.Duration > 0.0 ? clip.Duration : 0.0;
+                    double next = timeline.PlayheadTime + 0.016;
+
+                    if (next >= duration)
+                        next = clip.Loop ? 0.0 : duration;
+
+                    SeekTo(next);
+
+                    if (next >= duration && !clip.Loop)
+                        StopPlay();
+                };
+
+                playTimer.Start();
+                playButton.Content = "停止";
+            };
+
+            positionBox.KeyDown += (_, e) =>
+            {
+                if (e.Key != Key.Enter)
+                    return;
+
+                if (!TryParseEditorDouble(positionBox.Text, out double value))
+                {
+                    positionBox.Text = timeline.PlayheadTime.ToString("0.###", CultureInfo.InvariantCulture);
+                    return;
+                }
+
+                SeekTo(value);
+                e.Handled = true;
+            };
+
+            frameRateBox.KeyDown += (_, e) =>
+            {
+                if (e.Key != Key.Enter)
+                    return;
+
+                if (!TryParseEditorDouble(frameRateBox.Text, out double value) || value <= 0.0)
+                {
+                    frameRateBox.Text = clip.FrameRate.ToString(CultureInfo.InvariantCulture);
+                    return;
+                }
+
+                clip.FrameRate = (float)value;
+                MarkDirty();
+                e.Handled = true;
+            };
+
+            durationBox.KeyDown += (_, e) =>
+            {
+                if (e.Key != Key.Enter)
+                    return;
+
+                if (!TryParseEditorDouble(durationBox.Text, out double value) || value < 0.0)
+                {
+                    durationBox.Text = clip.Duration.ToString(CultureInfo.InvariantCulture);
+                    return;
+                }
+
+                clip.Duration = value;
+                MarkDirty();
+                timeline.InvalidateVisual();
+                e.Handled = true;
+            };
+
+            loopCheckBox.Click += (_, _) =>
+            {
+                clip.Loop = loopCheckBox.IsChecked == true;
+                MarkDirty();
+            };
+
+            steppedCheckBox.Click += (_, _) =>
+            {
+                clip.PlayMode = steppedCheckBox.IsChecked == true ? "stepped" : "normal";
+                MarkDirty();
+            };
+
+            timeline.PlayheadMoved += () =>
+            {
+                positionBox.Text = timeline.PlayheadTime.ToString("0.###", CultureInfo.InvariantCulture);
+                RefreshRows();
+                RefreshStatus();
+            };
+
+            timeline.SelectionChanged += () => RefreshStatus();
+
+            timeline.KeysEdited += () =>
+            {
+                MarkDirty();
+                RefreshStatus();
+            };
+
+            dopesheetButton.Click += (_, _) =>
+            {
+                curvesMode = false;
+                timeline.CurvesMode = false;
+                WriteEditorConfigValue(config, "timelineMode", "dopesheet");
+                SaveEditorConfig(filePath, config);
+                RefreshModeButtons();
+                RefreshStatus();
+                timeline.InvalidateVisual();
+            };
+
+            curvesButton.Click += (_, _) =>
+            {
+                curvesMode = true;
+                timeline.CurvesMode = true;
+                WriteEditorConfigValue(config, "timelineMode", "curves");
+                SaveEditorConfig(filePath, config);
+                RefreshModeButtons();
+                RefreshStatus();
+                timeline.FrameAll();
+            };
+
+            rotationModeButton.Click += (_, _) =>
+            {
+                eulerMode = !eulerMode;
+                WriteEditorConfigValue(config, "rotationMode", eulerMode ? "euler" : "quaternion");
+                SaveEditorConfig(filePath, config);
+                RefreshModeButtons();
+                RefreshRows();
+                timeline.InvalidateVisual();
+            };
+
+            addChannelButton.Click += (_, _) =>
+            {
+                clip.Channels.Add(new AnimationChannel
+                {
+                    Binding = "bone",
+                    Path = "",
+                    Property = "rotation",
+                    ValueType = "quaternion",
+                    Interpolation = "linear"
+                });
+
+                RebuildRows();
+                MarkDirty();
+                timeline.InvalidateVisual();
+            };
+
+            addKeyButton.Click += (_, _) =>
+            {
+                if (timeline.SelectedChannels.Count == 0)
+                {
+                    for (int index = 0; index < clip.Channels.Count; index++)
+                        timeline.SelectedChannels.Add(index);
+                }
+
+                foreach (int channelIndex in timeline.SelectedChannels)
+                {
+                    if (channelIndex < 0 || channelIndex >= clip.Channels.Count)
+                        continue;
+
+                    AnimationChannel channel = clip.Channels[channelIndex];
+                    int valueCount = ResolveAnimationValueCount(channel.ValueType);
+
+                    if (valueCount <= 0)
+                        continue;
+
+                    AnimationKeyframe keyframe = InsertOrGetKeyframe(channel, timeline.PlayheadTime, 1e-6, valueCount);
+                    ResolveDefaultKeyframeValue(channel, keyframe, valueCount);
+                }
+
+                MarkDirty();
+                RefreshRows();
+                RefreshStatus();
+                timeline.InvalidateVisual();
+            };
+
+            deleteKeyButton.Click += (_, _) =>
+            {
+                foreach ((int Channel, int Key) entry in timeline.SelectedKeys.ToList())
+                {
+                    if (entry.Channel < 0 || entry.Channel >= clip.Channels.Count)
+                        continue;
+
+                    AnimationChannel channel = clip.Channels[entry.Channel];
+
+                    if (entry.Key < 0 || entry.Key >= channel.Keys.Count)
+                        continue;
+
+                    channel.Keys.RemoveAt(entry.Key);
+                }
+
+                timeline.SelectedKeys.Clear();
+                MarkDirty();
+                RefreshRows();
+                RefreshStatus();
+                timeline.InvalidateVisual();
+            };
+
+            saveButton.Click += (_, _) =>
+            {
+                try
+                {
+                    SaveAnimationClipFile(filePath, clip);
+                    EditorHostBridge.RegisterAnimationClip(BuildAnimationAssetKey(filePath), clip);
+                    SaveEditorConfig(filePath, config);
+                    isDirty = false;
+                    RefreshTitle();
+                }
+                catch (Exception ex)
+                {
+                    _ = ShowSimpleWarningDialogAsync("保存失败", ex.Message);
+                }
+            };
+
+            StackPanel topBar = new StackPanel
+            {
+                Orientation = Orientation.Horizontal,
+                Spacing = 6,
+                Margin = new Thickness(10, 6, 10, 6),
+                Children =
+                {
+                    firstButton,
+                    previousFrameButton,
+                    previousKeyButton,
+                    playButton,
+                    nextKeyButton,
+                    nextFrameButton,
+                    lastButton,
+                    positionBox,
+                    frameRateBox,
+                    durationBox,
+                    loopCheckBox,
+                    steppedCheckBox
+                }
+            };
+
+            Border channelHeader = new Border
+            {
+                Height = AnimationTimelineRulerHeight,
+                Background = new SolidColorBrush(Color.Parse("#252525")),
+                BorderBrush = new SolidColorBrush(Color.Parse("#333333")),
+                BorderThickness = new Thickness(0, 0, 1, 1),
+                Child = new TextBlock
+                {
+                    Text = "通道",
+                    Foreground = Brushes.White,
+                    VerticalAlignment = VerticalAlignment.Center,
+                    Margin = new Thickness(8, 0, 0, 0)
+                }
+            };
+
+            Grid channelColumn = new Grid
+            {
+                RowDefinitions = new RowDefinitions("Auto,*")
+            };
+
+            Grid.SetRow(channelHeader, 0);
+            Grid.SetRow(rowPanel, 1);
+
+            channelColumn.Children.Add(channelHeader);
+            channelColumn.Children.Add(rowPanel);
+
+            Grid bodyGrid = new Grid
+            {
+                ColumnDefinitions = new ColumnDefinitions("300,*")
+            };
+
+            Grid.SetColumn(channelColumn, 0);
+            Grid.SetColumn(timeline, 1);
+
+            bodyGrid.Children.Add(channelColumn);
+            bodyGrid.Children.Add(timeline);
+
+            StackPanel bottomBar = new StackPanel
+            {
+                Orientation = Orientation.Horizontal,
+                Spacing = 6,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                Margin = new Thickness(10, 6, 10, 6),
+                Children =
+                {
+                    dopesheetButton,
+                    curvesButton,
+                    addChannelButton,
+                    addKeyButton,
+                    deleteKeyButton,
+                    rotationModeButton,
+                    saveButton,
+                    statusText
+                }
+            };
+
+            Grid layout = new Grid
+            {
+                RowDefinitions = new RowDefinitions("Auto,*,Auto")
+            };
+
+            Grid.SetRow(topBar, 0);
+            Grid.SetRow(bodyGrid, 1);
+            Grid.SetRow(bottomBar, 2);
+
+            layout.Children.Add(topBar);
+            layout.Children.Add(bodyGrid);
+            layout.Children.Add(bottomBar);
+
+            RebuildRows();
+            RefreshModeButtons();
+            RefreshStatus();
+
+            window = new Window
+            {
+                Title = fileName,
+                Width = 1180,
+                Height = 700,
+                CanMinimize = false,
+                WindowStartupLocation = WindowStartupLocation.CenterOwner,
+                WindowDecorations = WindowDecorations.Full,
+                ShowInTaskbar = false,
+                Background = new SolidColorBrush(Color.Parse("#111111")),
+                Content = layout
+            };
+
+            window.Closing += (_, e) =>
+            {
+                if (!isDirty || isClosing)
+                    return;
+
+                e.Cancel = true;
+
+                Dispatcher.UIThread.Post(async () =>
+                {
+                    bool confirmed = await ShowLuaExitConfirmDialog(window);
+
+                    if (!confirmed)
+                        return;
+
+                    isClosing = true;
+                    StopPlay();
+                    window.Close();
+                });
+            };
+
+            window.Closed += (_, _) => StopPlay();
+            window.Show(this);
+        }
+
+        private Control BuildAnimationChannelRow(
+            AnimationChannel channel,
+            int channelIndex,
+            AnimationTimelineControl timeline,
+            Func<bool> isEulerMode,
+            Action onEdited,
+            List<Action> refreshActions)
+        {
+            TextBlock label = new TextBlock
+            {
+                Text = BuildChannelLabel(channel),
+                Foreground = new SolidColorBrush(Color.Parse("#DDDDDD")),
+                VerticalAlignment = VerticalAlignment.Center,
+                TextTrimming = TextTrimming.CharacterEllipsis,
+                Margin = new Thickness(8, 0, 4, 0)
+            };
+
+            StackPanel valuePanel = new StackPanel
+            {
+                Orientation = Orientation.Horizontal,
+                Spacing = 4,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+
+            int valueCount = ResolveAnimationValueCount(channel.ValueType);
+            List<TextBox> valueBoxes = new List<TextBox>();
+
+            for (int component = 0; component < valueCount; component++)
+            {
+                TextBox box = CreateInspectorTextBox("0");
+                box.Width = 62;
+                box.Height = AnimationTimelineRowHeight - 4;
+                box.MinHeight = AnimationTimelineRowHeight - 4;
+
+                void Commit()
+                {
+                    int count = ResolveAnimationValueCount(channel.ValueType);
+
+                    if (count <= 0)
+                        return;
+
+                    List<double> display = new List<double>();
+
+                    foreach (TextBox textBox in valueBoxes)
+                    {
+                        if (!TryParseEditorDouble(textBox.Text, out double value))
+                            return;
+
+                        display.Add(value);
+                    }
+
+                    AnimationKeyframe keyframe = InsertOrGetKeyframe(channel, timeline.PlayheadTime, 1e-6, count);
+                    ApplyChannelDisplayValues(channel, keyframe, display, isEulerMode());
+                    onEdited();
+                }
+
+                box.KeyDown += (_, e) =>
+                {
+                    if (e.Key != Key.Enter)
+                        return;
+
+                    Commit();
+                    e.Handled = true;
+                };
+
+                box.LostFocus += (_, _) => Commit();
+
+                valueBoxes.Add(box);
+                valuePanel.Children.Add(box);
+            }
+
+            void RefreshValues()
+            {
+                int count = ResolveAnimationValueCount(channel.ValueType);
+
+                if (count <= 0)
+                    return;
+
+                AnimationKeyframe? keyframe = FindKeyframeAt(channel, timeline.PlayheadTime, 1e-4);
+                List<float> sampled = new List<float>();
+
+                for (int i = 0; i < count; i++)
+                {
+                    sampled.Add(keyframe != null && i < keyframe.Value.Length
+                        ? keyframe.Value[i]
+                        : (float)SampleChannelComponent(channel, i, timeline.PlayheadTime));
+                }
+
+                List<double> display = BuildChannelDisplayValues(channel, sampled, isEulerMode());
+
+                for (int i = 0; i < valueBoxes.Count && i < display.Count; i++)
+                    valueBoxes[i].Text = display[i].ToString("0.###", CultureInfo.InvariantCulture);
+            }
+
+            refreshActions.Add(RefreshValues);
+            RefreshValues();
+
+            Grid rowGrid = new Grid
+            {
+                ColumnDefinitions = new ColumnDefinitions("172,*"),
+                Height = AnimationTimelineRowHeight
+            };
+
+            Grid.SetColumn(label, 0);
+            Grid.SetColumn(valuePanel, 1);
+
+            rowGrid.Children.Add(label);
+            rowGrid.Children.Add(valuePanel);
+
+            Border row = new Border
+            {
+                Background = Brushes.Transparent,
+                BorderBrush = new SolidColorBrush(Color.Parse("#2A2A2A")),
+                BorderThickness = new Thickness(0, 0, 1, 1),
+                Child = rowGrid
+            };
+
+            row.PointerPressed += (_, e) =>
+            {
+                PointerPoint point = e.GetCurrentPoint(row);
+
+                if (!point.Properties.IsLeftButtonPressed)
+                    return;
+
+                if (!e.KeyModifiers.HasFlag(KeyModifiers.Shift))
+                    timeline.SelectedChannels.Clear();
+
+                if (!timeline.SelectedChannels.Contains(channelIndex))
+                    timeline.SelectedChannels.Add(channelIndex);
+
+                row.Background = new SolidColorBrush(Color.Parse("#113355"));
+                timeline.InvalidateVisual();
+            };
+
+            return row;
+        }
+
+        private static Dictionary<string, Point> LoadNodeLayout(EditorConfigData config, string layerName)
+        {
+            Dictionary<string, Point> result = new Dictionary<string, Point>(StringComparer.Ordinal);
+            string prefix = layerName + "::";
+
+            if (!config.Values.TryGetValue("nodeLayout", out JsonElement element) || element.ValueKind != JsonValueKind.Object)
+                return result;
+
+            foreach (JsonProperty property in element.EnumerateObject())
+            {
+                if (!property.Name.StartsWith(prefix, StringComparison.Ordinal))
+                    continue;
+
+                if (property.Value.ValueKind != JsonValueKind.Array || property.Value.GetArrayLength() < 2)
+                    continue;
+
+                string stateName = property.Name[prefix.Length..];
+                result[stateName] = new Point(
+                    property.Value[0].GetDouble(),
+                    property.Value[1].GetDouble());
+            }
+
+            return result;
+        }
+
+        private static void SaveNodeLayout(EditorConfigData config, string layerName, Dictionary<string, Point> positions)
+        {
+            Dictionary<string, double[]> merged = new Dictionary<string, double[]>(StringComparer.Ordinal);
+            string prefix = layerName + "::";
+
+            if (config.Values.TryGetValue("nodeLayout", out JsonElement element) && element.ValueKind == JsonValueKind.Object)
+            {
+                foreach (JsonProperty property in element.EnumerateObject())
+                {
+                    if (property.Name.StartsWith(prefix, StringComparison.Ordinal))
+                        continue;
+
+                    if (property.Value.ValueKind != JsonValueKind.Array || property.Value.GetArrayLength() < 2)
+                        continue;
+
+                    merged[property.Name] = new[]
+                    {
+                        property.Value[0].GetDouble(),
+                        property.Value[1].GetDouble()
+                    };
+                }
+            }
+
+            foreach (KeyValuePair<string, Point> pair in positions)
+                merged[prefix + pair.Key] = new[] { pair.Value.X, pair.Value.Y };
+
+            config.Values["nodeLayout"] = JsonSerializer.SerializeToElement(merged, SceneJsonWriteOptions);
+        }
+
+        private void ShowAnimatorControllerWindow(string filePath)
+        {
+            AnimatorControllerData? controller = EditorHostBridge.LoadAnimatorController(filePath);
+
+            if (controller == null)
+            {
+                _ = ShowSimpleWarningDialogAsync("打开失败", "无法解析动画器控制器 " + Path.GetFileName(filePath));
+                return;
+            }
+
+            string fileName = Path.GetFileName(filePath);
+            EditorConfigData config = LoadEditorConfig(filePath);
+
+            bool isDirty = false;
+            bool isClosing = false;
+            int currentLayerIndex = 0;
+
+            AnimatorStateData? selectedState = null;
+            AnimatorTransitionData? selectedTransition = null;
+
+            AnimatorGraphControl graph = new AnimatorGraphControl();
+            StackPanel parameterPanel = new StackPanel { Orientation = Orientation.Vertical };
+            StackPanel transitionPanel = new StackPanel { Orientation = Orientation.Vertical };
+            StackPanel inspectorPanel = new StackPanel { Orientation = Orientation.Vertical };
+            StackPanel layerButtonPanel = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 4 };
+            Window window = null!;
+
+            void RefreshTitle()
+            {
+                window.Title = isDirty ? fileName + " *" : fileName;
+            }
+
+            void MarkDirty()
+            {
+                isDirty = true;
+                RefreshTitle();
+            }
+
+            AnimatorLayerData? CurrentLayer()
+            {
+                if (currentLayerIndex < 0 || currentLayerIndex >= controller.Layers.Count)
+                    return null;
+
+                return controller.Layers[currentLayerIndex];
+            }
+
+            void SyncGraphLayer()
+            {
+                AnimatorLayerData? layer = CurrentLayer();
+
+                graph.Layer = layer;
+                graph.NodePositions.Clear();
+
+                if (layer == null)
+                {
+                    graph.InvalidateVisual();
+                    return;
+                }
+
+                foreach (KeyValuePair<string, Point> pair in LoadNodeLayout(config, layer.Name))
+                    graph.NodePositions[pair.Key] = pair.Value;
+
+                graph.InvalidateVisual();
+            }
+
+            Control BuildTextRow(string label, string value, Action<string> apply)
+            {
+                TextBox box = CreateInspectorTextBox(value);
+                TextBox captured = box;
+
+                void Commit()
+                {
+                    apply(captured.Text ?? string.Empty);
+                    MarkDirty();
+                }
+
+                box.KeyDown += (_, e) =>
+                {
+                    if (e.Key != Key.Enter)
+                        return;
+
+                    Commit();
+                    e.Handled = true;
+                };
+
+                box.LostFocus += (_, _) => Commit();
+
+                return CreatePropertyRow(label, box);
+            }
+
+            Control BuildCheckRow(string label, bool value, Action<bool> apply)
+            {
+                CheckBox checkBox = new CheckBox
+                {
+                    IsChecked = value,
+                    Foreground = Brushes.White,
+                    VerticalAlignment = VerticalAlignment.Center
+                };
+
+                checkBox.Click += (_, _) =>
+                {
+                    apply(checkBox.IsChecked == true);
+                    MarkDirty();
+                };
+
+                return CreatePropertyRow(label, checkBox);
+            }
+
+            void RebuildParameterPanel()
+            {
+                parameterPanel.Children.Clear();
+                parameterPanel.Children.Add(CreateInspectorSectionHeader("参数"));
+
+                for (int index = 0; index < controller.Parameters.Count; index++)
+                {
+                    AnimatorParameterData parameter = controller.Parameters[index];
+                    AnimatorParameterData captured = parameter;
+
+                    TextBox nameBox = CreateInspectorTextBox(captured.Name);
+                    nameBox.Width = 120;
+
+                    TextBox typeBox = CreateInspectorTextBox(captured.Type);
+                    typeBox.Width = 70;
+
+                    TextBox defaultBox = CreateInspectorTextBox(captured.Default.ToString(CultureInfo.InvariantCulture));
+                    defaultBox.Width = 70;
+
+                    Button removeButton = CreateTextCommandButton("删", 36);
+                    removeButton.Height = InspectorTextBoxHeight;
+
+                    nameBox.LostFocus += (_, _) =>
+                    {
+                        captured.Name = nameBox.Text ?? string.Empty;
+                        MarkDirty();
+                    };
+
+                    typeBox.LostFocus += (_, _) =>
+                    {
+                        captured.Type = typeBox.Text ?? "float";
+                        MarkDirty();
+                    };
+
+                    defaultBox.LostFocus += (_, _) =>
+                    {
+                        if (!TryParseEditorDouble(defaultBox.Text, out double value))
+                            return;
+
+                        captured.Default = value;
+                        MarkDirty();
+                    };
+
+                    removeButton.Click += (_, _) =>
+                    {
+                        controller.Parameters.Remove(captured);
+                        RebuildParameterPanel();
+                        MarkDirty();
+                    };
+
+                    parameterPanel.Children.Add(new StackPanel
+                    {
+                        Orientation = Orientation.Horizontal,
+                        Spacing = 4,
+                        Margin = new Thickness(8, 2, 8, 2),
+                        Children = { nameBox, typeBox, defaultBox, removeButton }
+                    });
+                }
+            }
+
+            void RebuildTransitionPanel()
+            {
+                transitionPanel.Children.Clear();
+                transitionPanel.Children.Add(CreateInspectorSectionHeader("过渡"));
+
+                AnimatorLayerData? layer = CurrentLayer();
+
+                if (layer == null)
+                    return;
+
+                foreach (AnimatorTransitionData transition in layer.Transitions)
+                    AddTransitionEntry(layer, transition, false);
+
+                foreach (AnimatorTransitionData transition in layer.AnyStateTransitions)
+                    AddTransitionEntry(layer, transition, true);
+            }
+
+            void AddTransitionEntry(AnimatorLayerData layer, AnimatorTransitionData transition, bool isAnyState)
+            {
+                AnimatorTransitionData captured = transition;
+                AnimatorLayerData capturedLayer = layer;
+
+                string label = (isAnyState ? "AnyState → " : (string.IsNullOrWhiteSpace(transition.From) ? "→ " : transition.From + " → ")) + transition.To;
+
+                Button entryButton = new Button
+                {
+                    Content = label,
+                    Height = InspectorTextBoxHeight,
+                    HorizontalAlignment = HorizontalAlignment.Stretch,
+                    HorizontalContentAlignment = HorizontalAlignment.Left,
+                    Padding = new Thickness(6, 0, 6, 0),
+                    Margin = new Thickness(8, 1, 8, 1),
+                    Background = new SolidColorBrush(Color.Parse("#242424")),
+                    BorderBrush = new SolidColorBrush(Color.Parse("#3A3A3A")),
+                    BorderThickness = new Thickness(1),
+                    Foreground = Brushes.White
+                };
+
+                entryButton.Click += (_, _) =>
+                {
+                    selectedState = null;
+                    selectedTransition = captured;
+                    graph.SelectedState = null;
+                    graph.SelectedTransition = captured;
+                    RebuildInspector();
+                    graph.InvalidateVisual();
+                };
+
+                Button removeButton = CreateTextCommandButton("删", 36);
+                removeButton.Height = InspectorTextBoxHeight;
+
+                removeButton.Click += (_, _) =>
+                {
+                    capturedLayer.Transitions.Remove(captured);
+                    capturedLayer.AnyStateTransitions.Remove(captured);
+
+                    if (ReferenceEquals(selectedTransition, captured))
+                        selectedTransition = null;
+
+                    RebuildTransitionPanel();
+                    RebuildInspector();
+                    MarkDirty();
+                };
+
+                Grid entryGrid = new Grid
+                {
+                    ColumnDefinitions = new ColumnDefinitions("*,Auto"),
+                    Margin = new Thickness(8, 1, 8, 1)
+                };
+
+                Grid.SetColumn(entryButton, 0);
+                Grid.SetColumn(removeButton, 1);
+
+                entryButton.Margin = new Thickness(0, 0, 4, 0);
+
+                entryGrid.Children.Add(entryButton);
+                entryGrid.Children.Add(removeButton);
+
+                transitionPanel.Children.Add(entryGrid);
+            }
+
+            void RebuildLayerButtons()
+            {
+                layerButtonPanel.Children.Clear();
+
+                for (int index = 0; index < controller.Layers.Count; index++)
+                {
+                    int capturedIndex = index;
+                    AnimatorLayerData layer = controller.Layers[index];
+
+                    Button button = CreateTextCommandButton(
+                        string.IsNullOrWhiteSpace(layer.Name) ? "层" + index.ToString(CultureInfo.InvariantCulture) : layer.Name,
+                        96);
+
+                    bool active = index == currentLayerIndex;
+
+                    button.Background = new SolidColorBrush(Color.Parse(active ? "#225588" : "#333333"));
+                    button.BorderBrush = new SolidColorBrush(Color.Parse(active ? "#4488CC" : "#555555"));
+
+                    button.Click += (_, _) =>
+                    {
+                        currentLayerIndex = capturedIndex;
+                        selectedState = null;
+                        selectedTransition = null;
+                        graph.SelectedState = null;
+                        graph.SelectedTransition = null;
+                        SyncGraphLayer();
+                        graph.FrameAll();
+                        RebuildLayerButtons();
+                        RebuildTransitionPanel();
+                        RebuildInspector();
+                    };
+
+                    layerButtonPanel.Children.Add(button);
+                }
+            }
+
+            void RebuildInspector()
+            {
+                inspectorPanel.Children.Clear();
+
+                if (selectedState != null)
+                {
+                    BuildStateInspector(selectedState);
+                    return;
+                }
+
+                if (selectedTransition != null)
+                {
+                    BuildTransitionInspector(selectedTransition);
+                    return;
+                }
+
+                inspectorPanel.Children.Add(CreateInspectorSectionHeader("选择状态或过渡"));
+            }
+
+            void BuildStateInspector(AnimatorStateData state)
+            {
+                AnimatorStateData captured = state;
+
+                inspectorPanel.Children.Add(CreateInspectorSectionHeader("状态"));
+
+                inspectorPanel.Children.Add(BuildTextRow("名称", captured.Name, value => captured.Name = value));
+                inspectorPanel.Children.Add(BuildTextRow("速度", captured.Speed.ToString(CultureInfo.InvariantCulture), value =>
+                {
+                    if (TryParseEditorDouble(value, out double parsed))
+                        captured.Speed = parsed;
+                }));
+
+                inspectorPanel.Children.Add(BuildCheckRow("循环", captured.Loop, value => captured.Loop = value));
+                inspectorPanel.Children.Add(BuildTextRow("播放模式", captured.PlayMode, value => captured.PlayMode = value));
+
+                inspectorPanel.Children.Add(CreateInspectorSectionHeader("运动"));
+
+                inspectorPanel.Children.Add(BuildTextRow("类型", captured.Motion.Type, value =>
+                {
+                    captured.Motion.Type = value;
+                    graph.InvalidateVisual();
+                }));
+
+                if (string.Equals(captured.Motion.Type, "blend", StringComparison.OrdinalIgnoreCase))
+                {
+                    inspectorPanel.Children.Add(BuildTextRow("混合模式", captured.Motion.Mode, value => captured.Motion.Mode = value));
+                    inspectorPanel.Children.Add(BuildTextRow("衰减", captured.Motion.Falloff.ToString(CultureInfo.InvariantCulture), value =>
+                    {
+                        if (TryParseEditorDouble(value, out double parsed))
+                            captured.Motion.Falloff = (float)parsed;
+                    }));
+
+                    inspectorPanel.Children.Add(BuildTextRow("混合参数", string.Join(",", captured.Motion.Parameters), value =>
+                    {
+                        captured.Motion.Parameters.Clear();
+
+                        foreach (string part in value.Split(',', StringSplitOptions.RemoveEmptyEntries))
+                            captured.Motion.Parameters.Add(part.Trim());
+                    }));
+
+                    inspectorPanel.Children.Add(CreateInspectorSectionHeader("混合条目"));
+
+                    foreach (AnimatorBlendEntryData entry in captured.Motion.Entries)
+                    {
+                        AnimatorBlendEntryData capturedEntry = entry;
+
+                        inspectorPanel.Children.Add(BuildTextRow("剪辑", capturedEntry.Clip, value => capturedEntry.Clip = value));
+                        inspectorPanel.Children.Add(BuildTextRow("位置", string.Join(",", capturedEntry.Position), value =>
+                        {
+                            capturedEntry.Position = ParseDoubleArray(value);
+                        }));
+                        inspectorPanel.Children.Add(BuildTextRow("权重", string.Join(",", capturedEntry.Weights), value =>
+                        {
+                            capturedEntry.Weights = ParseFloatArray(value);
+                        }));
+                    }
+
+                    Button addEntryButton = CreateTextCommandButton("加条目", 96);
+                    addEntryButton.Margin = new Thickness(12, 4, 12, 4);
+
+                    addEntryButton.Click += (_, _) =>
+                    {
+                        captured.Motion.Entries.Add(new AnimatorBlendEntryData
+                        {
+                            Clip = "",
+                            Position = new double[captured.Motion.Parameters.Count],
+                            Weights = Array.Empty<float>()
+                        });
+
+                        RebuildInspector();
+                        MarkDirty();
+                    };
+
+                    inspectorPanel.Children.Add(addEntryButton);
+                }
+                else
+                {
+                    inspectorPanel.Children.Add(BuildTextRow("剪辑", captured.Motion.Clip, value =>
+                    {
+                        captured.Motion.Clip = value;
+                        graph.InvalidateVisual();
+                    }));
+                }
+            }
+
+            void BuildTransitionInspector(AnimatorTransitionData transition)
+            {
+                AnimatorTransitionData captured = transition;
+                AnimatorLayerData? layer = CurrentLayer();
+
+                inspectorPanel.Children.Add(CreateInspectorSectionHeader("过渡"));
+
+                inspectorPanel.Children.Add(BuildTextRow("起点", captured.From, value => captured.From = value));
+                inspectorPanel.Children.Add(BuildTextRow("终点", captured.To, value =>
+                {
+                    captured.To = value;
+                    graph.InvalidateVisual();
+                }));
+
+                inspectorPanel.Children.Add(BuildCheckRow("退出时间", captured.HasExitTime, value => captured.HasExitTime = value));
+                inspectorPanel.Children.Add(BuildTextRow("退出比例", captured.ExitTime.ToString(CultureInfo.InvariantCulture), value =>
+                {
+                    if (TryParseEditorDouble(value, out double parsed))
+                        captured.ExitTime = parsed;
+                }));
+
+                inspectorPanel.Children.Add(BuildCheckRow("固定时长", captured.FixedDuration, value => captured.FixedDuration = value));
+                inspectorPanel.Children.Add(BuildTextRow("时长", captured.Duration.ToString(CultureInfo.InvariantCulture), value =>
+                {
+                    if (TryParseEditorDouble(value, out double parsed))
+                        captured.Duration = parsed;
+                }));
+
+                inspectorPanel.Children.Add(BuildTextRow("偏移", captured.Offset.ToString(CultureInfo.InvariantCulture), value =>
+                {
+                    if (TryParseEditorDouble(value, out double parsed))
+                        captured.Offset = parsed;
+                }));
+
+                inspectorPanel.Children.Add(BuildTextRow("打断来源", captured.InterruptionSource, value => captured.InterruptionSource = value));
+                inspectorPanel.Children.Add(BuildCheckRow("有序打断", captured.OrderedInterruption, value => captured.OrderedInterruption = value));
+                inspectorPanel.Children.Add(BuildCheckRow("可自过渡", captured.CanTransitionToSelf, value => captured.CanTransitionToSelf = value));
+
+                inspectorPanel.Children.Add(CreateInspectorSectionHeader("条件"));
+
+                foreach (AnimatorConditionData condition in captured.Conditions)
+                {
+                    AnimatorConditionData capturedCondition = condition;
+
+                    TextBox parameterBox = CreateInspectorTextBox(capturedCondition.Parameter);
+                    parameterBox.Width = 96;
+
+                    TextBox modeBox = CreateInspectorTextBox(capturedCondition.Mode);
+                    modeBox.Width = 80;
+
+                    TextBox thresholdBox = CreateInspectorTextBox(capturedCondition.Threshold.ToString(CultureInfo.InvariantCulture));
+                    thresholdBox.Width = 70;
+
+                    parameterBox.LostFocus += (_, _) =>
+                    {
+                        capturedCondition.Parameter = parameterBox.Text ?? string.Empty;
+                        MarkDirty();
+                    };
+
+                    modeBox.LostFocus += (_, _) =>
+                    {
+                        capturedCondition.Mode = modeBox.Text ?? "if";
+                        MarkDirty();
+                    };
+
+                    thresholdBox.LostFocus += (_, _) =>
+                    {
+                        if (!TryParseEditorDouble(thresholdBox.Text, out double parsed))
+                            return;
+
+                        capturedCondition.Threshold = parsed;
+                        MarkDirty();
+                    };
+
+                    Button removeConditionButton = CreateTextCommandButton("删", 36);
+                    removeConditionButton.Height = InspectorTextBoxHeight;
+
+                    removeConditionButton.Click += (_, _) =>
+                    {
+                        captured.Conditions.Remove(capturedCondition);
+                        RebuildInspector();
+                        MarkDirty();
+                    };
+
+                    inspectorPanel.Children.Add(new StackPanel
+                    {
+                        Orientation = Orientation.Horizontal,
+                        Spacing = 4,
+                        Margin = new Thickness(12, 2, 12, 2),
+                        Children = { parameterBox, modeBox, thresholdBox, removeConditionButton }
+                    });
+                }
+
+                Button addConditionButton = CreateTextCommandButton("加条件", 96);
+                addConditionButton.Margin = new Thickness(12, 4, 12, 4);
+
+                addConditionButton.Click += (_, _) =>
+                {
+                    captured.Conditions.Add(new AnimatorConditionData
+                    {
+                        Parameter = "",
+                        Mode = "if",
+                        Threshold = 0.0
+                    });
+
+                    RebuildInspector();
+                    MarkDirty();
+                };
+
+                inspectorPanel.Children.Add(addConditionButton);
+
+                if (layer == null)
+                    return;
+
+                Button removeTransitionButton = CreateTextCommandButton("删过渡", 96);
+                removeTransitionButton.Margin = new Thickness(12, 12, 12, 4);
+
+                removeTransitionButton.Click += (_, _) =>
+                {
+                    layer.Transitions.Remove(captured);
+                    layer.AnyStateTransitions.Remove(captured);
+                    selectedTransition = null;
+                    RebuildTransitionPanel();
+                    RebuildInspector();
+                    MarkDirty();
+                };
+
+                inspectorPanel.Children.Add(removeTransitionButton);
+            }
+
+            graph.SelectionChanged += () =>
+            {
+                selectedState = null;
+                selectedTransition = null;
+
+                AnimatorLayerData? layer = CurrentLayer();
+
+                if (layer != null && !string.IsNullOrWhiteSpace(graph.SelectedState))
+                {
+                    foreach (AnimatorStateData state in layer.States)
+                    {
+                        if (state != null && string.Equals(state.Name, graph.SelectedState, StringComparison.Ordinal))
+                        {
+                            selectedState = state;
+                            break;
+                        }
+                    }
+                }
+
+                RebuildInspector();
+            };
+
+            graph.LayoutChanged += () =>
+            {
+                AnimatorLayerData? layer = CurrentLayer();
+
+                if (layer == null)
+                    return;
+
+                SaveNodeLayout(config, layer.Name, graph.NodePositions);
+                SaveEditorConfig(filePath, config);
+            };
+
+            Button saveButton = CreateTextCommandButton("保存", 80);
+            Button addLayerButton = CreateTextCommandButton("加层", 80);
+            Button addStateButton = CreateTextCommandButton("加状态", 80);
+            Button addTransitionButton = CreateTextCommandButton("加过渡", 80);
+            Button addParameterButton = CreateTextCommandButton("加参数", 80);
+            Button frameAllButton = CreateTextCommandButton("适应", 80);
+
+            saveButton.Click += (_, _) =>
+            {
+                try
+                {
+                    SaveAnimatorControllerFile(filePath, controller);
+                    EditorHostBridge.RegisterAnimatorController(BuildAnimationAssetKey(filePath), controller);
+                    SaveEditorConfig(filePath, config);
+                    isDirty = false;
+                    RefreshTitle();
+                }
+                catch (Exception ex)
+                {
+                    _ = ShowSimpleWarningDialogAsync("保存失败", ex.Message);
+                }
+            };
+
+            addLayerButton.Click += (_, _) =>
+            {
+                controller.Layers.Add(new AnimatorLayerData
+                {
+                    Name = "Layer" + controller.Layers.Count.ToString(CultureInfo.InvariantCulture),
+                    Weight = 1.0,
+                    BlendMode = "override"
+                });
+
+                currentLayerIndex = controller.Layers.Count - 1;
+                SyncGraphLayer();
+                RebuildLayerButtons();
+                RebuildTransitionPanel();
+                RebuildInspector();
+                MarkDirty();
+            };
+
+            addStateButton.Click += (_, _) =>
+            {
+                AnimatorLayerData? layer = CurrentLayer();
+
+                if (layer == null)
+                    return;
+
+                string name = "State" + layer.States.Count.ToString(CultureInfo.InvariantCulture);
+
+                layer.States.Add(new AnimatorStateData
+                {
+                    Name = name,
+                    Motion = new AnimatorMotionData()
+                });
+
+                if (string.IsNullOrWhiteSpace(layer.DefaultState))
+                    layer.DefaultState = name;
+
+                graph.EnsureNodePosition(name);
+                SyncGraphLayer();
+                RebuildInspector();
+                MarkDirty();
+            };
+
+            addTransitionButton.Click += (_, _) =>
+            {
+                AnimatorLayerData? layer = CurrentLayer();
+
+                if (layer == null || layer.States.Count == 0)
+                    return;
+
+                AnimatorTransitionData transition = new AnimatorTransitionData
+                {
+                    From = layer.States[0].Name,
+                    To = layer.States[layer.States.Count - 1].Name
+                };
+
+                layer.Transitions.Add(transition);
+                selectedState = null;
+                selectedTransition = transition;
+                graph.SelectedState = null;
+                graph.SelectedTransition = transition;
+                RebuildTransitionPanel();
+                RebuildInspector();
+                MarkDirty();
+            };
+
+            addParameterButton.Click += (_, _) =>
+            {
+                controller.Parameters.Add(new AnimatorParameterData
+                {
+                    Name = "Param" + controller.Parameters.Count.ToString(CultureInfo.InvariantCulture),
+                    Type = "float",
+                    Default = 0.0
+                });
+
+                RebuildParameterPanel();
+                MarkDirty();
+            };
+
+            frameAllButton.Click += (_, _) => graph.FrameAll();
+
+            StackPanel topBar = new StackPanel
+            {
+                Orientation = Orientation.Horizontal,
+                Spacing = 6,
+                Margin = new Thickness(10, 6, 10, 6),
+                Children =
+                {
+                    layerButtonPanel,
+                    addLayerButton,
+                    addStateButton,
+                    addTransitionButton,
+                    addParameterButton,
+                    frameAllButton,
+                    saveButton
+                }
+            };
+
+            Grid layout = new Grid
+            {
+                RowDefinitions = new RowDefinitions("Auto,*")
+            };
+
+            ScrollViewer leftScrollViewer = new ScrollViewer
+            {
+                HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+                VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+                Content = new StackPanel
+                {
+                    Orientation = Orientation.Vertical,
+                    Children = { parameterPanel, transitionPanel }
+                }
+            };
+
+            ScrollViewer inspectorScrollViewer = new ScrollViewer
+            {
+                HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+                VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+                Content = inspectorPanel
+            };
+
+            Grid bodyGrid = new Grid
+            {
+                ColumnDefinitions = new ColumnDefinitions("280,*,320")
+            };
+
+            Grid.SetColumn(leftScrollViewer, 0);
+            Grid.SetColumn(graph, 1);
+            Grid.SetColumn(inspectorScrollViewer, 2);
+
+            bodyGrid.Children.Add(leftScrollViewer);
+            bodyGrid.Children.Add(graph);
+            bodyGrid.Children.Add(inspectorScrollViewer);
+
+            Grid.SetRow(topBar, 0);
+            Grid.SetRow(bodyGrid, 1);
+
+            layout.Children.Add(topBar);
+            layout.Children.Add(bodyGrid);
+
+            RebuildParameterPanel();
+            RebuildLayerButtons();
+            SyncGraphLayer();
+            RebuildTransitionPanel();
+            RebuildInspector();
+
+            window = new Window
+            {
+                Title = fileName,
+                Width = 1180,
+                Height = 700,
+                CanMinimize = false,
+                WindowStartupLocation = WindowStartupLocation.CenterOwner,
+                WindowDecorations = WindowDecorations.Full,
+                ShowInTaskbar = false,
+                Background = new SolidColorBrush(Color.Parse("#111111")),
+                Content = layout
+            };
+
+            window.Closing += (_, e) =>
+            {
+                if (!isDirty || isClosing)
+                    return;
+
+                e.Cancel = true;
+
+                Dispatcher.UIThread.Post(async () =>
+                {
+                    bool confirmed = await ShowLuaExitConfirmDialog(window);
+
+                    if (!confirmed)
+                        return;
+
+                    isClosing = true;
+                    window.Close();
+                });
+            };
+
+            window.Show(this);
+            Dispatcher.UIThread.Post(() => graph.FrameAll(), DispatcherPriority.Background);
+        }
+
+        private double[] ParseDoubleArray(string text)
+        {
+            List<double> values = new List<double>();
+
+            foreach (string part in (text ?? string.Empty).Split(',', StringSplitOptions.RemoveEmptyEntries))
+            {
+                if (TryParseEditorDouble(part.Trim(), out double value))
+                    values.Add(value);
+            }
+
+            return values.ToArray();
+        }
+
+        private float[] ParseFloatArray(string text)
+        {
+            List<float> values = new List<float>();
+
+            foreach (string part in (text ?? string.Empty).Split(',', StringSplitOptions.RemoveEmptyEntries))
+            {
+                if (TryParseEditorDouble(part.Trim(), out double value))
+                    values.Add((float)value);
+            }
+
+            return values.ToArray();
+        }
+
+        private Button CreateTextCommandButton(string text, double width)
+        {
+            return new Button
+            {
+                Content = text,
+                Width = width,
+                Height = 30,
+                FontSize = 13,
+                Padding = new Thickness(0),
+                Background = new SolidColorBrush(Color.Parse("#333333")),
+                BorderBrush = new SolidColorBrush(Color.Parse("#555555")),
+                BorderThickness = new Thickness(1),
+                HorizontalContentAlignment = HorizontalAlignment.Center,
+                VerticalContentAlignment = VerticalAlignment.Center
+            };
+        }
+
+        private const double AnimationTimelineRowHeight = 22.0;
+        private const double AnimationTimelineRulerHeight = 24.0;
+        private const double AnimationKeyDiamondRadius = 5.0;
+
+        private sealed class AnimationTimelineControl : Control
+        {
+            private static readonly IBrush TimelineBackgroundBrush = new SolidColorBrush(Color.Parse("#1A1A1A"));
+            private static readonly IBrush TimelineRowBrush = new SolidColorBrush(Color.Parse("#1F1F1F"));
+            private static readonly IBrush TimelineRulerBrush = new SolidColorBrush(Color.Parse("#252525"));
+            private static readonly IBrush TimelineTextBrush = new SolidColorBrush(Color.Parse("#9A9A9A"));
+            private static readonly IBrush PlayheadBrush = Brushes.White;
+            private static readonly IBrush SteppedKeyBrush = new SolidColorBrush(Color.Parse("#FFB020"));
+            private static readonly IBrush SmoothKeyBrush = new SolidColorBrush(Color.Parse("#569CD6"));
+
+            private static readonly Pen TimelineGridPen = new Pen(new SolidColorBrush(Color.Parse("#2E2E2E")), 1);
+            private static readonly Pen PlayheadPen = new Pen(PlayheadBrush, 1);
+            private static readonly Pen SegmentPen = new Pen(new SolidColorBrush(Color.Parse("#666666")), 1);
+            private static readonly Pen SelectedKeyPen = new Pen(PlayheadBrush, 1.5);
+
+            private static readonly IBrush[] CurveBrushes =
+            {
+                new SolidColorBrush(Color.Parse("#569CD6")),
+                new SolidColorBrush(Color.Parse("#4EC9B0")),
+                new SolidColorBrush(Color.Parse("#CE9178")),
+                new SolidColorBrush(Color.Parse("#C586C0"))
+            };
+
+            public AnimationClipData? Clip { get; set; }
+
+            public List<int> SelectedChannels { get; } = new List<int>();
+
+            public List<(int Channel, int Key)> SelectedKeys { get; } = new List<(int Channel, int Key)>();
+
+            public bool CurvesMode { get; set; }
+
+            public double PlayheadTime { get; set; }
+
+            public double PixelsPerSecond { get; set; } = 160.0;
+
+            public double ScrollSeconds { get; set; }
+
+            public event Action? PlayheadMoved;
+
+            public event Action? KeysEdited;
+
+            public event Action? SelectionChanged;
+
+            private int _dragChannel = -1;
+            private int _dragKey = -1;
+            private double _dragGrabOffset;
+            private bool _dragPlayhead;
+            private bool _panning;
+            private double _panStartX;
+            private double _panStartScroll;
+
+            public AnimationTimelineControl()
+            {
+                ClipToBounds = true;
+                Focusable = true;
+                Cursor = new Cursor(StandardCursorType.Arrow);
+            }
+
+            private double TimeToX(double time)
+            {
+                return (time - ScrollSeconds) * PixelsPerSecond;
+            }
+
+            private double XToTime(double x)
+            {
+                return x / PixelsPerSecond + ScrollSeconds;
+            }
+
+            private static double RowTop(int channelIndex)
+            {
+                return AnimationTimelineRulerHeight + channelIndex * AnimationTimelineRowHeight;
+            }
+
+            private int RowAtY(double y)
+            {
+                if (Clip == null)
+                    return -1;
+
+                int index = (int)Math.Floor((y - AnimationTimelineRulerHeight) / AnimationTimelineRowHeight);
+
+                if (index < 0 || index >= Clip.Channels.Count)
+                    return -1;
+
+                return index;
+            }
+
+            private bool IsKeySelected(int channelIndex, int keyIndex)
+            {
+                foreach ((int Channel, int Key) entry in SelectedKeys)
+                {
+                    if (entry.Channel == channelIndex && entry.Key == keyIndex)
+                        return true;
+                }
+
+                return false;
+            }
+
+            private static FormattedText CreateTimelineText(string text)
+            {
+                return new FormattedText(
+                    text,
+                    CultureInfo.InvariantCulture,
+                    FlowDirection.LeftToRight,
+                    new Typeface(FontFamily.Default, FontStyle.Normal, FontWeight.Normal),
+                    11.0,
+                    TimelineTextBrush);
+            }
+
+            public override void Render(DrawingContext context)
+            {
+                base.Render(context);
+
+                Rect bounds = new Rect(Bounds.Size);
+
+                if (bounds.Width <= 0 || bounds.Height <= 0)
+                    return;
+
+                context.DrawRectangle(TimelineBackgroundBrush, null, bounds);
+                context.DrawRectangle(TimelineRulerBrush, null, new Rect(0, 0, bounds.Width, AnimationTimelineRulerHeight));
+
+                DrawRuler(context, bounds);
+
+                if (Clip != null)
+                {
+                    DrawTrackRows(context, bounds);
+
+                    if (CurvesMode)
+                        DrawCurves(context, bounds);
+                }
+
+                DrawPlayhead(context, bounds);
+            }
+
+            private void DrawRuler(DrawingContext context, Rect bounds)
+            {
+                double step = ResolveRulerStep();
+                double endSeconds = XToTime(bounds.Width);
+                double first = Math.Floor(ScrollSeconds / step) * step;
+
+                for (double time = first; time <= endSeconds; time += step)
+                {
+                    if (time < 0.0)
+                        continue;
+
+                    double x = TimeToX(time);
+
+                    context.DrawLine(TimelineGridPen, new Point(x, AnimationTimelineRulerHeight), new Point(x, bounds.Height));
+                    context.DrawText(CreateTimelineText(time.ToString("0.##", CultureInfo.InvariantCulture)), new Point(x + 3.0, 5.0));
+                }
+            }
+
+            private double ResolveRulerStep()
+            {
+                double[] candidates = { 0.02, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0 };
+
+                foreach (double candidate in candidates)
+                {
+                    if (candidate * PixelsPerSecond >= 64.0)
+                        return candidate;
+                }
+
+                return 60.0;
+            }
+
+            private void DrawTrackRows(DrawingContext context, Rect bounds)
+            {
+                int count = Clip!.Channels.Count;
+
+                for (int channelIndex = 0; channelIndex < count; channelIndex++)
+                {
+                    double top = RowTop(channelIndex);
+
+                    if (top > bounds.Height)
+                        break;
+
+                    if (channelIndex % 2 == 1)
+                        context.DrawRectangle(TimelineRowBrush, null, new Rect(0, top, bounds.Width, AnimationTimelineRowHeight));
+
+                    AnimationChannel channel = Clip.Channels[channelIndex];
+
+                    if (!CurvesMode)
+                        DrawDopesheetKeys(context, bounds, channelIndex, channel, top);
+                }
+            }
+
+            private void DrawDopesheetKeys(DrawingContext context, Rect bounds, int channelIndex, AnimationChannel channel, double top)
+            {
+                double centerY = top + AnimationTimelineRowHeight / 2;
+
+                for (int keyIndex = 0; keyIndex < channel.Keys.Count; keyIndex++)
+                {
+                    AnimationKeyframe keyframe = channel.Keys[keyIndex];
+                    double x = TimeToX(keyframe.Time);
+
+                    if (x < -12.0 || x > bounds.Width + 12.0)
+                        continue;
+
+                    if (keyIndex > 0)
+                    {
+                        double previousX = TimeToX(channel.Keys[keyIndex - 1].Time);
+
+                        if (previousX >= -12.0)
+                            context.DrawLine(SegmentPen, new Point(previousX, centerY), new Point(x, centerY));
+                    }
+
+                    DrawKeyDiamond(context, x, centerY, keyframe.Stepped ? SteppedKeyBrush : SmoothKeyBrush);
+
+                    if (IsKeySelected(channelIndex, keyIndex))
+                        context.DrawEllipse(null, SelectedKeyPen, new Point(x, centerY), 8.0, 8.0);
+                }
+            }
+
+            private static void DrawKeyDiamond(DrawingContext context, double x, double y, IBrush brush)
+            {
+                StreamGeometry geometry = new StreamGeometry();
+
+                using (StreamGeometryContext geometryContext = geometry.Open())
+                {
+                    geometryContext.BeginFigure(new Point(x, y - AnimationKeyDiamondRadius), true);
+                    geometryContext.LineTo(new Point(x + AnimationKeyDiamondRadius, y));
+                    geometryContext.LineTo(new Point(x, y + AnimationKeyDiamondRadius));
+                    geometryContext.LineTo(new Point(x - AnimationKeyDiamondRadius, y));
+                    geometryContext.EndFigure(true);
+                }
+
+                context.DrawGeometry(brush, null, geometry);
+            }
+
+            private void DrawCurves(DrawingContext context, Rect bounds)
+            {
+                if (Clip == null || SelectedChannels.Count == 0)
+                    return;
+
+                double top = RowTop(0);
+                double height = bounds.Height - top;
+
+                if (height <= 0.0)
+                    return;
+
+                foreach (int channelIndex in SelectedChannels)
+                {
+                    if (channelIndex < 0 || channelIndex >= Clip.Channels.Count)
+                        continue;
+
+                    AnimationChannel channel = Clip.Channels[channelIndex];
+                    int valueCount = ResolveAnimationValueCount(channel.ValueType);
+
+                    if (valueCount <= 0)
+                        continue;
+
+                    for (int component = 0; component < valueCount; component++)
+                        DrawCurveComponent(context, channel, component, top, height, valueCount);
+                }
+            }
+
+            private void DrawCurveComponent(
+                DrawingContext context,
+                AnimationChannel channel,
+                int component,
+                double top,
+                double height,
+                int valueCount)
+            {
+                if (channel.Keys.Count == 0)
+                    return;
+
+                double minimum = double.MaxValue;
+                double maximum = double.MinValue;
+
+                foreach (AnimationKeyframe keyframe in channel.Keys)
+                {
+                    double value = ComponentValue(keyframe, component);
+
+                    if (value < minimum)
+                        minimum = value;
+
+                    if (value > maximum)
+                        maximum = value;
+                }
+
+                if (maximum - minimum < 1e-6)
+                {
+                    minimum -= 1.0;
+                    maximum += 1.0;
+                }
+
+                double padding = (maximum - minimum) * 0.1;
+                minimum -= padding;
+                maximum += padding;
+
+                IBrush brush = CurveBrushes[component % CurveBrushes.Length];
+                Pen pen = new Pen(brush, 1.5);
+
+                StreamGeometry geometry = new StreamGeometry();
+
+                using (StreamGeometryContext geometryContext = geometry.Open())
+                {
+                    double lastX = double.NaN;
+
+                    for (double time = 0.0; time <= Math.Max(Clip!.Duration, 0.001); time += 1.0 / Math.Max(Clip.FrameRate, 1f))
+                    {
+                        double normalized = (SampleComponent(channel, component, time) - minimum) / (maximum - minimum);
+                        double x = TimeToX(time);
+                        double y = top + height - normalized * height;
+
+                        if (double.IsNaN(lastX))
+                            geometryContext.BeginFigure(new Point(x, y), false);
+                        else
+                            geometryContext.LineTo(new Point(x, y));
+
+                        lastX = x;
+                    }
+
+                    if (!double.IsNaN(lastX))
+                        geometryContext.EndFigure(false);
+                }
+
+                context.DrawGeometry(null, pen, geometry);
+
+                foreach (AnimationKeyframe keyframe in channel.Keys)
+                {
+                    double normalized = (ComponentValue(keyframe, component) - minimum) / (maximum - minimum);
+                    double x = TimeToX(keyframe.Time);
+                    double y = top + height - normalized * height;
+
+                    context.DrawEllipse(brush, null, new Point(x, y), 3.0, 3.0);
+                }
+            }
+
+            private static double ComponentValue(AnimationKeyframe keyframe, int component)
+            {
+                return component < keyframe.Value.Length ? keyframe.Value[component] : 0.0;
+            }
+
+            private static double SampleComponent(AnimationChannel channel, int component, double time)
+            {
+                List<AnimationKeyframe> keys = channel.Keys;
+
+                if (keys.Count == 0)
+                    return 0.0;
+
+                if (time <= keys[0].Time)
+                    return ComponentValue(keys[0], component);
+
+                for (int i = 1; i < keys.Count; i++)
+                {
+                    if (keys[i].Time < time)
+                        continue;
+
+                    AnimationKeyframe from = keys[i - 1];
+                    AnimationKeyframe to = keys[i];
+                    double span = to.Time - from.Time;
+
+                    if (span <= 0.0)
+                        return ComponentValue(to, component);
+
+                    double ratio = (time - from.Time) / span;
+
+                    if (string.Equals(channel.Interpolation, "step", StringComparison.OrdinalIgnoreCase))
+                        return ComponentValue(from, component);
+
+                    if (string.Equals(channel.Interpolation, "cubic", StringComparison.OrdinalIgnoreCase))
+                        return CubicComponentValue(from, to, component, span, ratio);
+
+                    double fromValue = ComponentValue(from, component);
+                    double toValue = ComponentValue(to, component);
+                    return fromValue + (toValue - fromValue) * ratio;
+                }
+
+                return ComponentValue(keys[keys.Count - 1], component);
+            }
+
+            private static double CubicComponentValue(
+                AnimationKeyframe from,
+                AnimationKeyframe to,
+                int component,
+                double span,
+                double ratio)
+            {
+                double t = ratio;
+                double t2 = t * t;
+                double t3 = t2 * t;
+
+                double h00 = 2.0 * t3 - 3.0 * t2 + 1.0;
+                double h10 = t3 - 2.0 * t2 + t;
+                double h01 = -2.0 * t3 + 3.0 * t2;
+                double h11 = t3 - t2;
+
+                double fromValue = ComponentValue(from, component);
+                double toValue = ComponentValue(to, component);
+                double fromTangent = component < from.OutTangent.Length ? from.OutTangent[component] : 0.0;
+                double toTangent = component < to.InTangent.Length ? to.InTangent[component] : 0.0;
+
+                return h00 * fromValue + h10 * span * fromTangent + h01 * toValue + h11 * span * toTangent;
+            }
+
+            private void DrawPlayhead(DrawingContext context, Rect bounds)
+            {
+                double x = TimeToX(PlayheadTime);
+
+                if (x < 0.0 || x > bounds.Width)
+                    return;
+
+                context.DrawLine(PlayheadPen, new Point(x, 0), new Point(x, bounds.Height));
+            }
+
+            private int FindKeyAt(int channelIndex, double x, double tolerance)
+            {
+                if (Clip == null || channelIndex < 0 || channelIndex >= Clip.Channels.Count)
+                    return -1;
+
+                AnimationChannel channel = Clip.Channels[channelIndex];
+                int hit = -1;
+                double bestDistance = tolerance;
+
+                for (int keyIndex = 0; keyIndex < channel.Keys.Count; keyIndex++)
+                {
+                    double distance = Math.Abs(TimeToX(channel.Keys[keyIndex].Time) - x);
+
+                    if (distance > bestDistance)
+                        continue;
+
+                    bestDistance = distance;
+                    hit = keyIndex;
+                }
+
+                return hit;
+            }
+
+            protected override void OnPointerPressed(PointerPressedEventArgs e)
+            {
+                base.OnPointerPressed(e);
+
+                if (Clip == null)
+                    return;
+
+                PointerPoint point = e.GetCurrentPoint(this);
+                Point position = point.Position;
+
+                Focus();
+
+                if (point.Properties.IsMiddleButtonPressed ||
+                    (point.Properties.IsLeftButtonPressed && e.KeyModifiers.HasFlag(KeyModifiers.Alt)))
+                {
+                    _panning = true;
+                    _panStartX = position.X;
+                    _panStartScroll = ScrollSeconds;
+                    e.Pointer.Capture(this);
+                    e.Handled = true;
+                    return;
+                }
+
+                if (!point.Properties.IsLeftButtonPressed)
+                    return;
+
+                if (position.Y < AnimationTimelineRulerHeight)
+                {
+                    _dragPlayhead = true;
+                    PlayheadTime = Math.Max(0.0, XToTime(position.X));
+                    PlayheadMoved?.Invoke();
+                    e.Pointer.Capture(this);
+                    InvalidateVisual();
+                    e.Handled = true;
+                    return;
+                }
+
+                int channelIndex = RowAtY(position.Y);
+
+                if (channelIndex < 0)
+                    return;
+
+                int keyIndex = FindKeyAt(channelIndex, position.X, AnimationKeyDiamondRadius + 4.0);
+
+                if (keyIndex < 0)
+                {
+                    if (!CurvesMode)
+                        MovePlayheadFromPointer(position.X);
+
+                    e.Handled = true;
+                    return;
+                }
+
+                bool additive = e.KeyModifiers.HasFlag(KeyModifiers.Shift);
+
+                if (!additive)
+                    SelectedKeys.Clear();
+
+                if (!IsKeySelected(channelIndex, keyIndex))
+                    SelectedKeys.Add((channelIndex, keyIndex));
+
+                _dragChannel = channelIndex;
+                _dragKey = keyIndex;
+                _dragGrabOffset = Clip.Channels[channelIndex].Keys[keyIndex].Time - XToTime(position.X);
+
+                SelectionChanged?.Invoke();
+                e.Pointer.Capture(this);
+                InvalidateVisual();
+                e.Handled = true;
+            }
+
+            protected override void OnPointerMoved(PointerEventArgs e)
+            {
+                base.OnPointerMoved(e);
+
+                Point position = e.GetPosition(this);
+
+                if (_panning)
+                {
+                    ScrollSeconds = Math.Max(0.0, _panStartScroll - (position.X - _panStartX) / PixelsPerSecond);
+                    InvalidateVisual();
+                    return;
+                }
+
+                if (_dragPlayhead)
+                {
+                    PlayheadTime = Math.Max(0.0, XToTime(position.X));
+                    PlayheadMoved?.Invoke();
+                    InvalidateVisual();
+                    return;
+                }
+
+                if (_dragChannel < 0 || _dragKey < 0 || Clip == null)
+                    return;
+
+                if (_dragChannel >= Clip.Channels.Count)
+                    return;
+
+                List<AnimationKeyframe> keys = Clip.Channels[_dragChannel].Keys;
+
+                if (_dragKey >= keys.Count)
+                    return;
+
+                double time = Math.Max(0.0, XToTime(position.X) + _dragGrabOffset);
+
+                if (e.KeyModifiers.HasFlag(KeyModifiers.Control))
+                {
+                    double frameRate = Math.Max(Clip.FrameRate, 1f);
+                    time = Math.Round(time * frameRate) / frameRate;
+                }
+
+                keys[_dragKey].Time = time;
+                keys.Sort((a, b) => a.Time.CompareTo(b.Time));
+
+                KeysEdited?.Invoke();
+                InvalidateVisual();
+            }
+
+            protected override void OnPointerReleased(PointerReleasedEventArgs e)
+            {
+                base.OnPointerReleased(e);
+
+                if (_panning)
+                {
+                    _panning = false;
+                    e.Pointer.Capture(null);
+                    return;
+                }
+
+                if (_dragPlayhead)
+                {
+                    _dragPlayhead = false;
+                    e.Pointer.Capture(null);
+                    return;
+                }
+
+                if (_dragChannel >= 0)
+                {
+                    _dragChannel = -1;
+                    _dragKey = -1;
+                    e.Pointer.Capture(null);
+                    SelectionChanged?.Invoke();
+                }
+            }
+
+            protected override void OnPointerWheelChanged(PointerWheelEventArgs e)
+            {
+                base.OnPointerWheelChanged(e);
+
+                Point position = e.GetPosition(this);
+                double anchorTime = XToTime(position.X);
+                double factor = e.Delta.Y > 0 ? 1.2 : 1.0 / 1.2;
+
+                PixelsPerSecond = Math.Clamp(PixelsPerSecond * factor, 8.0, 4000.0);
+                ScrollSeconds = Math.Max(0.0, anchorTime - position.X / PixelsPerSecond);
+
+                InvalidateVisual();
+                e.Handled = true;
+            }
+
+            private void MovePlayheadFromPointer(double x)
+            {
+                PlayheadTime = Math.Max(0.0, XToTime(x));
+                PlayheadMoved?.Invoke();
+                InvalidateVisual();
+            }
+
+            public void FrameAll()
+            {
+                if (Clip == null)
+                    return;
+
+                double duration = Clip.Duration > 0.0 ? Clip.Duration : 1.0;
+                double width = Bounds.Width > 0.0 ? Bounds.Width : 600.0;
+
+                ScrollSeconds = 0.0;
+                PixelsPerSecond = Math.Clamp(width / duration, 8.0, 4000.0);
+                InvalidateVisual();
+            }
+        }
+
+        private const double AnimatorNodeWidth = 156.0;
+        private const double AnimatorNodeHeight = 56.0;
+
+        private sealed class AnimatorGraphControl : Control
+        {
+            private static readonly IBrush GraphBackgroundBrush = new SolidColorBrush(Color.Parse("#161616"));
+            private static readonly IBrush GraphGridBrush = new SolidColorBrush(Color.Parse("#212121"));
+            private static readonly IBrush NodeFillBrush = new SolidColorBrush(Color.Parse("#262626"));
+            private static readonly IBrush NodeSelectedFillBrush = new SolidColorBrush(Color.Parse("#113355"));
+            private static readonly IBrush NodeDefaultFillBrush = new SolidColorBrush(Color.Parse("#1E3A1E"));
+            private static readonly IBrush NodeBorderBrush = new SolidColorBrush(Color.Parse("#5A5A5A"));
+            private static readonly IBrush NodeSelectedBorderBrush = new SolidColorBrush(Color.Parse("#4488CC"));
+            private static readonly IBrush NodeTitleBrush = Brushes.White;
+            private static readonly IBrush NodeCaptionBrush = new SolidColorBrush(Color.Parse("#9A9A9A"));
+            private static readonly IBrush EntryFillBrush = new SolidColorBrush(Color.Parse("#303030"));
+            private static readonly IBrush TransitionBrush = new SolidColorBrush(Color.Parse("#8A8A8A"));
+            private static readonly IBrush TransitionSelectedBrush = new SolidColorBrush(Color.Parse("#FFB020"));
+
+            private static readonly Pen GraphGridPen = new Pen(GraphGridBrush, 1);
+            private static readonly Pen NodeBorderPen = new Pen(NodeBorderBrush, 1);
+            private static readonly Pen NodeSelectedBorderPen = new Pen(NodeSelectedBorderBrush, 2);
+            private static readonly Pen TransitionPen = new Pen(TransitionBrush, 1.5);
+            private static readonly Pen TransitionSelectedPen = new Pen(TransitionSelectedBrush, 2);
+            private static readonly Pen EntryPen = new Pen(TransitionBrush, 1, new DashStyle(new double[] { 4.0, 3.0 }, 0.0));
+
+            public AnimatorLayerData? Layer { get; set; }
+
+            public Dictionary<string, Point> NodePositions { get; } = new Dictionary<string, Point>(StringComparer.Ordinal);
+
+            public string? SelectedState { get; set; }
+
+            public AnimatorTransitionData? SelectedTransition { get; set; }
+
+            public event Action? LayoutChanged;
+
+            public event Action? SelectionChanged;
+
+            private Point _viewOffset;
+            private double _zoom = 1.0;
+            private string? _dragState;
+            private Point _dragGrabOffset;
+            private bool _panning;
+            private Point _panStartPoint;
+            private Point _panStartOffset;
+
+            public AnimatorGraphControl()
+            {
+                ClipToBounds = true;
+                Focusable = true;
+            }
+
+            private Point NodeToScreen(Point nodePoint)
+            {
+                return new Point(nodePoint.X * _zoom + _viewOffset.X, nodePoint.Y * _zoom + _viewOffset.Y);
+            }
+
+            private Point ScreenToNode(Point screenPoint)
+            {
+                return new Point((screenPoint.X - _viewOffset.X) / _zoom, (screenPoint.Y - _viewOffset.Y) / _zoom);
+            }
+
+            public Point EnsureNodePosition(string stateName)
+            {
+                if (NodePositions.TryGetValue(stateName, out Point existing))
+                    return existing;
+
+                Point created = new Point(240.0, 40.0 + NodePositions.Count * 96.0);
+                NodePositions[stateName] = created;
+
+                return created;
+            }
+
+            private static Point EntryPosition()
+            {
+                return new Point(40.0, 40.0);
+            }
+
+            private Rect GetNodeRect(string stateName)
+            {
+                Point position = EnsureNodePosition(stateName);
+                return new Rect(position.X, position.Y, AnimatorNodeWidth, AnimatorNodeHeight);
+            }
+
+            private static FormattedText CreateGraphText(string text, double fontSize, IBrush brush, FontWeight weight)
+            {
+                return new FormattedText(
+                    text,
+                    CultureInfo.InvariantCulture,
+                    FlowDirection.LeftToRight,
+                    new Typeface(FontFamily.Default, FontStyle.Normal, weight),
+                    fontSize,
+                    brush);
+            }
+
+            public override void Render(DrawingContext context)
+            {
+                base.Render(context);
+
+                Rect bounds = new Rect(Bounds.Size);
+
+                if (bounds.Width <= 0 || bounds.Height <= 0)
+                    return;
+
+                context.DrawRectangle(GraphBackgroundBrush, null, bounds);
+                DrawGrid(context, bounds);
+
+                if (Layer == null)
+                    return;
+
+                DrawTransitions(context);
+                DrawEntryLink(context);
+
+                foreach (AnimatorStateData state in Layer.States)
+                {
+                    if (state == null || string.IsNullOrWhiteSpace(state.Name))
+                        continue;
+
+                    DrawStateNode(context, state);
+                }
+            }
+
+            private void DrawGrid(DrawingContext context, Rect bounds)
+            {
+                double step = 40.0 * _zoom;
+
+                if (step < 8.0)
+                    return;
+
+                double startX = _viewOffset.X % step;
+                double startY = _viewOffset.Y % step;
+
+                for (double x = startX; x < bounds.Width; x += step)
+                    context.DrawLine(GraphGridPen, new Point(x, 0), new Point(x, bounds.Height));
+
+                for (double y = startY; y < bounds.Height; y += step)
+                    context.DrawLine(GraphGridPen, new Point(0, y), new Point(bounds.Width, y));
+            }
+
+            private void DrawEntryLink(DrawingContext context)
+            {
+                if (Layer == null || string.IsNullOrWhiteSpace(Layer.DefaultState))
+                    return;
+
+                if (!HasState(Layer.DefaultState))
+                    return;
+
+                Point entryPosition = EntryPosition();
+                Rect entryRect = new Rect(entryPosition.X, entryPosition.Y, 104.0, AnimatorNodeHeight);
+                Rect targetRect = GetNodeRect(Layer.DefaultState);
+
+                Point start = NodeToScreen(new Point(entryRect.Right, entryRect.Center.Y));
+                Point end = NodeToScreen(new Point(targetRect.Left, targetRect.Center.Y));
+
+                context.DrawLine(EntryPen, start, end);
+                context.DrawRectangle(EntryFillBrush, NodeBorderPen, TransformRect(entryRect));
+                context.DrawText(
+                    CreateGraphText("Entry", 12.0, NodeTitleBrush, FontWeight.Bold),
+                    NodeToScreen(new Point(entryRect.X + 10.0, entryRect.Y + 8.0)));
+                context.DrawText(
+                    CreateGraphText(Layer.DefaultState, 11.0, NodeCaptionBrush, FontWeight.Normal),
+                    NodeToScreen(new Point(entryRect.X + 10.0, entryRect.Y + 28.0)));
+            }
+
+            private Rect TransformRect(Rect nodeRect)
+            {
+                Point topLeft = NodeToScreen(new Point(nodeRect.X, nodeRect.Y));
+                return new Rect(topLeft.X, topLeft.Y, nodeRect.Width * _zoom, nodeRect.Height * _zoom);
+            }
+
+            private void DrawStateNode(DrawingContext context, AnimatorStateData state)
+            {
+                Rect nodeRect = GetNodeRect(state.Name);
+                Rect screenRect = TransformRect(nodeRect);
+
+                IBrush fill = NodeFillBrush;
+
+                if (Layer != null && string.Equals(Layer.DefaultState, state.Name, StringComparison.Ordinal))
+                    fill = NodeDefaultFillBrush;
+
+                if (string.Equals(SelectedState, state.Name, StringComparison.Ordinal))
+                    fill = NodeSelectedFillBrush;
+
+                Pen border = string.Equals(SelectedState, state.Name, StringComparison.Ordinal)
+                    ? NodeSelectedBorderPen
+                    : NodeBorderPen;
+
+                context.DrawRectangle(fill, border, screenRect, 4.0, 4.0);
+
+                context.DrawText(
+                    CreateGraphText(state.Name, 12.0, NodeTitleBrush, FontWeight.Bold),
+                    NodeToScreen(new Point(nodeRect.X + 10.0, nodeRect.Y + 8.0)));
+
+                context.DrawText(
+                    CreateGraphText(ResolveMotionCaption(state.Motion), 11.0, NodeCaptionBrush, FontWeight.Normal),
+                    NodeToScreen(new Point(nodeRect.X + 10.0, nodeRect.Y + 30.0)));
+            }
+
+            private static string ResolveMotionCaption(AnimatorMotionData motion)
+            {
+                if (motion == null)
+                    return string.Empty;
+
+                if (string.Equals(motion.Type, "blend", StringComparison.OrdinalIgnoreCase))
+                    return "混合树 " + motion.Entries.Count.ToString(CultureInfo.InvariantCulture);
+
+                return string.IsNullOrWhiteSpace(motion.Clip) ? "剪辑" : motion.Clip;
+            }
+
+            private void DrawTransitions(DrawingContext context)
+            {
+                if (Layer == null)
+                    return;
+
+                foreach (AnimatorTransitionData transition in Layer.Transitions)
+                    DrawTransition(context, transition);
+
+                foreach (AnimatorTransitionData transition in Layer.AnyStateTransitions)
+                    DrawTransition(context, transition);
+            }
+
+            private void DrawTransition(DrawingContext context, AnimatorTransitionData transition)
+            {
+                if (transition == null || string.IsNullOrWhiteSpace(transition.To))
+                    return;
+
+                if (!HasState(transition.To))
+                    return;
+
+                Point start;
+                Point end;
+
+                Rect targetRect = GetNodeRect(transition.To);
+
+                if (string.IsNullOrWhiteSpace(transition.From))
+                {
+                    Point entryPosition = EntryPosition();
+                    start = NodeToScreen(new Point(entryPosition.X + 52.0, entryPosition.Y + AnimatorNodeHeight));
+                    end = NodeToScreen(new Point(targetRect.Center.X, targetRect.Y));
+                }
+                else
+                {
+                    if (!HasState(transition.From))
+                        return;
+
+                    Rect sourceRect = GetNodeRect(transition.From);
+                    start = NodeToScreen(new Point(sourceRect.Right, sourceRect.Center.Y));
+                    end = NodeToScreen(new Point(targetRect.Left, targetRect.Center.Y));
+                }
+
+                bool selected = ReferenceEquals(transition, SelectedTransition);
+                Pen pen = selected ? TransitionSelectedPen : TransitionPen;
+
+                context.DrawLine(pen, start, end);
+                DrawArrow(context, pen, start, end);
+            }
+
+            private static void DrawArrow(DrawingContext context, Pen pen, Point start, Point end)
+            {
+                double angle = Math.Atan2(end.Y - start.Y, end.X - start.X);
+                double length = 8.0;
+
+                Point left = new Point(
+                    end.X - length * Math.Cos(angle - 0.4),
+                    end.Y - length * Math.Sin(angle - 0.4));
+
+                Point right = new Point(
+                    end.X - length * Math.Cos(angle + 0.4),
+                    end.Y - length * Math.Sin(angle + 0.4));
+
+                StreamGeometry geometry = new StreamGeometry();
+
+                using (StreamGeometryContext geometryContext = geometry.Open())
+                {
+                    geometryContext.BeginFigure(end, true);
+                    geometryContext.LineTo(left);
+                    geometryContext.LineTo(right);
+                    geometryContext.EndFigure(true);
+                }
+
+                context.DrawGeometry(pen.Brush, null, geometry);
+            }
+
+            private bool HasState(string stateName)
+            {
+                if (Layer == null)
+                    return false;
+
+                foreach (AnimatorStateData state in Layer.States)
+                {
+                    if (state != null && string.Equals(state.Name, stateName, StringComparison.Ordinal))
+                        return true;
+                }
+
+                return false;
+            }
+
+            private string? HitTestNode(Point screenPoint)
+            {
+                if (Layer == null)
+                    return null;
+
+                foreach (AnimatorStateData state in Layer.States)
+                {
+                    if (state == null || string.IsNullOrWhiteSpace(state.Name))
+                        continue;
+
+                    if (TransformRect(GetNodeRect(state.Name)).Contains(screenPoint))
+                        return state.Name;
+                }
+
+                return null;
+            }
+
+            protected override void OnPointerPressed(PointerPressedEventArgs e)
+            {
+                base.OnPointerPressed(e);
+
+                PointerPoint point = e.GetCurrentPoint(this);
+                Point position = point.Position;
+
+                Focus();
+
+                if (point.Properties.IsMiddleButtonPressed ||
+                    (point.Properties.IsLeftButtonPressed && e.KeyModifiers.HasFlag(KeyModifiers.Alt)))
+                {
+                    _panning = true;
+                    _panStartPoint = position;
+                    _panStartOffset = _viewOffset;
+                    e.Pointer.Capture(this);
+                    e.Handled = true;
+                    return;
+                }
+
+                if (!point.Properties.IsLeftButtonPressed)
+                    return;
+
+                string? hit = HitTestNode(position);
+
+                if (hit == null)
+                {
+                    SelectedState = null;
+                    SelectedTransition = null;
+                    SelectionChanged?.Invoke();
+                    InvalidateVisual();
+                    return;
+                }
+
+                SelectedState = hit;
+                SelectedTransition = null;
+                _dragState = hit;
+
+                Point nodePoint = ScreenToNode(position);
+                Point nodePosition = EnsureNodePosition(hit);
+                _dragGrabOffset = new Point(nodePoint.X - nodePosition.X, nodePoint.Y - nodePosition.Y);
+
+                SelectionChanged?.Invoke();
+                e.Pointer.Capture(this);
+                InvalidateVisual();
+                e.Handled = true;
+            }
+
+            protected override void OnPointerMoved(PointerEventArgs e)
+            {
+                base.OnPointerMoved(e);
+
+                Point position = e.GetPosition(this);
+
+                if (_panning)
+                {
+                    _viewOffset = new Point(
+                        _panStartOffset.X + (position.X - _panStartPoint.X),
+                        _panStartOffset.Y + (position.Y - _panStartPoint.Y));
+
+                    InvalidateVisual();
+                    return;
+                }
+
+                if (_dragState == null)
+                    return;
+
+                Point nodePoint = ScreenToNode(position);
+
+                NodePositions[_dragState] = new Point(
+                    nodePoint.X - _dragGrabOffset.X,
+                    nodePoint.Y - _dragGrabOffset.Y);
+
+                LayoutChanged?.Invoke();
+                InvalidateVisual();
+            }
+
+            protected override void OnPointerReleased(PointerReleasedEventArgs e)
+            {
+                base.OnPointerReleased(e);
+
+                if (_panning)
+                {
+                    _panning = false;
+                    e.Pointer.Capture(null);
+                    return;
+                }
+
+                if (_dragState != null)
+                {
+                    _dragState = null;
+                    e.Pointer.Capture(null);
+                }
+            }
+
+            protected override void OnPointerWheelChanged(PointerWheelEventArgs e)
+            {
+                base.OnPointerWheelChanged(e);
+
+                Point position = e.GetPosition(this);
+                Point anchor = ScreenToNode(position);
+                double factor = e.Delta.Y > 0 ? 1.15 : 1.0 / 1.15;
+
+                _zoom = Math.Clamp(_zoom * factor, 0.3, 3.0);
+
+                _viewOffset = new Point(
+                    position.X - anchor.X * _zoom,
+                    position.Y - anchor.Y * _zoom);
+
+                InvalidateVisual();
+                e.Handled = true;
+            }
+
+            public void FrameAll()
+            {
+                if (Layer == null)
+                    return;
+
+                double minimumX = double.MaxValue;
+                double minimumY = double.MaxValue;
+                double maximumX = double.MinValue;
+                double maximumY = double.MinValue;
+
+                foreach (AnimatorStateData state in Layer.States)
+                {
+                    if (state == null || string.IsNullOrWhiteSpace(state.Name))
+                        continue;
+
+                    Point position = EnsureNodePosition(state.Name);
+
+                    minimumX = Math.Min(minimumX, position.X);
+                    minimumY = Math.Min(minimumY, position.Y);
+                    maximumX = Math.Max(maximumX, position.X + AnimatorNodeWidth);
+                    maximumY = Math.Max(maximumY, position.Y + AnimatorNodeHeight);
+                }
+
+                if (minimumX > maximumX)
+                {
+                    _viewOffset = new Point(20.0, 20.0);
+                    _zoom = 1.0;
+                    InvalidateVisual();
+                    return;
+                }
+
+                double width = Bounds.Width > 0.0 ? Bounds.Width : 600.0;
+                double height = Bounds.Height > 0.0 ? Bounds.Height : 400.0;
+
+                double contentWidth = Math.Max(maximumX - minimumX, 1.0);
+                double contentHeight = Math.Max(maximumY - minimumY, 1.0);
+
+                _zoom = Math.Clamp(Math.Min(width / (contentWidth + 80.0), height / (contentHeight + 80.0)), 0.3, 3.0);
+                _viewOffset = new Point(
+                    40.0 - minimumX * _zoom,
+                    40.0 - minimumY * _zoom);
+
+                InvalidateVisual();
+            }
         }
     }
 

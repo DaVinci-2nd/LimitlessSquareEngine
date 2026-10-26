@@ -404,7 +404,7 @@ namespace LimitlessSquareEngine.Editor
 
                 if (Directory.Exists(sourceAssetsDir))
                 {
-                    CopyDirectory(sourceAssetsDir, Path.Combine(distPath, "Assets"));
+                    CopyDirectory(sourceAssetsDir, Path.Combine(distPath, "Assets"), IsEditorConfigFile);
                 }
                 else
                 {
@@ -448,12 +448,15 @@ namespace LimitlessSquareEngine.Editor
             }
         }
 
-        private static void CopyDirectory(string sourceDir, string targetDir)
+        private static void CopyDirectory(string sourceDir, string targetDir, Func<string, bool>? skipFile = null)
         {
             Directory.CreateDirectory(targetDir);
 
             foreach (string file in Directory.GetFiles(sourceDir))
             {
+                if (skipFile != null && skipFile(file))
+                    continue;
+
                 string targetFile = Path.Combine(targetDir, Path.GetFileName(file));
                 File.Copy(file, targetFile, true);
             }
@@ -461,7 +464,7 @@ namespace LimitlessSquareEngine.Editor
             foreach (string subDir in Directory.GetDirectories(sourceDir))
             {
                 string targetSubDir = Path.Combine(targetDir, Path.GetFileName(subDir));
-                CopyDirectory(subDir, targetSubDir);
+                CopyDirectory(subDir, targetSubDir, skipFile);
             }
         }
 

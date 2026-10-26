@@ -1,4 +1,4 @@
-﻿using LimitlessSquareEngine.Engine;
+using LimitlessSquareEngine.Engine;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -41,6 +41,12 @@ namespace LimitlessSquareEngine
         private static Func<string, LuaSyntaxError[]>? _checkLuaSyntax;
         private static Func<LuaApiMetadata[]>? _getLuaApiMetadata;
         private static Func<string, SceneData?>? _loadSceneFile;
+        private static Func<string, AnimationClipData?>? _loadAnimationClip;
+        private static Func<string, AnimatorControllerData?>? _loadAnimatorController;
+        private static Action<string, AnimationClipData>? _registerAnimationClip;
+        private static Action<string, AnimatorControllerData>? _registerAnimatorController;
+        private static Func<double, double, double, double[]>? _eulerDegreesToQuaternion;
+        private static Func<double, double, double, double, double[]>? _quaternionToEulerDegrees;
 
         internal static void Bind(
             Func<EditorHostBootstrapInfo> bootstrapInfoProvider,
@@ -73,7 +79,13 @@ namespace LimitlessSquareEngine
             Action<bool, int> setGizmoDrag,
             Func<string, LuaSyntaxError[]> checkLuaSyntax,
             Func<LuaApiMetadata[]> getLuaApiMetadata,
-            Func<string, SceneData?> loadSceneFile)
+            Func<string, SceneData?> loadSceneFile,
+            Func<string, AnimationClipData?> loadAnimationClip,
+            Func<string, AnimatorControllerData?> loadAnimatorController,
+            Action<string, AnimationClipData> registerAnimationClip,
+            Action<string, AnimatorControllerData> registerAnimatorController,
+            Func<double, double, double, double[]> eulerDegreesToQuaternion,
+            Func<double, double, double, double, double[]> quaternionToEulerDegrees)
         {
             _bootstrapInfoProvider = bootstrapInfoProvider;
             _setRenderWindowVisible = setRenderWindowVisible;
@@ -106,6 +118,12 @@ namespace LimitlessSquareEngine
             _checkLuaSyntax = checkLuaSyntax;
             _getLuaApiMetadata = getLuaApiMetadata;
             _loadSceneFile = loadSceneFile;
+            _loadAnimationClip = loadAnimationClip;
+            _loadAnimatorController = loadAnimatorController;
+            _registerAnimationClip = registerAnimationClip;
+            _registerAnimatorController = registerAnimatorController;
+            _eulerDegreesToQuaternion = eulerDegreesToQuaternion;
+            _quaternionToEulerDegrees = quaternionToEulerDegrees;
         }
 
         internal static void Unbind()
@@ -141,6 +159,12 @@ namespace LimitlessSquareEngine
             _checkLuaSyntax = null;
             _getLuaApiMetadata = null;
             _loadSceneFile = null;
+            _loadAnimationClip = null;
+            _loadAnimatorController = null;
+            _registerAnimationClip = null;
+            _registerAnimatorController = null;
+            _eulerDegreesToQuaternion = null;
+            _quaternionToEulerDegrees = null;
         }
 
         public static void SetSceneObjectLocalPosition(string sceneId, string objectId, Double3 value)
@@ -459,6 +483,72 @@ namespace LimitlessSquareEngine
                 throw new InvalidOperationException("[X] Editor host bridge is not bound.");
 
             return _loadSceneFile(filePath);
+        }
+
+        public static AnimationClipData? LoadAnimationClip(string filePath)
+        {
+            if (string.IsNullOrWhiteSpace(filePath))
+                throw new ArgumentException("[X] Animation clip file path cannot be null or empty.", nameof(filePath));
+
+            if (_loadAnimationClip == null)
+                throw new InvalidOperationException("[X] Editor host bridge is not bound.");
+
+            return _loadAnimationClip(filePath);
+        }
+
+        public static AnimatorControllerData? LoadAnimatorController(string filePath)
+        {
+            if (string.IsNullOrWhiteSpace(filePath))
+                throw new ArgumentException("[X] Animator controller file path cannot be null or empty.", nameof(filePath));
+
+            if (_loadAnimatorController == null)
+                throw new InvalidOperationException("[X] Editor host bridge is not bound.");
+
+            return _loadAnimatorController(filePath);
+        }
+
+        public static void RegisterAnimationClip(string key, AnimationClipData data)
+        {
+            if (string.IsNullOrWhiteSpace(key))
+                throw new ArgumentException("[X] Animation clip key cannot be null or empty.", nameof(key));
+
+            if (data == null)
+                throw new ArgumentNullException(nameof(data));
+
+            if (_registerAnimationClip == null)
+                throw new InvalidOperationException("[X] Editor host bridge is not bound.");
+
+            _registerAnimationClip(key, data);
+        }
+
+        public static void RegisterAnimatorController(string key, AnimatorControllerData data)
+        {
+            if (string.IsNullOrWhiteSpace(key))
+                throw new ArgumentException("[X] Animator controller key cannot be null or empty.", nameof(key));
+
+            if (data == null)
+                throw new ArgumentNullException(nameof(data));
+
+            if (_registerAnimatorController == null)
+                throw new InvalidOperationException("[X] Editor host bridge is not bound.");
+
+            _registerAnimatorController(key, data);
+        }
+
+        public static double[] EulerDegreesToQuaternion(double x, double y, double z)
+        {
+            if (_eulerDegreesToQuaternion == null)
+                throw new InvalidOperationException("[X] Editor host bridge is not bound.");
+
+            return _eulerDegreesToQuaternion(x, y, z);
+        }
+
+        public static double[] QuaternionToEulerDegrees(double x, double y, double z, double w)
+        {
+            if (_quaternionToEulerDegrees == null)
+                throw new InvalidOperationException("[X] Editor host bridge is not bound.");
+
+            return _quaternionToEulerDegrees(x, y, z, w);
         }
 
         public readonly struct LuaApiMetadata
