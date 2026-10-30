@@ -374,6 +374,7 @@ namespace LimitlessSquareEngine.Editor
             MaterialJsonFile,
             AnimationClipJsonFile,
             AnimatorControllerJsonFile,
+            VrmaFile,
             ImageFile,
             FragFile,
             VertFile,
@@ -1960,6 +1961,7 @@ namespace LimitlessSquareEngine.Editor
             private static readonly IBrush MaterialBrush = new SolidColorBrush(Color.Parse("#226622"));
             private static readonly IBrush AnimationClipBrush = new SolidColorBrush(Color.Parse("#8A5A1F"));
             private static readonly IBrush AnimatorControllerBrush = new SolidColorBrush(Color.Parse("#5A1F6A"));
+            private static readonly IBrush VrmaBrush = new SolidColorBrush(Color.Parse("#1F5A6A"));
             private static readonly IBrush ImageBrush = new SolidColorBrush(Color.Parse("#66C8FF"));
             private static readonly IBrush AudioBrush = new SolidColorBrush(Color.Parse("#7B1FA2"));
             private static readonly IBrush AudioDiscBrush = new SolidColorBrush(Color.Parse("#555555"));
@@ -2027,6 +2029,11 @@ namespace LimitlessSquareEngine.Editor
                     case ResourceIconKind.AnimatorControllerJsonFile:
                         DrawFileBase(context, bounds, AnimatorControllerBrush, true);
                         DrawAnimatorStateNodes(context, bounds);
+                        break;
+
+                    case ResourceIconKind.VrmaFile:
+                        DrawFileBase(context, bounds, VrmaBrush, true);
+                        DrawVrmaBones(context, bounds);
                         break;
 
                     case ResourceIconKind.ImageFile:
@@ -2379,6 +2386,34 @@ namespace LimitlessSquareEngine.Editor
                     linkPen,
                     new Point(first.Right, first.Center.Y),
                     new Point(second.Left, second.Center.Y));
+            }
+
+            private static void DrawVrmaBones(DrawingContext context, Rect bounds)
+            {
+                double boxSize = Math.Min(bounds.Width, bounds.Height);
+                double radius = Math.Max(1.0, boxSize * 0.05);
+                double centerX = bounds.X + boxSize * 0.5;
+
+                Point head = new Point(centerX, bounds.Y + boxSize * 0.24);
+                Point chest = new Point(centerX, bounds.Y + boxSize * 0.46);
+                Point hip = new Point(centerX, bounds.Y + boxSize * 0.66);
+
+                Point leftHand = new Point(bounds.X + boxSize * 0.24, bounds.Y + boxSize * 0.42);
+                Point rightHand = new Point(bounds.X + boxSize * 0.76, bounds.Y + boxSize * 0.42);
+
+                Point leftFoot = new Point(bounds.X + boxSize * 0.36, bounds.Y + boxSize * 0.90);
+                Point rightFoot = new Point(bounds.X + boxSize * 0.64, bounds.Y + boxSize * 0.90);
+
+                Pen bonePen = new Pen(WhiteBrush, Math.Max(1.0, boxSize * 0.045));
+
+                context.DrawLine(bonePen, head, chest);
+                context.DrawLine(bonePen, chest, hip);
+                context.DrawLine(bonePen, chest, leftHand);
+                context.DrawLine(bonePen, chest, rightHand);
+                context.DrawLine(bonePen, hip, leftFoot);
+                context.DrawLine(bonePen, hip, rightFoot);
+
+                context.DrawEllipse(WhiteBrush, null, head, radius, radius);
             }
         }
 
@@ -5811,15 +5846,32 @@ void main()
                 await DeleteSelectedResourceItemAsync();
             };
 
+            bool isVrma =
+                !state.IsDirectory &&
+                string.Equals(Path.GetExtension(state.Path), ".vrma", StringComparison.OrdinalIgnoreCase);
+
+            List<object> items = new List<object> { openItem };
+
+            if (isVrma)
+            {
+                MenuItem convertItem = new MenuItem { Header = "转换为动画剪辑" };
+
+                convertItem.Click += async (_, _) =>
+                {
+                    SelectResourceItem(state);
+                    await ConvertVrmaToClipAsync(state.Path);
+                };
+
+                items.Add(convertItem);
+            }
+
+            items.Add(revealItem);
+            items.Add(renameItem);
+            items.Add(deleteItem);
+
             return new ContextMenu
             {
-                ItemsSource = new object[]
-                {
-                    openItem,
-                    revealItem,
-                    renameItem,
-                    deleteItem
-                }
+                ItemsSource = items.ToArray()
             };
         }
 
@@ -6050,6 +6102,9 @@ void main()
                 case ".json":
                     return ResolveJsonResourceIconKind(path);
 
+                case ".vrma":
+                    return ResourceIconKind.VrmaFile;
+
                 default:
                     return ResourceIconKind.GenericFile;
             }
@@ -6105,6 +6160,12 @@ void main()
         {
             if (IsEditorConfigFile(filePath))
                 return false;
+
+            if (string.Equals(analyzedFileType, ".vrma", StringComparison.OrdinalIgnoreCase))
+            {
+                ShowVrmaClipWindow(filePath);
+                return true;
+            }
 
             if (!string.Equals(analyzedFileType, ".json", StringComparison.OrdinalIgnoreCase))
                 return false;
@@ -8665,6 +8726,41 @@ void main()
             WriteAssetJsonFile(filePath, "AnimatorController", data);
         }
 
+        private async Task ConvertVrmaToClipAsync(string vrmaPath)
+        {
+            if (!VrmaConverter.TryConvert(vrmaPath, out AnimationClipData? clip, out string reason))
+            {
+                await ShowSimpleWarningDialogAsync("转换失败", reason);
+                return;
+            }
+
+            string clipPath = Path.ChangeExtension(vrmaPath, ".json");
+
+            if (File.Exists(clipPath))
+            {
+                await ShowSimpleWarningDialogAsync("转换失败", "目标已存在 " + Path.GetFileName(clipPath));
+                return;
+            }
+
+            try
+            {
+                SaveAnimationClipFile(clipPath, clip!);
+
+                string key = BuildAnimationAssetKey(clipPath);
+
+                EditorHostBridge.RegisterAnimationClip(key, clip!);
+
+                if (!string.IsNullOrWhiteSpace(_currentResourceDirectoryPath))
+                    ShowResourceDirectory(_currentResourceDirectoryPath);
+
+                await ShowSimpleWarningDialogAsync("转换完成", "已生成 " + Path.GetFileName(clipPath));
+            }
+            catch (Exception ex)
+            {
+                await ShowSimpleWarningDialogAsync("转换失败", ex.Message);
+            }
+        }
+
         private static string ReadEditorConfigValue(EditorConfigData config, string key)
         {
             if (config.Values.TryGetValue(key, out JsonElement element) && element.ValueKind == JsonValueKind.String)
@@ -8864,6 +8960,22 @@ void main()
                 return;
             }
 
+            ShowAnimationClipWindow(filePath, clip, false);
+        }
+
+        private void ShowVrmaClipWindow(string filePath)
+        {
+            if (!VrmaConverter.TryConvert(filePath, out AnimationClipData? clip, out string reason))
+            {
+                _ = ShowSimpleWarningDialogAsync("打开失败", reason);
+                return;
+            }
+
+            ShowAnimationClipWindow(filePath, clip!, true);
+        }
+
+        private void ShowAnimationClipWindow(string filePath, AnimationClipData clip, bool isVrmaSource)
+        {
             string fileName = Path.GetFileName(filePath);
             EditorConfigData config = LoadEditorConfig(filePath);
 
@@ -9253,8 +9365,17 @@ void main()
                 timeline.InvalidateVisual();
             };
 
+            if (isVrmaSource)
+                saveButton.Content = "转换为剪辑";
+
             saveButton.Click += (_, _) =>
             {
+                if (isVrmaSource)
+                {
+                    _ = ConvertVrmaToClipAsync(filePath);
+                    return;
+                }
+
                 try
                 {
                     SaveAnimationClipFile(filePath, clip);

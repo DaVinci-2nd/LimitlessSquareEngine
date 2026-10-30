@@ -649,6 +649,14 @@ namespace LimitlessSquareEngine.Engine
         public Double3 LocalScale { get; set; } = Double3.One;
 
         internal DQuaternion? LocalRotationQuaternion { get; set; }
+
+        internal Double3 RestPosition { get; set; } = Double3.Zero;
+
+        internal DQuaternion RestRotation { get; set; } = DQuaternion.Identity;
+
+        internal Double3 RestScale { get; set; } = Double3.One;
+
+        internal DQuaternion? RestWorldRotation { get; set; }
     }
 
     public sealed class AvatarSkeleton

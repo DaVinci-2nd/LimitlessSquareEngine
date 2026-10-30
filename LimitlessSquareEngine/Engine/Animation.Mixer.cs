@@ -123,7 +123,8 @@ namespace LimitlessSquareEngine.Engine
             double time,
             bool stepped,
             AnimationPoseBuffer result,
-            Func<AnimationChannel, int> resolveBoneIndex)
+            Func<AnimationChannel, int> resolveBoneIndex,
+            Func<int, AnimationBoneRest> resolveBoneRest)
         {
             if (result == null)
                 return;
@@ -150,7 +151,7 @@ namespace LimitlessSquareEngine.Engine
                     continue;
 
                 AnimationPoseBuffer source = AnimationPoseBuffer.Create(result.BoneCount);
-                entry.Clip.Sample(time, stepped, source, resolveBoneIndex);
+                entry.Clip.Sample(time, stepped, source, resolveBoneIndex, resolveBoneRest);
 
                 accumulated += weight;
 
@@ -173,17 +174,29 @@ namespace LimitlessSquareEngine.Engine
                 if (!source.Touched[i])
                     continue;
 
-                Double3 targetTranslation = target.Translations[i];
-                Double3 sourceTranslation = source.Translations[i];
+                if (source.TouchedTranslations[i])
+                {
+                    Double3 targetTranslation = target.Translations[i];
+                    Double3 sourceTranslation = source.Translations[i];
 
-                target.Translations[i] = targetTranslation + (sourceTranslation - targetTranslation) * (double)weight;
+                    target.Translations[i] = targetTranslation + (sourceTranslation - targetTranslation) * (double)weight;
+                    target.TouchedTranslations[i] = true;
+                }
 
-                target.Rotations[i] = DQuaternion.Slerp(target.Rotations[i], source.Rotations[i], weight);
+                if (source.TouchedRotations[i])
+                {
+                    target.Rotations[i] = DQuaternion.Slerp(target.Rotations[i], source.Rotations[i], weight);
+                    target.TouchedRotations[i] = true;
+                }
 
-                Double3 targetScale = target.Scales[i];
-                Double3 sourceScale = source.Scales[i];
+                if (source.TouchedScales[i])
+                {
+                    Double3 targetScale = target.Scales[i];
+                    Double3 sourceScale = source.Scales[i];
 
-                target.Scales[i] = targetScale + (sourceScale - targetScale) * (double)weight;
+                    target.Scales[i] = targetScale + (sourceScale - targetScale) * (double)weight;
+                    target.TouchedScales[i] = true;
+                }
 
                 target.Touched[i] = true;
             }

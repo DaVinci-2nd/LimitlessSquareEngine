@@ -293,6 +293,7 @@ namespace LimitlessSquareEngine
         internal static Dictionary<string, string> _noiseFieldFileRegistry = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         static readonly HashSet<string> _lazyNoiseFieldKeyDiscoveryCompleted = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         static readonly HashSet<string> _lazyAnimationKeyDiscoveryCompleted = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        static readonly HashSet<string> _lazyVrmaKeyDiscoveryCompleted = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         // 场景文件显示名表
         static Dictionary<string, string> _sceneFileDisplayName = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
@@ -640,6 +641,70 @@ namespace LimitlessSquareEngine
                 }
 
                 _lazyAnimationKeyDiscoveryCompleted.Add(_assetRootPath);
+            }
+        }
+
+        internal static void EnsureAllVrmaKeysDiscovered()
+        {
+            lock (_assetDiscoveryLock)
+            {
+                if (_lazyVrmaKeyDiscoveryCompleted.Contains(_assetRootPath))
+                    return;
+
+                if (!Directory.Exists(_assetRootPath))
+                {
+                    _lazyVrmaKeyDiscoveryCompleted.Add(_assetRootPath);
+                    return;
+                }
+
+                string[] files = Directory.GetFiles(_assetRootPath, "*.vrma", SearchOption.AllDirectories);
+                Array.Sort(files, StringComparer.OrdinalIgnoreCase);
+
+                foreach (string file in files)
+                {
+                    if (!VrmaConverter.TryConvert(file, out AnimationClipData? clipData, out string reason))
+                    {
+                        Console.WriteLine($"[!] VRMA conversion failed for {file}: {reason}");
+                        continue;
+                    }
+
+                    string key = BuildAssetKey(_assetRootPath, file, removeExtension: false);
+                    AnimationClipRegistry.Register(key, clipData!);
+                }
+
+                _lazyVrmaKeyDiscoveryCompleted.Add(_assetRootPath);
+            }
+        }
+
+        internal static bool EnsureVrmaRegistered(string clipKey)
+        {
+            if (string.IsNullOrWhiteSpace(clipKey))
+                return false;
+
+            string candidate = GetAssetPathFromKey(clipKey, ".vrma");
+
+            if (!File.Exists(candidate))
+            {
+                EnsureAllVrmaKeysDiscovered();
+
+                return AnimationClipRegistry.TryGet(clipKey, out _);
+            }
+
+            try
+            {
+                if (!VrmaConverter.TryConvert(candidate, out AnimationClipData? clipData, out string reason))
+                {
+                    Console.WriteLine($"[!] Failed to convert VRMA '{clipKey}': {reason}");
+                    return false;
+                }
+
+                AnimationClipRegistry.Register(clipKey, clipData!);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[!] Failed to lazily convert VRMA '{clipKey}': {ex.Message}");
+                return false;
             }
         }
 
@@ -1653,6 +1718,7 @@ namespace LimitlessSquareEngine
             _shaderVertexFiles.Clear();
             _lazyTextureKeyDiscoveryCompleted.Clear();
             _lazyAudioKeyDiscoveryCompleted.Clear();
+            _lazyVrmaKeyDiscoveryCompleted.Clear();
         }
 
         static void PreloadRegisteredAssets(Graphics graphics, string assetsPath)
@@ -1833,6 +1899,30 @@ namespace LimitlessSquareEngine
                     catch (Exception ex)
                     {
                         Console.WriteLine($"[!] Failed to scan VRM {file}: {ex.Message}");
+                    }
+
+                    continue;
+                }
+
+                if (ext.Equals(".vrma", StringComparison.OrdinalIgnoreCase))
+                {
+                    try
+                    {
+                        if (VrmaConverter.TryConvert(file, out AnimationClipData? clipData, out string vrmaReason))
+                        {
+                            string clipKey = BuildAssetKey(assetsPath, file, removeExtension: false);
+
+                            AnimationClipRegistry.Register(clipKey, clipData!);
+                            Console.WriteLine($"[i] Registered VRMA clip: {clipKey}");
+                        }
+                        else
+                        {
+                            Console.WriteLine($"[!] VRMA conversion failed for {file}: {vrmaReason}");
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"[!] Failed to scan VRMA {file}: {ex.Message}");
                     }
 
                     continue;

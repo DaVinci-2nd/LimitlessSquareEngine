@@ -29,6 +29,16 @@ namespace LimitlessSquareEngine.Engine
 
         public string Interpolation { get; set; } = "linear";
 
+        public float[] RestPosition { get; set; } = Array.Empty<float>();
+
+        public float[] RestRotation { get; set; } = Array.Empty<float>();
+
+        public float[] RestScale { get; set; } = Array.Empty<float>();
+
+        public float[] RestWorldRotation { get; set; } = Array.Empty<float>();
+
+        public float[] RestParentWorldRotation { get; set; } = Array.Empty<float>();
+
         public List<AnimationKeyframe> Keys { get; set; } = new();
     }
 
@@ -60,6 +70,40 @@ namespace LimitlessSquareEngine.Engine
         public List<AnimationEventData> Events { get; set; } = new();
     }
 
+    internal readonly struct AnimationBoneRest
+    {
+        public readonly Double3 Position;
+
+        public readonly DQuaternion Rotation;
+
+        public readonly Double3 Scale;
+
+        public readonly DQuaternion WorldRotation;
+
+        public readonly DQuaternion ParentWorldRotation;
+
+        public AnimationBoneRest(
+            Double3 position,
+            DQuaternion rotation,
+            Double3 scale,
+            DQuaternion worldRotation,
+            DQuaternion parentWorldRotation)
+        {
+            Position = position;
+            Rotation = rotation;
+            Scale = scale;
+            WorldRotation = worldRotation;
+            ParentWorldRotation = parentWorldRotation;
+        }
+
+        public static AnimationBoneRest Identity => new AnimationBoneRest(
+            Double3.Zero,
+            DQuaternion.Identity,
+            Double3.One,
+            DQuaternion.Identity,
+            DQuaternion.Identity);
+    }
+
     internal sealed class AnimationChannelRuntime
     {
         public AnimationChannel Channel { get; init; } = new();
@@ -78,6 +122,12 @@ namespace LimitlessSquareEngine.Engine
         public Double3[] Scales { get; init; } = Array.Empty<Double3>();
 
         public bool[] Touched { get; init; } = Array.Empty<bool>();
+
+        public bool[] TouchedTranslations { get; init; } = Array.Empty<bool>();
+
+        public bool[] TouchedRotations { get; init; } = Array.Empty<bool>();
+
+        public bool[] TouchedScales { get; init; } = Array.Empty<bool>();
 
         public Dictionary<string, float> ExpressionWeights { get; } = new(StringComparer.Ordinal);
 
@@ -100,7 +150,10 @@ namespace LimitlessSquareEngine.Engine
                 Translations = new Double3[boneCount],
                 Rotations = new DQuaternion[boneCount],
                 Scales = new Double3[boneCount],
-                Touched = new bool[boneCount]
+                Touched = new bool[boneCount],
+                TouchedTranslations = new bool[boneCount],
+                TouchedRotations = new bool[boneCount],
+                TouchedScales = new bool[boneCount]
             };
 
             buffer.ResetToRest();
@@ -120,6 +173,9 @@ namespace LimitlessSquareEngine.Engine
                 Rotations[i] = other.Rotations[i];
                 Scales[i] = other.Scales[i];
                 Touched[i] = other.Touched[i];
+                TouchedTranslations[i] = other.TouchedTranslations[i];
+                TouchedRotations[i] = other.TouchedRotations[i];
+                TouchedScales[i] = other.TouchedScales[i];
             }
 
             ExpressionWeights.Clear();
@@ -141,6 +197,9 @@ namespace LimitlessSquareEngine.Engine
                 Rotations[i] = DQuaternion.Identity;
                 Scales[i] = Double3.One;
                 Touched[i] = false;
+                TouchedTranslations[i] = false;
+                TouchedRotations[i] = false;
+                TouchedScales[i] = false;
             }
 
             ExpressionWeights.Clear();
@@ -209,7 +268,8 @@ namespace LimitlessSquareEngine.Engine
             double time,
             bool stepped,
             AnimationPoseBuffer pose,
-            Func<AnimationChannel, int> resolveBoneIndex)
+            Func<AnimationChannel, int> resolveBoneIndex,
+            Func<int, AnimationBoneRest> resolveBoneRest)
         {
             if (pose == null)
                 return;
@@ -264,6 +324,10 @@ namespace LimitlessSquareEngine.Engine
 
                 ResolveChannelValue(channelRuntime, sampleTime, stepped, scratch.Slice(0, valueCount));
 
+                AnimationBoneRest boneRest = resolveBoneRest != null && boneIndex >= 0
+                    ? resolveBoneRest(boneIndex)
+                    : AnimationBoneRest.Identity;
+
                 if (isObjectTransform)
                 {
                     pose.HasObjectTransform = true;
@@ -302,12 +366,15 @@ namespace LimitlessSquareEngine.Engine
                 {
                     if (valueCount >= 3)
                     {
-                        pose.Translations[boneIndex] = new Double3(
-                            scratch[0],
-                            scratch[1],
-                            scratch[2]);
+                        pose.Translations[boneIndex] = ApplyRestTranslation(
+                            new Double3(scratch[0], scratch[1], scratch[2]),
+                            channel.RestPosition,
+                            channel.RestParentWorldRotation,
+                            boneRest.Position,
+                            boneRest.ParentWorldRotation);
 
                         pose.Touched[boneIndex] = true;
+                        pose.TouchedTranslations[boneIndex] = true;
                     }
 
                     continue;
@@ -317,12 +384,13 @@ namespace LimitlessSquareEngine.Engine
                 {
                     if (valueCount >= 3)
                     {
-                        pose.Scales[boneIndex] = new Double3(
-                            scratch[0],
-                            scratch[1],
-                            scratch[2]);
+                        pose.Scales[boneIndex] = ApplyRestScale(
+                            new Double3(scratch[0], scratch[1], scratch[2]),
+                            channel.RestScale,
+                            boneRest.Scale);
 
                         pose.Touched[boneIndex] = true;
+                        pose.TouchedScales[boneIndex] = true;
                     }
 
                     continue;
@@ -330,15 +398,91 @@ namespace LimitlessSquareEngine.Engine
 
                 if (valueCount >= 4)
                 {
-                    pose.Rotations[boneIndex] = new DQuaternion(
-                        scratch[0],
-                        scratch[1],
-                        scratch[2],
-                        scratch[3]).Normalized();
+                    pose.Rotations[boneIndex] = ApplyRestRotation(
+                        new DQuaternion(
+                            scratch[0],
+                            scratch[1],
+                            scratch[2],
+                            scratch[3]).Normalized(),
+                        channel.RestRotation,
+                        channel.RestWorldRotation,
+                        channel.RestParentWorldRotation,
+                        boneRest.Rotation,
+                        boneRest.WorldRotation,
+                        boneRest.ParentWorldRotation);
 
                     pose.Touched[boneIndex] = true;
+                    pose.TouchedRotations[boneIndex] = true;
                 }
             }
+        }
+
+        static DQuaternion ApplyRestRotation(
+            DQuaternion animated,
+            float[] sourceRestLocal,
+            float[] sourceRestWorld,
+            float[] sourceRestParentWorld,
+            DQuaternion destinationRestLocal,
+            DQuaternion destinationRestWorld,
+            DQuaternion destinationRestParentWorld)
+        {
+            if (sourceRestWorld != null && sourceRestWorld.Length >= 4 &&
+                sourceRestParentWorld != null && sourceRestParentWorld.Length >= 4)
+            {
+                DQuaternion sourceWorld = ToQuaternion(sourceRestWorld);
+                DQuaternion sourceParentWorld = ToQuaternion(sourceRestParentWorld);
+
+                return (destinationRestParentWorld.Inverse() *
+                        sourceParentWorld *
+                        animated *
+                        sourceWorld.Inverse() *
+                        destinationRestWorld).Normalized();
+            }
+
+            if (sourceRestLocal == null || sourceRestLocal.Length < 4)
+                return animated;
+
+            return (destinationRestLocal * ToQuaternion(sourceRestLocal).Inverse() * animated).Normalized();
+        }
+
+        static DQuaternion ToQuaternion(float[] value)
+        {
+            return new DQuaternion(value[0], value[1], value[2], value[3]).Normalized();
+        }
+
+        static Double3 ApplyRestTranslation(
+            Double3 animated,
+            float[] sourceRest,
+            float[] sourceRestParentWorld,
+            Double3 destinationRest,
+            DQuaternion destinationRestParentWorld)
+        {
+            if (sourceRest == null || sourceRest.Length < 3)
+                return animated;
+
+            Double3 source = new Double3(sourceRest[0], sourceRest[1], sourceRest[2]);
+            Double3 delta = animated - source;
+
+            if (sourceRestParentWorld != null && sourceRestParentWorld.Length >= 4)
+            {
+                DQuaternion parentDelta =
+                    destinationRestParentWorld.Inverse() * ToQuaternion(sourceRestParentWorld);
+
+                delta = parentDelta.Rotate(delta);
+            }
+
+            return destinationRest + delta;
+        }
+
+        static Double3 ApplyRestScale(Double3 animated, float[] sourceRest, Double3 destinationRest)
+        {
+            if (sourceRest == null || sourceRest.Length < 3)
+                return animated;
+
+            return new Double3(
+                destinationRest.X * (Math.Abs(sourceRest[0]) > 1e-9 ? animated.X / sourceRest[0] : 1.0),
+                destinationRest.Y * (Math.Abs(sourceRest[1]) > 1e-9 ? animated.Y / sourceRest[1] : 1.0),
+                destinationRest.Z * (Math.Abs(sourceRest[2]) > 1e-9 ? animated.Z / sourceRest[2] : 1.0));
         }
 
         static int ResolveValueCount(string valueType)

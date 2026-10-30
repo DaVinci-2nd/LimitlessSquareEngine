@@ -151,7 +151,7 @@ namespace LimitlessSquareEngine.Engine
             {
                 foreach (AnimatorBlendEntryData entryData in motion.Entries)
                 {
-                    if (!AnimationClipRegistry.TryGet(entryData.Clip, out AnimationClipRuntime clip))
+                    if (!TryResolveClip(entryData.Clip, out AnimationClipRuntime clip))
                     {
                         Console.WriteLine($"[!] Animator blend entry clip '{entryData.Clip}' is not registered.");
                         continue;
@@ -167,7 +167,7 @@ namespace LimitlessSquareEngine.Engine
             }
             else
             {
-                if (AnimationClipRegistry.TryGet(motion.Clip, out AnimationClipRuntime clip))
+                if (TryResolveClip(motion.Clip, out AnimationClipRuntime clip))
                 {
                     Entries.Add(new AnimationMixerEntry
                     {
@@ -184,6 +184,22 @@ namespace LimitlessSquareEngine.Engine
 
             Weights = new float[Entries.Count];
             EntriesBuilt = true;
+        }
+
+        private static bool TryResolveClip(string key, out AnimationClipRuntime clip)
+        {
+            if (AnimationClipRegistry.TryGet(key, out clip))
+                return true;
+
+            if (string.IsNullOrWhiteSpace(key))
+                return false;
+
+            if (!key.EndsWith(".vrma", StringComparison.OrdinalIgnoreCase))
+                return false;
+
+            Program.EnsureVrmaRegistered(key);
+
+            return AnimationClipRegistry.TryGet(key, out clip);
         }
 
         public bool ResolveStepped()
@@ -255,7 +271,7 @@ namespace LimitlessSquareEngine.Engine
                     Weights[i] = 1f;
             }
 
-            AnimationMixer.Blend(Entries, Weights, Time, ResolveStepped(), Pose, owner.ResolveBoneIndex);
+            AnimationMixer.Blend(Entries, Weights, Time, ResolveStepped(), Pose, owner.ResolveBoneIndex, owner.ResolveBoneRest);
         }
     }
 
@@ -459,6 +475,68 @@ namespace LimitlessSquareEngine.Engine
                 return index;
 
             return -1;
+        }
+
+        public AnimationBoneRest ResolveBoneRest(int boneIndex)
+        {
+            if (Avatar == null || boneIndex < 0 || boneIndex >= Avatar.Skeleton.Bones.Count)
+                return AnimationBoneRest.Identity;
+
+            AvatarBone bone = Avatar.Skeleton.Bones[boneIndex];
+
+            DQuaternion worldRotation = DQuaternion.Identity;
+
+            if (bone.RestWorldRotation.HasValue)
+            {
+                worldRotation = bone.RestWorldRotation.Value;
+            }
+            else
+            {
+                AvatarBone? cursor = bone;
+
+                while (cursor != null)
+                {
+                    worldRotation = cursor.RestRotation * worldRotation;
+
+                    if (cursor.ParentIndex < 0 || cursor.ParentIndex >= Avatar.Skeleton.Bones.Count)
+                        break;
+
+                    cursor = Avatar.Skeleton.Bones[cursor.ParentIndex];
+                }
+            }
+
+            DQuaternion parentWorldRotation = DQuaternion.Identity;
+
+            if (bone.ParentIndex >= 0 && bone.ParentIndex < Avatar.Skeleton.Bones.Count)
+            {
+                AvatarBone parent = Avatar.Skeleton.Bones[bone.ParentIndex];
+
+                if (parent.RestWorldRotation.HasValue)
+                {
+                    parentWorldRotation = parent.RestWorldRotation.Value;
+                }
+                else
+                {
+                    AvatarBone? cursor = parent;
+
+                    while (cursor != null)
+                    {
+                        parentWorldRotation = cursor.RestRotation * parentWorldRotation;
+
+                        if (cursor.ParentIndex < 0 || cursor.ParentIndex >= Avatar.Skeleton.Bones.Count)
+                            break;
+
+                        cursor = Avatar.Skeleton.Bones[cursor.ParentIndex];
+                    }
+                }
+            }
+
+            return new AnimationBoneRest(
+                bone.RestPosition,
+                bone.RestRotation,
+                bone.RestScale,
+                worldRotation,
+                parentWorldRotation);
         }
 
         public void Tick(double deltaTime)
@@ -730,22 +808,46 @@ namespace LimitlessSquareEngine.Engine
 
                 if (additive)
                 {
-                    Pose.Translations[i] += layer.Pose.Translations[i] * (double)weight;
+                    if (layer.Pose.TouchedTranslations[i])
+                    {
+                        Pose.Translations[i] += layer.Pose.Translations[i] * (double)weight;
+                        Pose.TouchedTranslations[i] = true;
+                    }
 
-                    DQuaternion delta = DQuaternion.Slerp(DQuaternion.Identity, layer.Pose.Rotations[i], weight);
-                    Pose.Rotations[i] = (Pose.Rotations[i] * delta).Normalized();
+                    if (layer.Pose.TouchedRotations[i])
+                    {
+                        DQuaternion delta = DQuaternion.Slerp(DQuaternion.Identity, layer.Pose.Rotations[i], weight);
+                        Pose.Rotations[i] = (Pose.Rotations[i] * delta).Normalized();
+                        Pose.TouchedRotations[i] = true;
+                    }
 
-                    Pose.Scales[i] += (layer.Pose.Scales[i] - Double3.One) * (double)weight;
+                    if (layer.Pose.TouchedScales[i])
+                    {
+                        Pose.Scales[i] += (layer.Pose.Scales[i] - Double3.One) * (double)weight;
+                        Pose.TouchedScales[i] = true;
+                    }
                 }
                 else
                 {
-                    Pose.Translations[i] = Pose.Translations[i] +
-                                           (layer.Pose.Translations[i] - Pose.Translations[i]) * (double)weight;
+                    if (layer.Pose.TouchedTranslations[i])
+                    {
+                        Pose.Translations[i] = Pose.Translations[i] +
+                                               (layer.Pose.Translations[i] - Pose.Translations[i]) * (double)weight;
+                        Pose.TouchedTranslations[i] = true;
+                    }
 
-                    Pose.Rotations[i] = DQuaternion.Slerp(Pose.Rotations[i], layer.Pose.Rotations[i], weight);
+                    if (layer.Pose.TouchedRotations[i])
+                    {
+                        Pose.Rotations[i] = DQuaternion.Slerp(Pose.Rotations[i], layer.Pose.Rotations[i], weight);
+                        Pose.TouchedRotations[i] = true;
+                    }
 
-                    Pose.Scales[i] = Pose.Scales[i] +
-                                     (layer.Pose.Scales[i] - Pose.Scales[i]) * (double)weight;
+                    if (layer.Pose.TouchedScales[i])
+                    {
+                        Pose.Scales[i] = Pose.Scales[i] +
+                                         (layer.Pose.Scales[i] - Pose.Scales[i]) * (double)weight;
+                        Pose.TouchedScales[i] = true;
+                    }
                 }
 
                 Pose.Touched[i] = true;
@@ -854,10 +956,17 @@ namespace LimitlessSquareEngine.Engine
 
                     AvatarBone bone = Avatar.Skeleton.Bones[i];
 
-                    bone.LocalPosition = Pose.Translations[i];
-                    bone.LocalRotationQuaternion = Pose.Rotations[i];
-                    bone.LocalRotation = Pose.Rotations[i].ToEulerDegrees();
-                    bone.LocalScale = Pose.Scales[i];
+                    if (Pose.TouchedTranslations[i])
+                        bone.LocalPosition = Pose.Translations[i];
+
+                    if (Pose.TouchedRotations[i])
+                    {
+                        bone.LocalRotationQuaternion = Pose.Rotations[i];
+                        bone.LocalRotation = Pose.Rotations[i].ToEulerDegrees();
+                    }
+
+                    if (Pose.TouchedScales[i])
+                        bone.LocalScale = Pose.Scales[i];
                 }
 
                 foreach (KeyValuePair<string, float> pair in Pose.ExpressionWeights)

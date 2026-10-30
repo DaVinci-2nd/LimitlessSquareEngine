@@ -53,6 +53,10 @@ namespace LimitlessSquareEngine.Engine
                 bone.LocalRotationQuaternion = rotation;
                 bone.LocalRotation = rotation.ToEulerDegrees();
                 bone.LocalScale = new Double3(node.Scale.X, node.Scale.Y, node.Scale.Z);
+
+                bone.RestPosition = bone.LocalPosition;
+                bone.RestRotation = rotation;
+                bone.RestScale = bone.LocalScale;
             }
 
             for (int i = 0; i < data.Nodes.Count && i < avatar.Skeleton.Bones.Count; i++)
@@ -62,6 +66,8 @@ namespace LimitlessSquareEngine.Engine
                 if (parentIndex >= -1 && parentIndex < avatar.Skeleton.Bones.Count)
                     avatar.Skeleton.Bones[i].ParentIndex = parentIndex;
             }
+
+            ResolveRestWorldRotations(avatar.Skeleton);
 
             foreach (VrmMeshSurfaceData surfaceData in data.Surfaces)
             {
@@ -148,6 +154,49 @@ namespace LimitlessSquareEngine.Engine
         {
             target.InputMaxValue = source.InputMaxValue;
             target.OutputScale = source.OutputScale;
+        }
+
+        private static void ResolveRestWorldRotations(AvatarSkeleton skeleton)
+        {
+            var computed = new bool[skeleton.Bones.Count];
+
+            for (int i = 0; i < skeleton.Bones.Count; i++)
+                skeleton.Bones[i].RestWorldRotation = null;
+
+            bool progress = true;
+
+            while (progress)
+            {
+                progress = false;
+
+                for (int i = 0; i < skeleton.Bones.Count; i++)
+                {
+                    if (computed[i])
+                        continue;
+
+                    AvatarBone bone = skeleton.Bones[i];
+
+                    if (bone.ParentIndex < 0)
+                    {
+                        bone.RestWorldRotation = bone.RestRotation.Normalized();
+                        computed[i] = true;
+                        progress = true;
+                        continue;
+                    }
+
+                    if (bone.ParentIndex >= skeleton.Bones.Count)
+                        continue;
+
+                    if (!computed[bone.ParentIndex])
+                        continue;
+
+                    DQuaternion parentWorld = skeleton.Bones[bone.ParentIndex].RestWorldRotation ?? DQuaternion.Identity;
+
+                    bone.RestWorldRotation = (parentWorld * bone.RestRotation).Normalized();
+                    computed[i] = true;
+                    progress = true;
+                }
+            }
         }
 
         private AvatarSkin? BuildAvatarSkin(Avatar avatar, VrmData data, VrmMeshSurfaceData surfaceData)
@@ -639,6 +688,40 @@ namespace LimitlessSquareEngine.Engine
         public List<VrmRawTextureTransformBind> TextureTransformBinds { get; } = new();
     }
 
+    public sealed class VrmAnimationExpressionData
+    {
+        public string ExpressionName { get; set; } = "";
+
+        public int NodeIndex { get; set; }
+    }
+
+    public sealed class VrmAnimationSamplerData
+    {
+        public double[] Input { get; set; } = Array.Empty<double>();
+
+        public float[] Output { get; set; } = Array.Empty<float>();
+
+        public string Interpolation { get; set; } = "LINEAR";
+    }
+
+    public sealed class VrmAnimationChannelData
+    {
+        public int NodeIndex { get; set; } = -1;
+
+        public string Path { get; set; } = "";
+
+        public int SamplerIndex { get; set; } = -1;
+    }
+
+    public sealed class VrmAnimationData
+    {
+        public string Name { get; set; } = "";
+
+        public List<VrmAnimationSamplerData> Samplers { get; } = new();
+
+        public List<VrmAnimationChannelData> Channels { get; } = new();
+    }
+
     public sealed class VrmData
     {
         public List<VrmSkeletonNode> Nodes { get; } = new();
@@ -654,6 +737,10 @@ namespace LimitlessSquareEngine.Engine
         public List<VrmHumanoidBone> HumanoidBones { get; } = new();
 
         public List<VrmRawExpression> Expressions { get; } = new();
+
+        public List<VrmAnimationExpressionData> AnimationExpressions { get; } = new();
+
+        public List<VrmAnimationData> Animations { get; } = new();
 
         public VrmLookAt LookAt { get; } = new();
 

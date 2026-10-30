@@ -1335,6 +1335,7 @@ namespace LimitlessSquareEngine
             LoadMeshes(root, data);
             LoadTextures(root, data);
             LoadMaterials(root, data);
+            LoadAnimations(root, data);
             ParseVrmExtensionJson(root, data);
 
             return data;
@@ -1446,6 +1447,167 @@ namespace LimitlessSquareEngine
                     data.Surfaces.Add(surface);
                 }
             }
+        }
+
+        private static void LoadAnimations(Gltf.ModelRoot root, VrmData data)
+        {
+            IReadOnlyList<Gltf.Animation> animations = root.LogicalAnimations;
+            IReadOnlyList<Gltf.Node> nodes = root.LogicalNodes;
+
+            for (int i = 0; i < animations.Count; i++)
+            {
+                Gltf.Animation animation = animations[i];
+
+                VrmAnimationData animationData = new VrmAnimationData
+                {
+                    Name = $"animation_{i}"
+                };
+
+                for (int n = 0; n < nodes.Count; n++)
+                {
+                    Gltf.Node node = nodes[n];
+
+                    if (!node.IsTransformAnimated)
+                        continue;
+
+                    Gltf.NodeCurveSamplers curves = node.GetCurveSamplers(animation);
+
+                    if (!curves.HasTransformCurves)
+                        continue;
+
+                    var translation = curves.Translation;
+
+                    if (translation != null)
+                    {
+                        List<double> input = new List<double>();
+                        List<float> output = new List<float>();
+
+                        if (translation.InterpolationMode == Gltf.AnimationInterpolationMode.CUBICSPLINE)
+                        {
+                            foreach (var key in translation.GetCubicKeys())
+                            {
+                                input.Add(key.Key);
+                                AppendVector3(output, key.Value.TangentIn);
+                                AppendVector3(output, key.Value.Value);
+                                AppendVector3(output, key.Value.TangentOut);
+                            }
+                        }
+                        else
+                        {
+                            foreach (var key in translation.GetLinearKeys())
+                            {
+                                input.Add(key.Key);
+                                AppendVector3(output, key.Value);
+                            }
+                        }
+
+                        AddAnimationChannel(animationData, n, "translation", input, output, translation.InterpolationMode);
+                    }
+
+                    var rotation = curves.Rotation;
+
+                    if (rotation != null)
+                    {
+                        List<double> input = new List<double>();
+                        List<float> output = new List<float>();
+
+                        if (rotation.InterpolationMode == Gltf.AnimationInterpolationMode.CUBICSPLINE)
+                        {
+                            foreach (var key in rotation.GetCubicKeys())
+                            {
+                                input.Add(key.Key);
+                                AppendQuaternion(output, key.Value.TangentIn);
+                                AppendQuaternion(output, key.Value.Value);
+                                AppendQuaternion(output, key.Value.TangentOut);
+                            }
+                        }
+                        else
+                        {
+                            foreach (var key in rotation.GetLinearKeys())
+                            {
+                                input.Add(key.Key);
+                                AppendQuaternion(output, key.Value);
+                            }
+                        }
+
+                        AddAnimationChannel(animationData, n, "rotation", input, output, rotation.InterpolationMode);
+                    }
+
+                    var scale = curves.Scale;
+
+                    if (scale != null)
+                    {
+                        List<double> input = new List<double>();
+                        List<float> output = new List<float>();
+
+                        if (scale.InterpolationMode == Gltf.AnimationInterpolationMode.CUBICSPLINE)
+                        {
+                            foreach (var key in scale.GetCubicKeys())
+                            {
+                                input.Add(key.Key);
+                                AppendVector3(output, key.Value.TangentIn);
+                                AppendVector3(output, key.Value.Value);
+                                AppendVector3(output, key.Value.TangentOut);
+                            }
+                        }
+                        else
+                        {
+                            foreach (var key in scale.GetLinearKeys())
+                            {
+                                input.Add(key.Key);
+                                AppendVector3(output, key.Value);
+                            }
+                        }
+
+                        AddAnimationChannel(animationData, n, "scale", input, output, scale.InterpolationMode);
+                    }
+                }
+
+                data.Animations.Add(animationData);
+            }
+        }
+
+        private static void AddAnimationChannel(
+            VrmAnimationData animationData,
+            int nodeIndex,
+            string path,
+            List<double> input,
+            List<float> output,
+            Gltf.AnimationInterpolationMode interpolationMode)
+        {
+            if (input.Count == 0 || output.Count == 0)
+                return;
+
+            int samplerIndex = animationData.Samplers.Count;
+
+            animationData.Samplers.Add(new VrmAnimationSamplerData
+            {
+                Input = input.ToArray(),
+                Output = output.ToArray(),
+                Interpolation = interpolationMode.ToString()
+            });
+
+            animationData.Channels.Add(new VrmAnimationChannelData
+            {
+                NodeIndex = nodeIndex,
+                Path = path,
+                SamplerIndex = samplerIndex
+            });
+        }
+
+        private static void AppendVector3(List<float> output, Vector3 value)
+        {
+            output.Add(value.X);
+            output.Add(value.Y);
+            output.Add(value.Z);
+        }
+
+        private static void AppendQuaternion(List<float> output, Quaternion value)
+        {
+            output.Add(value.X);
+            output.Add(value.Y);
+            output.Add(value.Z);
+            output.Add(value.W);
         }
 
         private static int[] ReadTriangleIndices(Gltf.MeshPrimitive primitive)
@@ -1655,6 +1817,7 @@ namespace LimitlessSquareEngine
             using JsonDocument doc = JsonDocument.Parse(json);
 
             ParseMtoonMaterials(doc.RootElement, data);
+            ParseVrmAnimationExtensionJson(doc.RootElement, data);
 
             if (!doc.RootElement.TryGetProperty("extensions", out JsonElement extensions) ||
                 extensions.ValueKind != JsonValueKind.Object)
@@ -1736,6 +1899,69 @@ namespace LimitlessSquareEngine
                 if (meta.TryGetProperty("copyrightInformation", out JsonElement copyrightElem) &&
                     copyrightElem.ValueKind == JsonValueKind.String)
                     data.Meta.CopyrightInformation = copyrightElem.GetString() ?? "";
+            }
+        }
+
+        private static void ParseVrmAnimationExtensionJson(JsonElement root, VrmData data)
+        {
+            if (!root.TryGetProperty("extensions", out JsonElement extensions) ||
+                extensions.ValueKind != JsonValueKind.Object)
+                return;
+
+            if (!extensions.TryGetProperty("VRMC_vrm_animation", out JsonElement animation) ||
+                animation.ValueKind != JsonValueKind.Object)
+                return;
+
+            if (animation.TryGetProperty("humanoid", out JsonElement humanoid) &&
+                humanoid.ValueKind == JsonValueKind.Object &&
+                humanoid.TryGetProperty("humanBones", out JsonElement humanBones) &&
+                humanBones.ValueKind == JsonValueKind.Object)
+            {
+                foreach (JsonProperty boneProp in humanBones.EnumerateObject())
+                {
+                    if (boneProp.Value.ValueKind != JsonValueKind.Object)
+                        continue;
+
+                    if (!boneProp.Value.TryGetProperty("node", out JsonElement nodeElem) ||
+                        nodeElem.ValueKind != JsonValueKind.Number)
+                        continue;
+
+                    data.HumanoidBones.Add(new VrmHumanoidBone
+                    {
+                        BoneName = boneProp.Name,
+                        NodeIndex = nodeElem.GetInt32()
+                    });
+                }
+            }
+
+            if (animation.TryGetProperty("expressions", out JsonElement expressions) &&
+                expressions.ValueKind == JsonValueKind.Object)
+            {
+                ReadAnimationExpressionNodes(expressions, "preset", data);
+                ReadAnimationExpressionNodes(expressions, "custom", data);
+            }
+        }
+
+        private static void ReadAnimationExpressionNodes(JsonElement expressions, string groupName, VrmData data)
+        {
+            if (!expressions.TryGetProperty(groupName, out JsonElement group) ||
+                group.ValueKind != JsonValueKind.Object)
+                return;
+
+            foreach (JsonProperty prop in group.EnumerateObject())
+            {
+                if (prop.Value.ValueKind != JsonValueKind.Object)
+                    continue;
+
+                if (!prop.Value.TryGetProperty("node", out JsonElement nodeElem) ||
+                    nodeElem.ValueKind != JsonValueKind.Number)
+                    continue;
+
+                data.AnimationExpressions.Add(new VrmAnimationExpressionData
+                {
+                    ExpressionName = prop.Name,
+                    NodeIndex = nodeElem.GetInt32()
+                });
             }
         }
 
