@@ -307,7 +307,7 @@ namespace LimitlessSquareEngine
         // 待执行步进帧数
         private static int _pendingStepFrameCount = 0;
         // 固定步长
-        private const float FixedDeltaTime = 0.02f;
+        private static float _fixedDeltaTime = 0.02f;
         // 游戏启动文件夹
         private static string _gameStartupFolder = AppContext.BaseDirectory;
 
@@ -1201,7 +1201,7 @@ namespace LimitlessSquareEngine
         static bool TryPrepareRuntimeFrameTiming(out float deltaTime, out float fixedDeltaTime)
         {
             deltaTime = 0f;
-            fixedDeltaTime = FixedDeltaTime;
+            fixedDeltaTime = _fixedDeltaTime;
 
             if (_window == null)
                 return false;
@@ -1219,7 +1219,7 @@ namespace LimitlessSquareEngine
                 if (_pendingStepFrameCount > 0)
                 {
                     _pendingStepFrameCount--;
-                    deltaTime = FixedDeltaTime;
+                    deltaTime = _fixedDeltaTime;
                     return true;
                 }
 

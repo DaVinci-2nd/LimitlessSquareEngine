@@ -1818,6 +1818,7 @@ namespace LimitlessSquareEngine
 
             ParseMtoonMaterials(doc.RootElement, data);
             ParseVrmAnimationExtensionJson(doc.RootElement, data);
+            ParseVrmSpringBoneExtensionJson(doc.RootElement, data);
 
             if (!doc.RootElement.TryGetProperty("extensions", out JsonElement extensions) ||
                 extensions.ValueKind != JsonValueKind.Object)
@@ -1962,6 +1963,168 @@ namespace LimitlessSquareEngine
                     ExpressionName = prop.Name,
                     NodeIndex = nodeElem.GetInt32()
                 });
+            }
+        }
+
+        private static void ParseVrmSpringBoneExtensionJson(JsonElement root, VrmData data)
+        {
+            if (!root.TryGetProperty("extensions", out JsonElement extensions) ||
+                extensions.ValueKind != JsonValueKind.Object)
+                return;
+
+            if (!extensions.TryGetProperty("VRMC_springBone", out JsonElement springBone) ||
+                springBone.ValueKind != JsonValueKind.Object)
+                return;
+
+            if (springBone.TryGetProperty("colliders", out JsonElement colliders) &&
+                colliders.ValueKind == JsonValueKind.Array)
+            {
+                foreach (JsonElement colliderElem in colliders.EnumerateArray())
+                {
+                    if (colliderElem.ValueKind != JsonValueKind.Object)
+                        continue;
+
+                    VrmSpringColliderData collider = new VrmSpringColliderData();
+
+                    if (colliderElem.TryGetProperty("node", out JsonElement nodeElem) &&
+                        nodeElem.ValueKind == JsonValueKind.Number)
+                        collider.NodeIndex = nodeElem.GetInt32();
+
+                    if (colliderElem.TryGetProperty("shape", out JsonElement shapeElem) &&
+                        shapeElem.ValueKind == JsonValueKind.Object)
+                    {
+                        if (shapeElem.TryGetProperty("sphere", out JsonElement sphereElem) &&
+                            sphereElem.ValueKind == JsonValueKind.Object)
+                        {
+                            collider.Shape = "sphere";
+
+                            if (sphereElem.TryGetProperty("offset", out JsonElement offsetElem) &&
+                                TryReadNumberArray(offsetElem, out float[] offset) && offset.Length >= 3)
+                                collider.Offset = new Vector3(offset[0], offset[1], offset[2]);
+
+                            if (sphereElem.TryGetProperty("radius", out JsonElement radiusElem) &&
+                                radiusElem.ValueKind == JsonValueKind.Number)
+                                collider.Radius = (float)radiusElem.GetDouble();
+                        }
+                        else if (shapeElem.TryGetProperty("capsule", out JsonElement capsuleElem) &&
+                                 capsuleElem.ValueKind == JsonValueKind.Object)
+                        {
+                            collider.Shape = "capsule";
+
+                            if (capsuleElem.TryGetProperty("offset", out JsonElement offsetElem) &&
+                                TryReadNumberArray(offsetElem, out float[] offset) && offset.Length >= 3)
+                                collider.Offset = new Vector3(offset[0], offset[1], offset[2]);
+
+                            if (capsuleElem.TryGetProperty("radius", out JsonElement radiusElem) &&
+                                radiusElem.ValueKind == JsonValueKind.Number)
+                                collider.Radius = (float)radiusElem.GetDouble();
+
+                            if (capsuleElem.TryGetProperty("tail", out JsonElement tailElem) &&
+                                TryReadNumberArray(tailElem, out float[] tail) && tail.Length >= 3)
+                                collider.Tail = new Vector3(tail[0], tail[1], tail[2]);
+                        }
+                    }
+
+                    data.SpringBone.Colliders.Add(collider);
+                }
+            }
+
+            if (springBone.TryGetProperty("colliderGroups", out JsonElement groups) &&
+                groups.ValueKind == JsonValueKind.Array)
+            {
+                foreach (JsonElement groupElem in groups.EnumerateArray())
+                {
+                    if (groupElem.ValueKind != JsonValueKind.Object)
+                        continue;
+
+                    VrmSpringColliderGroupData group = new VrmSpringColliderGroupData();
+
+                    if (groupElem.TryGetProperty("name", out JsonElement nameElem) &&
+                        nameElem.ValueKind == JsonValueKind.String)
+                        group.Name = nameElem.GetString() ?? "";
+
+                    if (groupElem.TryGetProperty("colliders", out JsonElement indicesElem) &&
+                        indicesElem.ValueKind == JsonValueKind.Array)
+                    {
+                        foreach (JsonElement indexElem in indicesElem.EnumerateArray())
+                        {
+                            if (indexElem.ValueKind == JsonValueKind.Number)
+                                group.Colliders.Add(indexElem.GetInt32());
+                        }
+                    }
+
+                    data.SpringBone.ColliderGroups.Add(group);
+                }
+            }
+
+            if (!springBone.TryGetProperty("springs", out JsonElement springs) ||
+                springs.ValueKind != JsonValueKind.Array)
+                return;
+
+            foreach (JsonElement springElem in springs.EnumerateArray())
+            {
+                if (springElem.ValueKind != JsonValueKind.Object)
+                    continue;
+
+                VrmSpringChainData chain = new VrmSpringChainData();
+
+                if (springElem.TryGetProperty("name", out JsonElement nameElem) &&
+                    nameElem.ValueKind == JsonValueKind.String)
+                    chain.Name = nameElem.GetString() ?? "";
+
+                if (springElem.TryGetProperty("center", out JsonElement centerElem) &&
+                    centerElem.ValueKind == JsonValueKind.Number)
+                    chain.CenterNodeIndex = centerElem.GetInt32();
+
+                if (springElem.TryGetProperty("colliderGroups", out JsonElement groupIndices) &&
+                    groupIndices.ValueKind == JsonValueKind.Array)
+                {
+                    foreach (JsonElement indexElem in groupIndices.EnumerateArray())
+                    {
+                        if (indexElem.ValueKind == JsonValueKind.Number)
+                            chain.ColliderGroups.Add(indexElem.GetInt32());
+                    }
+                }
+
+                if (springElem.TryGetProperty("joints", out JsonElement joints) &&
+                    joints.ValueKind == JsonValueKind.Array)
+                {
+                    foreach (JsonElement jointElem in joints.EnumerateArray())
+                    {
+                        if (jointElem.ValueKind != JsonValueKind.Object)
+                            continue;
+
+                        VrmSpringJointData joint = new VrmSpringJointData();
+
+                        if (jointElem.TryGetProperty("node", out JsonElement nodeElem) &&
+                            nodeElem.ValueKind == JsonValueKind.Number)
+                            joint.NodeIndex = nodeElem.GetInt32();
+
+                        if (jointElem.TryGetProperty("hitRadius", out JsonElement hitRadiusElem) &&
+                            hitRadiusElem.ValueKind == JsonValueKind.Number)
+                            joint.HitRadius = (float)hitRadiusElem.GetDouble();
+
+                        if (jointElem.TryGetProperty("stiffness", out JsonElement stiffnessElem) &&
+                            stiffnessElem.ValueKind == JsonValueKind.Number)
+                            joint.Stiffness = (float)stiffnessElem.GetDouble();
+
+                        if (jointElem.TryGetProperty("gravityPower", out JsonElement gravityPowerElem) &&
+                            gravityPowerElem.ValueKind == JsonValueKind.Number)
+                            joint.GravityPower = (float)gravityPowerElem.GetDouble();
+
+                        if (jointElem.TryGetProperty("gravityDir", out JsonElement gravityDirElem) &&
+                            TryReadNumberArray(gravityDirElem, out float[] gravityDir) && gravityDir.Length >= 3)
+                            joint.GravityDir = new Vector3(gravityDir[0], gravityDir[1], gravityDir[2]);
+
+                        if (jointElem.TryGetProperty("dragForce", out JsonElement dragForceElem) &&
+                            dragForceElem.ValueKind == JsonValueKind.Number)
+                            joint.DragForce = (float)dragForceElem.GetDouble();
+
+                        chain.Joints.Add(joint);
+                    }
+                }
+
+                data.SpringBone.Chains.Add(chain);
             }
         }
 

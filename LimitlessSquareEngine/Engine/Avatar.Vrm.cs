@@ -83,6 +83,65 @@ namespace LimitlessSquareEngine.Engine
                     new KeyValuePair<string, int>(humanoidBone.BoneName, humanoidBone.NodeIndex)),
                 HumanoidProfiles.Vrm1));
 
+            avatar.SpringBone.Colliders.Clear();
+            avatar.SpringBone.ColliderGroups.Clear();
+            avatar.SpringBone.Chains.Clear();
+
+            foreach (VrmSpringColliderData colliderData in data.SpringBone.Colliders)
+            {
+                avatar.SpringBone.Colliders.Add(new AvatarSpringCollider
+                {
+                    BoneIndex = colliderData.NodeIndex,
+                    Shape = colliderData.Shape,
+                    Offset = new Double3(colliderData.Offset.X, colliderData.Offset.Y, colliderData.Offset.Z),
+                    Radius = colliderData.Radius,
+                    Tail = new Double3(colliderData.Tail.X, colliderData.Tail.Y, colliderData.Tail.Z)
+                });
+            }
+
+            foreach (VrmSpringColliderGroupData groupData in data.SpringBone.ColliderGroups)
+            {
+                AvatarSpringColliderGroup colliderGroup = new AvatarSpringColliderGroup
+                {
+                    Name = groupData.Name
+                };
+
+                foreach (int colliderIndex in groupData.Colliders)
+                    colliderGroup.Colliders.Add(colliderIndex);
+
+                avatar.SpringBone.ColliderGroups.Add(colliderGroup);
+            }
+
+            foreach (VrmSpringChainData chainData in data.SpringBone.Chains)
+            {
+                AvatarSpringChain chain = new AvatarSpringChain
+                {
+                    Name = chainData.Name,
+                    CenterBoneIndex = chainData.CenterNodeIndex
+                };
+
+                foreach (VrmSpringJointData jointData in chainData.Joints)
+                {
+                    chain.Joints.Add(new AvatarSpringJoint
+                    {
+                        BoneIndex = jointData.NodeIndex,
+                        HitRadius = jointData.HitRadius,
+                        Stiffness = jointData.Stiffness,
+                        GravityPower = jointData.GravityPower,
+                        GravityDir = new Double3(
+                            jointData.GravityDir.X,
+                            jointData.GravityDir.Y,
+                            jointData.GravityDir.Z),
+                        DragForce = jointData.DragForce
+                    });
+                }
+
+                foreach (int groupIndex in chainData.ColliderGroups)
+                    chain.ColliderGroups.Add(groupIndex);
+
+                avatar.SpringBone.Chains.Add(chain);
+            }
+
             foreach (VrmRawExpression rawExpression in data.Expressions)
             {
                 AvatarExpression expression = new AvatarExpression
@@ -722,6 +781,61 @@ namespace LimitlessSquareEngine.Engine
         public List<VrmAnimationChannelData> Channels { get; } = new();
     }
 
+    public sealed class VrmSpringColliderData
+    {
+        public int NodeIndex { get; set; } = -1;
+
+        public string Shape { get; set; } = "sphere";
+
+        public Vector3 Offset { get; set; }
+
+        public float Radius { get; set; }
+
+        public Vector3 Tail { get; set; }
+    }
+
+    public sealed class VrmSpringColliderGroupData
+    {
+        public string Name { get; set; } = "";
+
+        public List<int> Colliders { get; } = new();
+    }
+
+    public sealed class VrmSpringJointData
+    {
+        public int NodeIndex { get; set; } = -1;
+
+        public float HitRadius { get; set; }
+
+        public float Stiffness { get; set; } = 1f;
+
+        public float GravityPower { get; set; }
+
+        public Vector3 GravityDir { get; set; } = new Vector3(0f, -1f, 0f);
+
+        public float DragForce { get; set; } = 0.4f;
+    }
+
+    public sealed class VrmSpringChainData
+    {
+        public string Name { get; set; } = "";
+
+        public List<VrmSpringJointData> Joints { get; } = new();
+
+        public List<int> ColliderGroups { get; } = new();
+
+        public int CenterNodeIndex { get; set; } = -1;
+    }
+
+    public sealed class VrmSpringBoneData
+    {
+        public List<VrmSpringColliderData> Colliders { get; } = new();
+
+        public List<VrmSpringColliderGroupData> ColliderGroups { get; } = new();
+
+        public List<VrmSpringChainData> Chains { get; } = new();
+    }
+
     public sealed class VrmData
     {
         public List<VrmSkeletonNode> Nodes { get; } = new();
@@ -741,6 +855,8 @@ namespace LimitlessSquareEngine.Engine
         public List<VrmAnimationExpressionData> AnimationExpressions { get; } = new();
 
         public List<VrmAnimationData> Animations { get; } = new();
+
+        public VrmSpringBoneData SpringBone { get; } = new();
 
         public VrmLookAt LookAt { get; } = new();
 

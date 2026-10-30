@@ -30,6 +30,8 @@ namespace LimitlessSquareEngine.Engine
 
         public List<AvatarSkin> Skins { get; } = new();
 
+        public AvatarSpringBone SpringBone { get; } = new();
+
         public Avatar()
         {
             Id = "";

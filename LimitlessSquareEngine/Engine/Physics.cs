@@ -13,7 +13,7 @@ using System.Threading.Tasks;
 
 namespace LimitlessSquareEngine.Engine
 {
-    internal class Physics
+    internal partial class Physics
     {
         internal delegate bool MeshColliderTriangleResolver(
             string meshId,
@@ -35,6 +35,10 @@ namespace LimitlessSquareEngine.Engine
             public List<Scene.SceneRuntimeNode> OrderedPhysicsNodes { get; } = new();
             public Dictionary<string, bool> ForceWakeState { get; } = new(StringComparer.Ordinal);
             public Dictionary<string, Double3> LastWorldScale { get; } = new(StringComparer.Ordinal);
+            public Dictionary<string, AvatarPhysicsRuntime> Avatars { get; } = new(StringComparer.Ordinal);
+
+            public int AvatarsDiscoveryNodeCount = -1;
+            public bool AvatarsDiscoveryComplete;
 
             public double FixedDeltaAccumulator;
             public bool SkipFirstPhysicsStep = true;
@@ -81,7 +85,10 @@ namespace LimitlessSquareEngine.Engine
         public static void RemoveScene(string sceneId)
         {
             if (_sceneWorlds.TryRemove(sceneId, out var runtime))
+            {
+                ClearAvatarPhysics(runtime);
                 runtime.Dispose();
+            }
         }
 
         internal static void RemoveObject(string sceneId, string objectId)
@@ -91,6 +98,21 @@ namespace LimitlessSquareEngine.Engine
 
             if (!_sceneWorlds.TryGetValue(sceneId, out ScenePhysicsRuntime? physics))
                 return;
+
+            string removedAvatarId = "";
+
+            foreach (AvatarPhysicsRuntime avatarPhysics in physics.Avatars.Values)
+            {
+                if (!string.Equals(avatarPhysics.Node.Source.Id, objectId, StringComparison.Ordinal))
+                    continue;
+
+                RemoveAvatarPhysics(physics, avatarPhysics);
+                removedAvatarId = avatarPhysics.AvatarId;
+                break;
+            }
+
+            if (!string.IsNullOrEmpty(removedAvatarId))
+                physics.Avatars.Remove(removedAvatarId);
 
             if (!physics.Bodies.TryGetValue(objectId, out RigidBody? body))
                 return;
@@ -105,7 +127,10 @@ namespace LimitlessSquareEngine.Engine
         public static void ClearAll()
         {
             foreach (var pair in _sceneWorlds)
+            {
+                ClearAvatarPhysics(pair.Value);
                 pair.Value.Dispose();
+            }
 
             _sceneWorlds.Clear();
         }
@@ -116,7 +141,9 @@ namespace LimitlessSquareEngine.Engine
             {
                 ScenePhysicsRuntime physics = pair.Value;
 
-                if (physics.OrderedPhysicsNodes.Count == 0)
+                DiscoverAvatars(physics);
+
+                if (physics.OrderedPhysicsNodes.Count == 0 && physics.Avatars.Count == 0)
                     continue;
 
                 if (physics.SkipFirstPhysicsStep)
@@ -136,7 +163,9 @@ namespace LimitlessSquareEngine.Engine
                 {
                     PushDirtySceneTransformsToPhysics(physics);
                     WakeBodiesUnderForce(physics);
+                    StepAvatarPhysics(physics, fixedDeltaTime);
                     physics.World.Step(fixedDeltaTime, false);
+                    CollectAvatarContacts(physics);
                     PullPhysicsTransformsToScene(physics);
 
                     physics.FixedDeltaAccumulator -= fixedDeltaTime;
