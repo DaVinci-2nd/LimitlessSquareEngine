@@ -195,6 +195,8 @@ namespace LimitlessSquareEngine
         private uint _directionalShadowCascadeBuffer = 0;
         private int _shadowDepthLightViewProjectionLoc = -1;
         private int _shadowDepthModelLoc = -1;
+        private int _shadowDepthSkinEnabledLoc = -1;
+        private int _shadowDepthBoneBaseIndexLoc = -1;
 
         private readonly List<float> _gpuDirectionalShadowCascadeUploadScratch = new(256);
 
@@ -789,12 +791,41 @@ namespace LimitlessSquareEngine
         #version 430 core
         layout(location = 0) in vec3 aPos;
 
+        layout(location = 6) in vec4 aBoneIndex;
+        layout(location = 7) in vec4 aBoneWeight;
+
+        layout(std430, binding = 0) readonly buffer AvatarBoneMatrices
+        {
+            mat4 uBoneMatrices[];
+        };
+
+        uniform int uSkinEnabled;
+        uniform int uBoneBaseIndex;
         uniform mat4 uModel;
         uniform mat4 uLightViewProjection;
 
         void main()
         {
-            gl_Position = uLightViewProjection * uModel * vec4(aPos, 1.0);
+            vec3 localPos = aPos;
+
+            if (uSkinEnabled == 1)
+            {
+                vec3 skinPos = vec3(0.0);
+
+                for (int i = 0; i < 4; i++)
+                {
+                    float weight = aBoneWeight[i];
+                    if (weight <= 0.000001)
+                        continue;
+
+                    int jointIndex = uBoneBaseIndex + int(aBoneIndex[i]);
+                    skinPos += weight * (uBoneMatrices[jointIndex] * vec4(aPos, 1.0)).xyz;
+                }
+
+                localPos = skinPos;
+            }
+
+            gl_Position = uLightViewProjection * uModel * vec4(localPos, 1.0);
         }";
 
             string fragmentSource = @"
@@ -835,6 +866,8 @@ namespace LimitlessSquareEngine
                 _shadowDepthProgram = CreateDirectionalShadowDepthProgram();
                 _shadowDepthLightViewProjectionLoc = _gl.GetUniformLocation(_shadowDepthProgram, "uLightViewProjection");
                 _shadowDepthModelLoc = _gl.GetUniformLocation(_shadowDepthProgram, "uModel");
+                _shadowDepthSkinEnabledLoc = _gl.GetUniformLocation(_shadowDepthProgram, "uSkinEnabled");
+                _shadowDepthBoneBaseIndexLoc = _gl.GetUniformLocation(_shadowDepthProgram, "uBoneBaseIndex");
             }
 
             if (_directionalShadowCascadeBuffer == 0)
@@ -1493,6 +1526,10 @@ namespace LimitlessSquareEngine
             public Vector3 BoundingLocalMin;
             public Vector3 BoundingLocalMax;
 
+            public bool HasBoundingSkinnedBox;
+            public Vector3 BoundingSkinnedMin;
+            public Vector3 BoundingSkinnedMax;
+
             public bool UsePremultipliedTransparentBlend;
             public int DepthLayerIndex;
             public int DepthLayerCount;
@@ -1951,9 +1988,12 @@ namespace LimitlessSquareEngine
             bool allBeforeNear = true;
             bool allAfterFar = true;
 
+            Vector3 boundingMin = cmd.HasBoundingSkinnedBox ? cmd.BoundingSkinnedMin : cmd.BoundingLocalMin;
+            Vector3 boundingMax = cmd.HasBoundingSkinnedBox ? cmd.BoundingSkinnedMax : cmd.BoundingLocalMax;
+
             for (int i = 0; i < 8; i++)
             {
-                Vector3 local = GetBoundingBoxCorner(cmd.BoundingLocalMin, cmd.BoundingLocalMax, i);
+                Vector3 local = GetBoundingBoxCorner(boundingMin, boundingMax, i);
                 Vector4 view = Vector4.Transform(new Vector4(local, 1f), modelView);
                 float depth = -view.Z;
 
@@ -1997,9 +2037,12 @@ namespace LimitlessSquareEngine
             bool allTooNear = true;
             bool allTooFar = true;
 
+            Vector3 boundingMin = cmd.HasBoundingSkinnedBox ? cmd.BoundingSkinnedMin : cmd.BoundingLocalMin;
+            Vector3 boundingMax = cmd.HasBoundingSkinnedBox ? cmd.BoundingSkinnedMax : cmd.BoundingLocalMax;
+
             for (int i = 0; i < 8; i++)
             {
-                Vector3 local = GetBoundingBoxCorner(cmd.BoundingLocalMin, cmd.BoundingLocalMax, i);
+                Vector3 local = GetBoundingBoxCorner(boundingMin, boundingMax, i);
                 Vector4 clip = Vector4.Transform(new Vector4(local, 1f), localToShadowClip);
 
                 if (clip.W <= 0.000001f)
@@ -2639,14 +2682,17 @@ namespace LimitlessSquareEngine
             if (cmd.IsSkybox)
                 return false;
 
+            Vector3 boundingMin = cmd.HasBoundingSkinnedBox ? cmd.BoundingSkinnedMin : cmd.BoundingLocalMin;
+            Vector3 boundingMax = cmd.HasBoundingSkinnedBox ? cmd.BoundingSkinnedMax : cmd.BoundingLocalMax;
+
             return ShouldCullLocalBoundsByCameraFrustum(
                 cmd.Model,
                 cmd.View,
                 cmd.Projection,
                 cmd.ClusterNear,
                 cmd.ClusterFar,
-                cmd.BoundingLocalMin,
-                cmd.BoundingLocalMax);
+                boundingMin,
+                boundingMax);
         }
 
         /// <summary>
@@ -3363,8 +3409,13 @@ namespace LimitlessSquareEngine
             _currentProgram = _shadowDepthProgram;
             _gl.UseProgram(_shadowDepthProgram);
 
+            EnsureAvatarBoneMatricesBufferCreated();
+            _gl.BindBufferBase(BufferTargetARB.ShaderStorageBuffer, _avatarBoneMatricesBinding, _avatarBoneMatricesBuffer);
+
             int lightViewProjectionLoc = _shadowDepthLightViewProjectionLoc;
             int modelLoc = _shadowDepthModelLoc;
+            int skinEnabledLoc = _shadowDepthSkinEnabledLoc;
+            int boneBaseIndexLoc = _shadowDepthBoneBaseIndexLoc;
 
             for (int lightIndex = 0; lightIndex < shadowLights.Count; lightIndex++)
             {
@@ -3433,6 +3484,13 @@ namespace LimitlessSquareEngine
                             continue;
 
                         BindCommandGeometryForShadow(cmd);
+
+                        if (skinEnabledLoc != -1)
+                            _gl.Uniform1(skinEnabledLoc, cmd.SkinEnabled ? 1 : 0);
+
+                        if (boneBaseIndexLoc != -1)
+                            _gl.Uniform1(boneBaseIndexLoc, cmd.BoneBaseIndex);
+
                         SetMatrixUniform(modelLoc, cmd.Model);
                         SubmitDrawArrays(cmd.PrimitiveType, 0, (uint)(cmd.Vertices.Length / cmd.VertexStrideFloats));
                     }
@@ -10008,6 +10066,8 @@ namespace LimitlessSquareEngine
             if (!avatar.Active || !avatar.Visible)
                 return;
 
+            Matrix4x4[] nodeGlobalMatrices = avatar.Skeleton.ComputeNodeGlobalMatrices();
+
             for (int skinIndex = 0; skinIndex < avatar.Skins.Count; skinIndex++)
             {
                 AvatarSkin skin = avatar.Skins[skinIndex];
@@ -10042,6 +10102,23 @@ namespace LimitlessSquareEngine
 
                 if (!TryGetAvatarSkinBoneBaseIndex(avatarId, skinIndex, out int boneBaseIndex))
                     continue;
+
+                Matrix4x4[] skinJointMatrices = avatar.ComputeSkinMatrices(skin, nodeGlobalMatrices);
+
+                Vector3 skinnedMin = new Vector3(float.PositiveInfinity, float.PositiveInfinity, float.PositiveInfinity);
+                Vector3 skinnedMax = new Vector3(float.NegativeInfinity, float.NegativeInfinity, float.NegativeInfinity);
+
+                foreach (Matrix4x4 jointMatrix in skinJointMatrices)
+                {
+                    for (int corner = 0; corner < 8; corner++)
+                    {
+                        Vector3 cornerLocal = GetBoundingBoxCorner(surface.LocalBoundsMin, surface.LocalBoundsMax, corner);
+                        Vector3 cornerSkinned = Vector3.Transform(cornerLocal, jointMatrix);
+
+                        skinnedMin = Vector3.Min(skinnedMin, cornerSkinned);
+                        skinnedMax = Vector3.Max(skinnedMax, cornerSkinned);
+                    }
+                }
 
                 RenderCommand cmd = new RenderCommand
                 {
@@ -10085,6 +10162,9 @@ namespace LimitlessSquareEngine
                     HasBoundingBox = true,
                     BoundingLocalMin = surface.LocalBoundsMin,
                     BoundingLocalMax = surface.LocalBoundsMax,
+                    HasBoundingSkinnedBox = skinJointMatrices.Length > 0,
+                    BoundingSkinnedMin = skinnedMin,
+                    BoundingSkinnedMax = skinnedMax,
                     DepthLayerIndex = layerIdx,
                     DepthLayerCount = layerCount,
                     SkinEnabled = true,

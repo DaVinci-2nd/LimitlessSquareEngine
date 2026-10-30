@@ -6509,6 +6509,7 @@ void main()
             {
                 obj.Physics = null;
                 obj.Scripts = null;
+                obj.Controller = null;
 
                 if (string.Equals(obj.Type, "Camera", StringComparison.Ordinal))
                 {
