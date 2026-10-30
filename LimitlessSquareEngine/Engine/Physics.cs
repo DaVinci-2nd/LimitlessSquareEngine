@@ -1,4 +1,4 @@
-﻿using Jitter2;
+using Jitter2;
 using Jitter2.Collision;
 using Jitter2.Collision.Shapes;
 using Jitter2.Dynamics;
@@ -82,6 +82,24 @@ namespace LimitlessSquareEngine.Engine
         {
             if (_sceneWorlds.TryRemove(sceneId, out var runtime))
                 runtime.Dispose();
+        }
+
+        internal static void RemoveObject(string sceneId, string objectId)
+        {
+            if (string.IsNullOrWhiteSpace(sceneId) || string.IsNullOrWhiteSpace(objectId))
+                return;
+
+            if (!_sceneWorlds.TryGetValue(sceneId, out ScenePhysicsRuntime? physics))
+                return;
+
+            if (!physics.Bodies.TryGetValue(objectId, out RigidBody? body))
+                return;
+
+            physics.World.Remove(body);
+            physics.Bodies.Remove(objectId);
+            physics.OrderedPhysicsNodes.RemoveAll(node => string.Equals(node.Source.Id, objectId, StringComparison.Ordinal));
+            physics.ForceWakeState.Remove(objectId);
+            physics.LastWorldScale.Remove(objectId);
         }
 
         public static void ClearAll()

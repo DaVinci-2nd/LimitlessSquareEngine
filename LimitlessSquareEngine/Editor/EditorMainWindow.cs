@@ -3230,6 +3230,87 @@ namespace LimitlessSquareEngine.Editor
                 obj.Materials = newValue;
                 return PersistSceneObjectChanges(obj, false);
             }));
+            root.Children.Add(CreateInspectorSectionHeader("脚本"));
+
+            List<SceneScriptAttachment> scriptAttachments = obj.Scripts ?? new List<SceneScriptAttachment>();
+            StackPanel scriptPanel = new StackPanel { Spacing = InspectorPropertySpacing };
+
+            foreach (SceneScriptAttachment attachment in scriptAttachments)
+            {
+                SceneScriptAttachment capturedAttachment = attachment;
+                StackPanel scriptRow = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 4 };
+
+                CheckBox enabledBox = new CheckBox
+                {
+                    IsChecked = capturedAttachment.Enabled,
+                    Foreground = Brushes.White,
+                    VerticalAlignment = VerticalAlignment.Center
+                };
+
+                enabledBox.IsCheckedChanged += (_, _) =>
+                {
+                    if (_isUpdatingSceneInspector)
+                        return;
+
+                    BeginSceneParameterChange();
+                    capturedAttachment.Enabled = enabledBox.IsChecked == true;
+                    PersistSceneObjectChanges(obj, false);
+                };
+
+                TextBox scriptBox = CreateInspectorTextBox(capturedAttachment.Script);
+                scriptBox.Width = 240;
+
+                void CommitScript()
+                {
+                    if (_isUpdatingSceneInspector)
+                        return;
+
+                    string value = scriptBox.Text ?? string.Empty;
+
+                    if (string.Equals(capturedAttachment.Script, value, StringComparison.Ordinal))
+                        return;
+
+                    BeginSceneParameterChange();
+                    capturedAttachment.Script = value;
+                    PersistSceneObjectChanges(obj, false);
+                }
+
+                scriptBox.LostFocus += (_, _) => CommitScript();
+                scriptBox.KeyDown += (_, e) =>
+                {
+                    if (e.Key == Key.Enter)
+                        CommitScript();
+                };
+
+                Button removeScriptButton = CreateTextCommandButton("移除", 56);
+
+                removeScriptButton.Click += (_, _) =>
+                {
+                    BeginSceneParameterChange();
+                    scriptAttachments.Remove(capturedAttachment);
+                    obj.Scripts = scriptAttachments.Count == 0 ? null : scriptAttachments;
+                    PersistSceneObjectChanges(obj, true);
+                };
+
+                scriptRow.Children.Add(enabledBox);
+                scriptRow.Children.Add(scriptBox);
+                scriptRow.Children.Add(removeScriptButton);
+                scriptPanel.Children.Add(scriptRow);
+            }
+
+            Button addScriptButton = CreateTextCommandButton("添加脚本", 96);
+
+            addScriptButton.Click += (_, _) =>
+            {
+                BeginSceneParameterChange();
+                scriptAttachments.Add(new SceneScriptAttachment { Script = "", Enabled = true });
+                obj.Scripts = scriptAttachments;
+                PersistSceneObjectChanges(obj, true);
+            };
+
+            scriptPanel.Children.Add(addScriptButton);
+            root.Children.Add(scriptPanel);
+
             root.Children.Add(CreateCollapsibleDataEditor("Data", () => obj.Data ?? "", value =>
             {
                 string? newValue = string.IsNullOrWhiteSpace(value) ? null : value;
@@ -6427,6 +6508,7 @@ void main()
             foreach (SceneObject obj in previewScene.Objects)
             {
                 obj.Physics = null;
+                obj.Scripts = null;
 
                 if (string.Equals(obj.Type, "Camera", StringComparison.Ordinal))
                 {
@@ -6558,7 +6640,14 @@ void main()
                 Visible = source.Visible,
                 RenderTag = source.RenderTag,
                 Physics = ClonePhysicsBody(source.Physics),
-                Materials = source.Materials != null ? new List<string>(source.Materials) : null
+                Materials = source.Materials != null ? new List<string>(source.Materials) : null,
+                Scripts = source.Scripts == null
+                    ? null
+                    : source.Scripts.Select(item => new SceneScriptAttachment
+                    {
+                        Script = item.Script,
+                        Enabled = item.Enabled
+                    }).ToList()
             };
         }
 

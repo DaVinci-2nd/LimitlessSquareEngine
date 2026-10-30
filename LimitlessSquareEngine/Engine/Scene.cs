@@ -428,6 +428,13 @@ namespace LimitlessSquareEngine.Engine
         public string RenderTag { get; set; } = "";
         public PhysicsBody? Physics { get; set; }
         public List<string>? Materials { get; set; }
+        public List<SceneScriptAttachment>? Scripts { get; set; }
+    }
+
+    public class SceneScriptAttachment
+    {
+        public string Script { get; set; } = "";
+        public bool Enabled { get; set; } = true;
     }
 
     public class SceneData
@@ -529,6 +536,7 @@ namespace LimitlessSquareEngine.Engine
             }
 
             Console.WriteLine($"[i] Loaded scene: {scene.SceneId} ({scene.Objects.Count} objects)");
+            Program.AttachSceneScripts(sceneId, scene);
             return scene;
         }
 
@@ -1054,6 +1062,107 @@ namespace LimitlessSquareEngine.Engine
                 return null;
 
             return node.Source;
+        }
+
+        public static void SetObjectActive(string sceneId, string objectId, bool active)
+        {
+            if (!TryGetNode(sceneId, objectId, out var runtime, out var node))
+                return;
+
+            node.Source.Active = active;
+
+            MarkSubtreeDirty(runtime, node);
+
+            if (string.Equals(node.Source.Type, "Camera", StringComparison.Ordinal))
+                RebuildCameraQueue(sceneId);
+        }
+
+        public static void SetObjectVisible(string sceneId, string objectId, bool visible)
+        {
+            if (!TryGetNode(sceneId, objectId, out var runtime, out var node))
+                return;
+
+            node.Source.Visible = visible;
+
+            MarkSubtreeDirty(runtime, node);
+        }
+
+        internal static SceneObject? AddObject(string sceneId, string objectId, string name, string type)
+        {
+            if (!_runtimeScenes.TryGetValue(sceneId, out SceneRuntimeData? runtime))
+                return null;
+
+            if (string.IsNullOrWhiteSpace(objectId))
+                return null;
+
+            if (runtime.Nodes.ContainsKey(objectId))
+            {
+                Console.WriteLine($"[!] Scene object already exists: {sceneId}::{objectId}");
+                return null;
+            }
+
+            SceneObject source = new SceneObject
+            {
+                Id = objectId,
+                Name = name ?? "",
+                Type = string.IsNullOrWhiteSpace(type) ? "Object" : type,
+                Transform = new SceneTransform()
+            };
+
+            runtime.Scene.Objects.Add(source);
+
+            SceneRuntimeNode node = new SceneRuntimeNode
+            {
+                Source = source,
+                LocalPosition = source.Transform.LocalPosition,
+                LocalRotation = DQuaternion.FromEulerDegrees(source.Transform.LocalRotation),
+                LocalScale = source.Transform.LocalScale,
+                World = new SceneWorldState(Double3.Zero, DQuaternion.Identity, Double3.One),
+                Depth = 0,
+                Dirty = true
+            };
+
+            runtime.Nodes[objectId] = node;
+            runtime.DirtyNodes.Add(objectId);
+
+            if (string.Equals(source.Type, "Camera", StringComparison.Ordinal))
+                RebuildCameraQueue(sceneId);
+
+            Console.WriteLine($"[i] Added scene object: {sceneId}::{objectId}");
+            return source;
+        }
+
+        internal static bool RemoveObject(string sceneId, string objectId)
+        {
+            if (!_runtimeScenes.TryGetValue(sceneId, out SceneRuntimeData? runtime))
+                return false;
+
+            if (!runtime.Nodes.TryGetValue(objectId, out SceneRuntimeNode? node))
+                return false;
+
+            foreach (SceneRuntimeNode child in node.Children)
+            {
+                child.Parent = null;
+                child.Depth = 0;
+            }
+
+            node.Children.Clear();
+
+            runtime.Nodes.Remove(objectId);
+            runtime.DirtyNodes.Remove(objectId);
+            runtime.Scene.Objects.Remove(node.Source);
+
+            Physics.RemoveObject(sceneId, objectId);
+            Animator.Detach(sceneId, objectId);
+            Program.RemoveObjectScripts(sceneId, objectId);
+
+            _boundGraphics?.RemoveSceneObject(sceneId, objectId);
+
+            if (string.Equals(node.Source.Type, "Camera", StringComparison.Ordinal))
+                RebuildCameraQueue(sceneId);
+
+            Console.WriteLine($"[i] Removed scene object: {sceneId}::{objectId}");
+            return true;
         }
 
         internal static void ApplyAnimatedLocalTransform(
@@ -1754,6 +1863,7 @@ namespace LimitlessSquareEngine.Engine
         {
             Physics.RemoveScene(sceneId);
             Animator.RemoveScene(sceneId);
+            Program.RemoveSceneScripts(sceneId);
             _loadedScenes.TryRemove(sceneId, out _);
             _cameraQueues.TryRemove(sceneId, out _);
             _runtimeScenes.TryRemove(sceneId, out _);
@@ -1769,6 +1879,9 @@ namespace LimitlessSquareEngine.Engine
             Physics.ClearAll();
             Animator.Clear();
 
+            foreach (string sceneId in _loadedScenes.Keys.ToArray())
+                Program.RemoveSceneScripts(sceneId);
+
             _loadedScenes.Clear();
             _cameraQueues.Clear();
             _runtimeScenes.Clear();
@@ -1778,6 +1891,7 @@ namespace LimitlessSquareEngine.Engine
         public static void RemoveScene(string sceneId)
         {
             Animator.RemoveScene(sceneId);
+            Program.RemoveSceneScripts(sceneId);
             _loadedScenes.TryRemove(sceneId, out _);
             _cameraQueues.TryRemove(sceneId, out _);
             _runtimeScenes.TryRemove(sceneId, out _);
