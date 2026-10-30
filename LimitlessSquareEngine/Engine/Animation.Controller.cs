@@ -107,6 +107,8 @@ namespace LimitlessSquareEngine.Engine
     {
         public string Name { get; set; } = "";
 
+        public bool ApplyRootMotion { get; set; } = true;
+
         public List<AnimatorParameterData> Parameters { get; set; } = new();
 
         public List<AnimatorLayerData> Layers { get; set; } = new();
@@ -320,6 +322,14 @@ namespace LimitlessSquareEngine.Engine
 
         public bool Paused { get; set; }
 
+        public int RootBoneIndex { get; set; } = -1;
+
+        private bool _hasRootSample;
+
+        private Double3 _lastRootPosition;
+
+        private double _lastRootMotionTime;
+
         private bool _bindingsResolved;
 
         public static AnimatorInstance Create(string sceneId, string objectId, AnimatorControllerData data)
@@ -440,6 +450,13 @@ namespace LimitlessSquareEngine.Engine
             _bindingsResolved = true;
 
             int boneCount = Avatar != null ? Avatar.Skeleton.Bones.Count : 0;
+
+            RootBoneIndex = -1;
+
+            int rootBoneIndex = -1;
+
+            if (Avatar != null && Avatar.Humanoid.TryGetBoneIndex("hips", out rootBoneIndex))
+                RootBoneIndex = rootBoneIndex;
 
             Pose = AnimationPoseBuffer.Create(boneCount);
 
@@ -593,7 +610,54 @@ namespace LimitlessSquareEngine.Engine
             foreach (AnimatorLayerRuntime layer in Layers)
                 MergeLayer(layer);
 
-            ApplyPose();
+            ApplyPose(ResolveRootMotionTime());
+        }
+
+        private double ResolveRootMotionTime()
+        {
+            if (Layers.Count == 0 || Layers[0].Current == null)
+                return 0.0;
+
+            AnimatorStatePlayback playback = Layers[0].Current;
+            double duration = playback.ResolveDuration();
+
+            if (duration <= 0.0)
+                return playback.Time;
+
+            double wrapped = playback.Time % duration;
+
+            return wrapped < 0.0 ? wrapped + duration : wrapped;
+        }
+
+        private void ApplyRootMotionOffset(double sampleTime)
+        {
+            Double3 rootPosition = Pose.Translations[RootBoneIndex];
+
+            if (!_hasRootSample)
+            {
+                _lastRootPosition = rootPosition;
+                _lastRootMotionTime = sampleTime;
+                _hasRootSample = true;
+                return;
+            }
+
+            bool looped = sampleTime < _lastRootMotionTime;
+
+            Double3 delta = rootPosition - _lastRootPosition;
+
+            _lastRootPosition = rootPosition;
+            _lastRootMotionTime = sampleTime;
+
+            if (looped)
+                return;
+
+            Double3 modelDelta = ResolveBoneRest(RootBoneIndex).ParentWorldRotation.Rotate(delta);
+
+            DQuaternion avatarWorldRotation = DQuaternion.FromEulerDegrees(Scene.GetRotation(SceneId, ObjectId));
+
+            Double3 worldDelta = avatarWorldRotation.Rotate(new Double3(modelDelta.X, modelDelta.Y, -modelDelta.Z));
+
+            Scene.SetLocalPosition(SceneId, ObjectId, Scene.GetLocalPosition(SceneId, ObjectId) + Scene.WorldDeltaToLocalDelta(SceneId, ObjectId, worldDelta));
         }
 
         private AnimatorTransitionData? FindTransition(AnimatorLayerRuntime layer)
@@ -945,10 +1009,19 @@ namespace LimitlessSquareEngine.Engine
             return false;
         }
 
-        private void ApplyPose()
+        private void ApplyPose(double sampleTime)
         {
             if (Avatar != null)
             {
+                bool applyRootMotion =
+                    Data.ApplyRootMotion &&
+                    RootBoneIndex >= 0 &&
+                    RootBoneIndex < Pose.BoneCount &&
+                    Pose.TouchedTranslations[RootBoneIndex];
+
+                if (applyRootMotion)
+                    ApplyRootMotionOffset(sampleTime);
+
                 for (int i = 0; i < Pose.BoneCount && i < Avatar.Skeleton.Bones.Count; i++)
                 {
                     if (!Pose.Touched[i])
@@ -957,7 +1030,12 @@ namespace LimitlessSquareEngine.Engine
                     AvatarBone bone = Avatar.Skeleton.Bones[i];
 
                     if (Pose.TouchedTranslations[i])
-                        bone.LocalPosition = Pose.Translations[i];
+                    {
+                        if (applyRootMotion && i == RootBoneIndex)
+                            bone.LocalPosition = bone.RestPosition;
+                        else
+                            bone.LocalPosition = Pose.Translations[i];
+                    }
 
                     if (Pose.TouchedRotations[i])
                     {
