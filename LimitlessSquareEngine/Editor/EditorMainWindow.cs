@@ -6212,6 +6212,16 @@ void main()
 
         private bool TryOpenSceneJson(string filePath)
         {
+            try
+            {
+                EditorHostBridge.SetAssetRootAndReloadAssets(ResolveSceneAssetRoot(filePath));
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine(ex.ToString());
+                return false;
+            }
+
             SceneData? scene = EditorHostBridge.LoadSceneFile(filePath);
             if (scene == null)
                 return false;
@@ -6252,7 +6262,6 @@ void main()
 
                 UpdateSceneDirtyVisualState();
 
-                EditorHostBridge.SetAssetRootAndReloadAssets(assetRootPath);
                 EditorHostBridge.ReloadSceneById(EditorPreviewSceneId);
                 ApplyPreviewCameraEditorStateToRuntime();
 
@@ -9737,7 +9746,8 @@ void main()
             StackPanel parameterPanel = new StackPanel { Orientation = Orientation.Vertical };
             StackPanel transitionPanel = new StackPanel { Orientation = Orientation.Vertical };
             StackPanel inspectorPanel = new StackPanel { Orientation = Orientation.Vertical };
-            StackPanel layerButtonPanel = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 4 };
+            StackPanel layerButtonPanel = new StackPanel { Orientation = Orientation.Vertical, Spacing = 2 };
+            Button addLayerButton = CreateTextCommandButton("加层", 80);
             Window window = null!;
 
             void RefreshTitle()
@@ -9821,6 +9831,27 @@ void main()
                 return CreatePropertyRow(label, checkBox);
             }
 
+            Control BuildComboRow(string label, string value, IReadOnlyList<string> options, Action<string> apply)
+            {
+                ComboBox comboBox = new ComboBox
+                {
+                    ItemsSource = options,
+                    SelectedItem = value,
+                    Height = 30,
+                    MinHeight = 30,
+                    HorizontalAlignment = HorizontalAlignment.Stretch,
+                    VerticalAlignment = VerticalAlignment.Center
+                };
+
+                comboBox.SelectionChanged += (_, _) =>
+                {
+                    apply(comboBox.SelectedItem as string ?? string.Empty);
+                    MarkDirty();
+                };
+
+                return CreatePropertyRow(label, comboBox);
+            }
+
             void RebuildParameterPanel()
             {
                 parameterPanel.Children.Clear();
@@ -9834,14 +9865,18 @@ void main()
                     TextBox nameBox = CreateInspectorTextBox(captured.Name);
                     nameBox.Width = 120;
 
-                    TextBox typeBox = CreateInspectorTextBox(captured.Type);
-                    typeBox.Width = 70;
+                    ComboBox typeBox = new ComboBox
+                    {
+                        ItemsSource = AnimatorParameterTypes,
+                        SelectedItem = captured.Type,
+                        Width = 80,
+                        Height = 30,
+                        MinHeight = 30,
+                        VerticalAlignment = VerticalAlignment.Center
+                    };
 
                     TextBox defaultBox = CreateInspectorTextBox(captured.Default.ToString(CultureInfo.InvariantCulture));
                     defaultBox.Width = 70;
-
-                    Button removeButton = CreateTextCommandButton("删", 36);
-                    removeButton.Height = InspectorTextBoxHeight;
 
                     nameBox.LostFocus += (_, _) =>
                     {
@@ -9849,9 +9884,9 @@ void main()
                         MarkDirty();
                     };
 
-                    typeBox.LostFocus += (_, _) =>
+                    typeBox.SelectionChanged += (_, _) =>
                     {
-                        captured.Type = typeBox.Text ?? "float";
+                        captured.Type = typeBox.SelectedItem as string ?? "float";
                         MarkDirty();
                     };
 
@@ -9864,20 +9899,22 @@ void main()
                         MarkDirty();
                     };
 
-                    removeButton.Click += (_, _) =>
-                    {
-                        controller.Parameters.Remove(captured);
-                        RebuildParameterPanel();
-                        MarkDirty();
-                    };
-
-                    parameterPanel.Children.Add(new StackPanel
+                    StackPanel parameterRow = new StackPanel
                     {
                         Orientation = Orientation.Horizontal,
                         Spacing = 4,
                         Margin = new Thickness(8, 2, 8, 2),
-                        Children = { nameBox, typeBox, defaultBox, removeButton }
+                        Children = { nameBox, typeBox, defaultBox }
+                    };
+
+                    parameterRow.ContextMenu = CreateAnimatorDeleteContextMenu("删除参数", () =>
+                    {
+                        controller.Parameters.Remove(captured);
+                        RebuildParameterPanel();
+                        MarkDirty();
                     });
+
+                    parameterPanel.Children.Add(parameterRow);
                 }
             }
 
@@ -9959,12 +9996,27 @@ void main()
                 entryGrid.Children.Add(entryButton);
                 entryGrid.Children.Add(removeButton);
 
+                entryGrid.ContextMenu = CreateAnimatorDeleteContextMenu("删除过渡", () =>
+                {
+                    capturedLayer.Transitions.Remove(captured);
+                    capturedLayer.AnyStateTransitions.Remove(captured);
+
+                    if (ReferenceEquals(selectedTransition, captured))
+                        selectedTransition = null;
+
+                    RebuildTransitionPanel();
+                    RebuildInspector();
+                    MarkDirty();
+                });
+
                 transitionPanel.Children.Add(entryGrid);
             }
 
             void RebuildLayerButtons()
             {
                 layerButtonPanel.Children.Clear();
+
+                layerButtonPanel.Children.Add(addLayerButton);
 
                 for (int index = 0; index < controller.Layers.Count; index++)
                 {
@@ -9973,7 +10025,9 @@ void main()
 
                     Button button = CreateTextCommandButton(
                         string.IsNullOrWhiteSpace(layer.Name) ? "层" + index.ToString(CultureInfo.InvariantCulture) : layer.Name,
-                        96);
+                        160);
+
+                    button.HorizontalAlignment = HorizontalAlignment.Stretch;
 
                     bool active = index == currentLayerIndex;
 
@@ -9993,6 +10047,25 @@ void main()
                         RebuildTransitionPanel();
                         RebuildInspector();
                     };
+
+                    button.ContextMenu = CreateAnimatorDeleteContextMenu("删除层", () =>
+                    {
+                        controller.Layers.Remove(layer);
+
+                        if (currentLayerIndex >= controller.Layers.Count)
+                            currentLayerIndex = Math.Max(0, controller.Layers.Count - 1);
+
+                        selectedState = null;
+                        selectedTransition = null;
+                        graph.SelectedState = null;
+                        graph.SelectedTransition = null;
+
+                        SyncGraphLayer();
+                        RebuildLayerButtons();
+                        RebuildTransitionPanel();
+                        RebuildInspector();
+                        MarkDirty();
+                    });
 
                     layerButtonPanel.Children.Add(button);
                 }
@@ -10031,49 +10104,109 @@ void main()
                 }));
 
                 inspectorPanel.Children.Add(BuildCheckRow("循环", captured.Loop, value => captured.Loop = value));
-                inspectorPanel.Children.Add(BuildTextRow("播放模式", captured.PlayMode, value => captured.PlayMode = value));
+                inspectorPanel.Children.Add(BuildComboRow(
+                    "播放模式",
+                    string.IsNullOrWhiteSpace(captured.PlayMode) ? AnimatorPlayModes[0] : captured.PlayMode,
+                    AnimatorPlayModes,
+                    value => captured.PlayMode = string.Equals(value, AnimatorPlayModes[0], StringComparison.Ordinal) ? "" : value));
 
                 inspectorPanel.Children.Add(CreateInspectorSectionHeader("运动"));
 
-                inspectorPanel.Children.Add(BuildTextRow("类型", captured.Motion.Type, value =>
+                inspectorPanel.Children.Add(BuildComboRow("类型", captured.Motion.Type, AnimatorMotionTypes, value =>
                 {
                     captured.Motion.Type = value;
+                    RebuildInspector();
                     graph.InvalidateVisual();
                 }));
 
                 if (string.Equals(captured.Motion.Type, "blend", StringComparison.OrdinalIgnoreCase))
                 {
-                    inspectorPanel.Children.Add(BuildTextRow("混合模式", captured.Motion.Mode, value => captured.Motion.Mode = value));
+                    inspectorPanel.Children.Add(BuildComboRow("混合模式", captured.Motion.Mode, AnimatorBlendModes, value => captured.Motion.Mode = value));
                     inspectorPanel.Children.Add(BuildTextRow("衰减", captured.Motion.Falloff.ToString(CultureInfo.InvariantCulture), value =>
                     {
                         if (TryParseEditorDouble(value, out double parsed))
                             captured.Motion.Falloff = (float)parsed;
                     }));
 
-                    inspectorPanel.Children.Add(BuildTextRow("混合参数", string.Join(",", captured.Motion.Parameters), value =>
+                    inspectorPanel.Children.Add(CreateInspectorSectionHeader("混合参数"));
+
+                    for (int parameterIndex = 0; parameterIndex < captured.Motion.Parameters.Count; parameterIndex++)
                     {
-                        captured.Motion.Parameters.Clear();
+                        int capturedParameterIndex = parameterIndex;
 
-                        foreach (string part in value.Split(',', StringSplitOptions.RemoveEmptyEntries))
-                            captured.Motion.Parameters.Add(part.Trim());
-                    }));
-
-                    inspectorPanel.Children.Add(CreateInspectorSectionHeader("混合条目"));
-
-                    foreach (AnimatorBlendEntryData entry in captured.Motion.Entries)
-                    {
-                        AnimatorBlendEntryData capturedEntry = entry;
-
-                        inspectorPanel.Children.Add(BuildTextRow("剪辑", capturedEntry.Clip, value => capturedEntry.Clip = value));
-                        inspectorPanel.Children.Add(BuildTextRow("位置", string.Join(",", capturedEntry.Position), value =>
+                        ComboBox parameterComboBox = new ComboBox
                         {
-                            capturedEntry.Position = ParseDoubleArray(value);
-                        }));
-                        inspectorPanel.Children.Add(BuildTextRow("权重", string.Join(",", capturedEntry.Weights), value =>
+                            ItemsSource = controller.Parameters.Select(item => item.Name).ToList(),
+                            SelectedItem = captured.Motion.Parameters[capturedParameterIndex],
+                            Height = 30,
+                            MinHeight = 30,
+                            HorizontalAlignment = HorizontalAlignment.Stretch,
+                            VerticalAlignment = VerticalAlignment.Center
+                        };
+
+                        parameterComboBox.SelectionChanged += (_, _) =>
                         {
-                            capturedEntry.Weights = ParseFloatArray(value);
-                        }));
+                            captured.Motion.Parameters[capturedParameterIndex] = parameterComboBox.SelectedItem as string ?? string.Empty;
+                            MarkDirty();
+                        };
+
+                        Border parameterRow = new Border
+                        {
+                            Margin = new Thickness(12, 2, 12, 2),
+                            Child = parameterComboBox,
+                            ContextMenu = CreateAnimatorDeleteContextMenu("删除参数", () =>
+                            {
+                                captured.Motion.Parameters.RemoveAt(capturedParameterIndex);
+
+                                foreach (AnimatorBlendEntryData entry in captured.Motion.Entries)
+                                {
+                                    if (entry.Position.Length <= capturedParameterIndex)
+                                        continue;
+
+                                    double[] resized = new double[entry.Position.Length - 1];
+
+                                    for (int i = 0, w = 0; i < entry.Position.Length; i++)
+                                    {
+                                        if (i == capturedParameterIndex)
+                                            continue;
+
+                                        resized[w++] = entry.Position[i];
+                                    }
+
+                                    entry.Position = resized;
+                                }
+
+                                RebuildInspector();
+                                MarkDirty();
+                            })
+                        };
+
+                        inspectorPanel.Children.Add(parameterRow);
                     }
+
+                    Button addParameterMotionButton = CreateTextCommandButton("加混合参数", 108);
+                    addParameterMotionButton.Margin = new Thickness(12, 4, 12, 4);
+
+                    addParameterMotionButton.Click += (_, _) =>
+                    {
+                        captured.Motion.Parameters.Add(string.Empty);
+
+                        foreach (AnimatorBlendEntryData entry in captured.Motion.Entries)
+                        {
+                            double[] resized = new double[entry.Position.Length + 1];
+                            Array.Copy(entry.Position, resized, entry.Position.Length);
+                            entry.Position = resized;
+                        }
+
+                        RebuildInspector();
+                        MarkDirty();
+                    };
+
+                    inspectorPanel.Children.Add(addParameterMotionButton);
+
+                    inspectorPanel.Children.Add(CreateInspectorSectionHeader("混合表格"));
+
+                    inspectorPanel.Children.Add(BuildBlendTable(captured));
 
                     Button addEntryButton = CreateTextCommandButton("加条目", 96);
                     addEntryButton.Margin = new Thickness(12, 4, 12, 4);
@@ -10103,6 +10236,117 @@ void main()
                 }
             }
 
+            Control BuildBlendTable(AnimatorStateData state)
+            {
+                AnimatorMotionData motion = state.Motion;
+                int dimensionCount = motion.Parameters.Count;
+
+                StackPanel table = new StackPanel
+                {
+                    Orientation = Orientation.Vertical,
+                    Margin = new Thickness(12, 0, 12, 0)
+                };
+
+                StackPanel headerRow = new StackPanel
+                {
+                    Orientation = Orientation.Horizontal,
+                    Height = InspectorTextBoxHeight
+                };
+
+                headerRow.Children.Add(new TextBlock
+                {
+                    Text = "剪辑",
+                    Width = 120,
+                    Foreground = Brushes.White,
+                    VerticalAlignment = VerticalAlignment.Center
+                });
+
+                for (int i = 0; i < dimensionCount; i++)
+                {
+                    headerRow.Children.Add(new TextBlock
+                    {
+                        Text = string.IsNullOrWhiteSpace(motion.Parameters[i])
+                            ? "参数" + i.ToString(CultureInfo.InvariantCulture)
+                            : motion.Parameters[i],
+                        Width = 74,
+                        Foreground = Brushes.White,
+                        VerticalAlignment = VerticalAlignment.Center
+                    });
+                }
+
+                table.Children.Add(headerRow);
+
+                for (int entryIndex = 0; entryIndex < motion.Entries.Count; entryIndex++)
+                {
+                    int capturedEntryIndex = entryIndex;
+                    AnimatorBlendEntryData entry = motion.Entries[entryIndex];
+
+                    StackPanel entryRow = new StackPanel
+                    {
+                        Orientation = Orientation.Horizontal,
+                        Height = InspectorTextBoxHeight,
+                        Margin = new Thickness(0, 0, 0, 2)
+                    };
+
+                    TextBox clipBox = CreateInspectorTextBox(entry.Clip);
+                    clipBox.Width = 120;
+                    clipBox.Margin = new Thickness(0, 0, 4, 0);
+
+                    clipBox.LostFocus += (_, _) =>
+                    {
+                        entry.Clip = clipBox.Text ?? string.Empty;
+                        graph.InvalidateVisual();
+                        MarkDirty();
+                    };
+
+                    entryRow.Children.Add(clipBox);
+
+                    for (int i = 0; i < dimensionCount; i++)
+                    {
+                        int componentIndex = i;
+                        double current = i < entry.Position.Length ? entry.Position[i] : 0.0;
+
+                        TextBox positionBox = CreateInspectorTextBox(current.ToString(CultureInfo.InvariantCulture));
+                        positionBox.Width = 74;
+                        positionBox.Margin = new Thickness(0, 0, 4, 0);
+
+                        positionBox.LostFocus += (_, _) =>
+                        {
+                            if (!TryParseEditorDouble(positionBox.Text, out double parsed))
+                                return;
+
+                            if (entry.Position.Length != motion.Parameters.Count)
+                            {
+                                double[] resized = new double[motion.Parameters.Count];
+                                Array.Copy(entry.Position, resized, Math.Min(entry.Position.Length, resized.Length));
+                                entry.Position = resized;
+                            }
+
+                            entry.Position[componentIndex] = parsed;
+                            MarkDirty();
+                        };
+
+                        entryRow.Children.Add(positionBox);
+                    }
+
+                    Border entryHost = new Border
+                    {
+                        Child = entryRow,
+                        Background = Brushes.Transparent,
+                        ContextMenu = CreateAnimatorDeleteContextMenu("删除条目", () =>
+                        {
+                            motion.Entries.RemoveAt(capturedEntryIndex);
+                            RebuildInspector();
+                            MarkDirty();
+                        })
+                    };
+
+                    table.Children.Add(entryHost);
+                }
+
+                return table;
+            }
+
             void BuildTransitionInspector(AnimatorTransitionData transition)
             {
                 AnimatorTransitionData captured = transition;
@@ -10110,8 +10354,17 @@ void main()
 
                 inspectorPanel.Children.Add(CreateInspectorSectionHeader("过渡"));
 
-                inspectorPanel.Children.Add(BuildTextRow("起点", captured.From, value => captured.From = value));
-                inspectorPanel.Children.Add(BuildTextRow("终点", captured.To, value =>
+                List<string> stateNames = layer == null
+                    ? new List<string>()
+                    : layer.States.Select(item => item.Name).ToList();
+
+                inspectorPanel.Children.Add(BuildComboRow("起点", captured.From, stateNames, value =>
+                {
+                    captured.From = value;
+                    graph.InvalidateVisual();
+                }));
+
+                inspectorPanel.Children.Add(BuildComboRow("终点", captured.To, stateNames, value =>
                 {
                     captured.To = value;
                     graph.InvalidateVisual();
@@ -10137,34 +10390,50 @@ void main()
                         captured.Offset = parsed;
                 }));
 
-                inspectorPanel.Children.Add(BuildTextRow("打断来源", captured.InterruptionSource, value => captured.InterruptionSource = value));
+                inspectorPanel.Children.Add(BuildComboRow("打断来源", captured.InterruptionSource, AnimatorInterruptionSources, value => captured.InterruptionSource = value));
                 inspectorPanel.Children.Add(BuildCheckRow("有序打断", captured.OrderedInterruption, value => captured.OrderedInterruption = value));
                 inspectorPanel.Children.Add(BuildCheckRow("可自过渡", captured.CanTransitionToSelf, value => captured.CanTransitionToSelf = value));
 
                 inspectorPanel.Children.Add(CreateInspectorSectionHeader("条件"));
 
+                List<string> parameterNames = controller.Parameters.Select(item => item.Name).ToList();
+
                 foreach (AnimatorConditionData condition in captured.Conditions)
                 {
                     AnimatorConditionData capturedCondition = condition;
 
-                    TextBox parameterBox = CreateInspectorTextBox(capturedCondition.Parameter);
-                    parameterBox.Width = 96;
+                    ComboBox parameterBox = new ComboBox
+                    {
+                        ItemsSource = parameterNames,
+                        SelectedItem = capturedCondition.Parameter,
+                        Width = 96,
+                        Height = 30,
+                        MinHeight = 30,
+                        VerticalAlignment = VerticalAlignment.Center
+                    };
 
-                    TextBox modeBox = CreateInspectorTextBox(capturedCondition.Mode);
-                    modeBox.Width = 80;
+                    ComboBox modeBox = new ComboBox
+                    {
+                        ItemsSource = AnimatorConditionModes,
+                        SelectedItem = capturedCondition.Mode,
+                        Width = 90,
+                        Height = 30,
+                        MinHeight = 30,
+                        VerticalAlignment = VerticalAlignment.Center
+                    };
 
                     TextBox thresholdBox = CreateInspectorTextBox(capturedCondition.Threshold.ToString(CultureInfo.InvariantCulture));
                     thresholdBox.Width = 70;
 
-                    parameterBox.LostFocus += (_, _) =>
+                    parameterBox.SelectionChanged += (_, _) =>
                     {
-                        capturedCondition.Parameter = parameterBox.Text ?? string.Empty;
+                        capturedCondition.Parameter = parameterBox.SelectedItem as string ?? string.Empty;
                         MarkDirty();
                     };
 
-                    modeBox.LostFocus += (_, _) =>
+                    modeBox.SelectionChanged += (_, _) =>
                     {
-                        capturedCondition.Mode = modeBox.Text ?? "if";
+                        capturedCondition.Mode = modeBox.SelectedItem as string ?? "if";
                         MarkDirty();
                     };
 
@@ -10177,23 +10446,22 @@ void main()
                         MarkDirty();
                     };
 
-                    Button removeConditionButton = CreateTextCommandButton("删", 36);
-                    removeConditionButton.Height = InspectorTextBoxHeight;
-
-                    removeConditionButton.Click += (_, _) =>
-                    {
-                        captured.Conditions.Remove(capturedCondition);
-                        RebuildInspector();
-                        MarkDirty();
-                    };
-
-                    inspectorPanel.Children.Add(new StackPanel
+                    StackPanel conditionRow = new StackPanel
                     {
                         Orientation = Orientation.Horizontal,
                         Spacing = 4,
                         Margin = new Thickness(12, 2, 12, 2),
-                        Children = { parameterBox, modeBox, thresholdBox, removeConditionButton }
+                        Children = { parameterBox, modeBox, thresholdBox }
+                    };
+
+                    conditionRow.ContextMenu = CreateAnimatorDeleteContextMenu("删除条件", () =>
+                    {
+                        captured.Conditions.Remove(capturedCondition);
+                        RebuildInspector();
+                        MarkDirty();
                     });
+
+                    inspectorPanel.Children.Add(conditionRow);
                 }
 
                 Button addConditionButton = CreateTextCommandButton("加条件", 96);
@@ -10266,14 +10534,91 @@ void main()
                 SaveEditorConfig(filePath, config);
             };
 
+            graph.ContextMenu = new ContextMenu
+            {
+                ItemsSource = new object[]
+                {
+                    new MenuItem { Header = "删除状态" }
+                }
+            };
+
+            foreach (object item in graph.ContextMenu.ItemsSource)
+            {
+                if (item is not MenuItem deleteStateItem)
+                    continue;
+
+                deleteStateItem.Click += (_, _) =>
+                {
+                    AnimatorLayerData? layer = CurrentLayer();
+
+                    if (layer == null || string.IsNullOrWhiteSpace(graph.SelectedState))
+                        return;
+
+                    string stateName = graph.SelectedState;
+
+                    for (int index = layer.States.Count - 1; index >= 0; index--)
+                    {
+                        if (string.Equals(layer.States[index].Name, stateName, StringComparison.Ordinal))
+                            layer.States.RemoveAt(index);
+                    }
+
+                    for (int index = layer.Transitions.Count - 1; index >= 0; index--)
+                    {
+                        AnimatorTransitionData transition = layer.Transitions[index];
+
+                        if (string.Equals(transition.From, stateName, StringComparison.Ordinal) ||
+                            string.Equals(transition.To, stateName, StringComparison.Ordinal))
+                            layer.Transitions.RemoveAt(index);
+                    }
+
+                    for (int index = layer.AnyStateTransitions.Count - 1; index >= 0; index--)
+                    {
+                        AnimatorTransitionData transition = layer.AnyStateTransitions[index];
+
+                        if (string.Equals(transition.To, stateName, StringComparison.Ordinal))
+                            layer.AnyStateTransitions.RemoveAt(index);
+                    }
+
+                    if (string.Equals(layer.DefaultState, stateName, StringComparison.Ordinal))
+                        layer.DefaultState = layer.States.Count > 0 ? layer.States[0].Name : "";
+
+                    if (selectedState != null && string.Equals(selectedState.Name, stateName, StringComparison.Ordinal))
+                        selectedState = null;
+
+                    if (selectedTransition != null &&
+                        (string.Equals(selectedTransition.From, stateName, StringComparison.Ordinal) ||
+                         string.Equals(selectedTransition.To, stateName, StringComparison.Ordinal)))
+                        selectedTransition = null;
+
+                    graph.SelectedState = null;
+                    graph.SelectedTransition = null;
+                    graph.NodePositions.Remove(stateName);
+                    graph.InvalidateVisual();
+
+                    RebuildTransitionPanel();
+                    RebuildInspector();
+                    MarkDirty();
+                };
+            }
+
+            ContextMenu graphContextMenu = graph.ContextMenu!;
+
+            graphContextMenu.Opening += (_, _) =>
+            {
+                AnimatorLayerData? layer = CurrentLayer();
+
+                bool hasState = layer != null && !string.IsNullOrWhiteSpace(graph.SelectedState);
+
+                graphContextMenu.IsEnabled = hasState;
+            };
+
             Button saveButton = CreateTextCommandButton("保存", 80);
-            Button addLayerButton = CreateTextCommandButton("加层", 80);
             Button addStateButton = CreateTextCommandButton("加状态", 80);
             Button addTransitionButton = CreateTextCommandButton("加过渡", 80);
             Button addParameterButton = CreateTextCommandButton("加参数", 80);
             Button frameAllButton = CreateTextCommandButton("适应", 80);
 
-            saveButton.Click += (_, _) =>
+            void SaveAll()
             {
                 try
                 {
@@ -10287,7 +10632,9 @@ void main()
                 {
                     _ = ShowSimpleWarningDialogAsync("保存失败", ex.Message);
                 }
-            };
+            }
+
+            saveButton.Click += (_, _) => SaveAll();
 
             addLayerButton.Click += (_, _) =>
             {
@@ -10375,8 +10722,6 @@ void main()
                 Margin = new Thickness(10, 6, 10, 6),
                 Children =
                 {
-                    layerButtonPanel,
-                    addLayerButton,
                     addStateButton,
                     addTransitionButton,
                     addParameterButton,
@@ -10388,6 +10733,30 @@ void main()
             Grid layout = new Grid
             {
                 RowDefinitions = new RowDefinitions("Auto,*")
+            };
+
+            ScrollViewer layerScrollViewer = new ScrollViewer
+            {
+                HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+                VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+                Content = layerButtonPanel
+            };
+
+            Border layerPanel = new Border
+            {
+                Background = new SolidColorBrush(Color.Parse("#181818")),
+                BorderBrush = new SolidColorBrush(Color.Parse("#333333")),
+                BorderThickness = new Thickness(0, 0, 1, 0),
+                Padding = new Thickness(8, 6, 8, 6),
+                Child = new StackPanel
+                {
+                    Orientation = Orientation.Vertical,
+                    Children =
+                    {
+                        CreateInspectorSectionHeader("层"),
+                        layerScrollViewer
+                    }
+                }
             };
 
             ScrollViewer leftScrollViewer = new ScrollViewer
@@ -10410,13 +10779,15 @@ void main()
 
             Grid bodyGrid = new Grid
             {
-                ColumnDefinitions = new ColumnDefinitions("280,*,320")
+                ColumnDefinitions = new ColumnDefinitions("180,280,*,320")
             };
 
-            Grid.SetColumn(leftScrollViewer, 0);
-            Grid.SetColumn(graph, 1);
-            Grid.SetColumn(inspectorScrollViewer, 2);
+            Grid.SetColumn(layerPanel, 0);
+            Grid.SetColumn(leftScrollViewer, 1);
+            Grid.SetColumn(graph, 2);
+            Grid.SetColumn(inspectorScrollViewer, 3);
 
+            bodyGrid.Children.Add(layerPanel);
             bodyGrid.Children.Add(leftScrollViewer);
             bodyGrid.Children.Add(graph);
             bodyGrid.Children.Add(inspectorScrollViewer);
@@ -10446,6 +10817,15 @@ void main()
                 Content = layout
             };
 
+            window.KeyDown += (_, e) =>
+            {
+                if (e.Key != Key.S || !HasPrimaryCommandModifier(e.KeyModifiers))
+                    return;
+
+                SaveAll();
+                e.Handled = true;
+            };
+
             window.Closing += (_, e) =>
             {
                 if (!isDirty || isClosing)
@@ -10467,6 +10847,49 @@ void main()
 
             window.Show(this);
             Dispatcher.UIThread.Post(() => graph.FrameAll(), DispatcherPriority.Background);
+        }
+
+        private static readonly string[] AnimatorParameterTypes = { "float", "int", "bool", "trigger" };
+
+        private static readonly string[] AnimatorPlayModes = { "继承剪辑", "normal", "stepped" };
+
+        private static readonly string[] AnimatorMotionTypes = { "clip", "blend" };
+
+        private static readonly string[] AnimatorBlendModes = { "inverseDistance", "direct" };
+
+        private static readonly string[] AnimatorInterruptionSources =
+        {
+            "none",
+            "currentState",
+            "nextState",
+            "currentStateThenNextState",
+            "nextStateThenCurrentState"
+        };
+
+        private static readonly string[] AnimatorConditionModes =
+        {
+            "if",
+            "ifnot",
+            "greater",
+            "less",
+            "equals",
+            "notequal",
+            "exitTime"
+        };
+
+        private ContextMenu CreateAnimatorDeleteContextMenu(string header, Action onDelete)
+        {
+            MenuItem deleteItem = new MenuItem { Header = header };
+
+            deleteItem.Click += (_, _) => onDelete();
+
+            return new ContextMenu
+            {
+                ItemsSource = new object[]
+                {
+                    deleteItem
+                }
+            };
         }
 
         private double[] ParseDoubleArray(string text)
@@ -11371,7 +11794,9 @@ void main()
                         return;
 
                     Rect sourceRect = GetNodeRect(transition.From);
-                    start = NodeToScreen(new Point(sourceRect.Right, sourceRect.Center.Y));
+                    start = NodeToScreen(new Point(
+                        sourceRect.X + AnimatorNodeWidth * 0.5 + 20.0,
+                        sourceRect.Y + AnimatorNodeHeight * 0.5 + 12.0));
                     end = NodeToScreen(new Point(targetRect.Left, targetRect.Center.Y));
                 }
 
@@ -11379,7 +11804,12 @@ void main()
                 Pen pen = selected ? TransitionSelectedPen : TransitionPen;
 
                 context.DrawLine(pen, start, end);
-                DrawArrow(context, pen, start, end);
+
+                Point arrowPoint = new Point(
+                    start.X + (end.X - start.X) * 0.55,
+                    start.Y + (end.Y - start.Y) * 0.55);
+
+                DrawArrow(context, pen, start, arrowPoint);
             }
 
             private static void DrawArrow(DrawingContext context, Pen pen, Point start, Point end)
@@ -11456,6 +11886,20 @@ void main()
                     _panStartOffset = _viewOffset;
                     e.Pointer.Capture(this);
                     e.Handled = true;
+                    return;
+                }
+
+                if (point.Properties.IsRightButtonPressed)
+                {
+                    string? rightHit = HitTestNode(position);
+
+                    if (rightHit == null)
+                        return;
+
+                    SelectedState = rightHit;
+                    SelectedTransition = null;
+                    SelectionChanged?.Invoke();
+                    InvalidateVisual();
                     return;
                 }
 

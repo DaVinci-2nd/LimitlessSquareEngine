@@ -44,6 +44,12 @@ namespace LimitlessSquareEngine.Engine
         public List<SpringBoneChainRuntime> Chains { get; } = new();
 
         public Dictionary<int, Double3> PendingImpulses { get; } = new();
+
+        public Double3 PrevWorldPosition;
+
+        public bool HasWorldPosition;
+
+        public Double3 WorldDeltaModel;
     }
 
     internal partial class Physics
@@ -107,6 +113,9 @@ namespace LimitlessSquareEngine.Engine
 
             Array.Copy(runtime.RestModelRotations, runtime.ModelRotations, boneCount);
             Array.Copy(runtime.RestModelPositions, runtime.ModelPositions, boneCount);
+
+            runtime.PrevWorldPosition = ResolveWorld(node).Position;
+            runtime.HasWorldPosition = true;
 
             BuildSpringChains(runtime);
             BuildAvatarCollisionBodies(physics, runtime);
@@ -173,6 +182,17 @@ namespace LimitlessSquareEngine.Engine
             foreach (AvatarPhysicsRuntime runtime in physics.Avatars.Values)
             {
                 SceneWorldState nodeWorld = ResolveWorld(runtime.Node);
+
+                Double3 worldDelta = Double3.Zero;
+
+                if (runtime.HasWorldPosition)
+                    worldDelta = nodeWorld.Position - runtime.PrevWorldPosition;
+
+                Double3 unrotated = nodeWorld.Rotation.Inverse().Rotate(worldDelta);
+
+                runtime.WorldDeltaModel = new Double3(unrotated.X, unrotated.Y, -unrotated.Z);
+                runtime.PrevWorldPosition = nodeWorld.Position;
+                runtime.HasWorldPosition = true;
 
                 ResolveModelTransforms(runtime, false);
                 SyncAvatarProxies(runtime, nodeWorld);

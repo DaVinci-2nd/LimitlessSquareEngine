@@ -848,6 +848,195 @@ namespace LimitlessSquareEngine
             // 注入输入系统
             instance.LuaScript.Globals["input"] = _input;
             RecordLuaApi("input", "input", "输入系统对象", "Input");
+
+            instance.LuaScript.Globals["attach_animator"] =
+                (Func<string, string, string, bool>)((sceneId, objectId, controllerKey) =>
+                {
+                    return Animator.Attach(sceneId, objectId, controllerKey);
+                });
+            RecordLuaApi("attach_animator", "attach_animator(sceneId, objectId, controllerKey) -> bool", "挂载动画机", "Animation");
+
+            instance.LuaScript.Globals["detach_animator"] =
+                (Action<string, string>)((sceneId, objectId) =>
+                {
+                    Animator.Detach(sceneId, objectId);
+                });
+            RecordLuaApi("detach_animator", "detach_animator(sceneId, objectId)", "卸载动画机", "Animation");
+
+            instance.LuaScript.Globals["set_animator_float"] =
+                (Action<string, string, string, double>)((sceneId, objectId, name, value) =>
+                {
+                    Animator.SetFloat(sceneId, objectId, name, (float)value);
+                });
+            RecordLuaApi("set_animator_float", "set_animator_float(sceneId, objectId, name, value)", "设置动画机浮点参数", "Animation");
+
+            instance.LuaScript.Globals["set_animator_int"] =
+                (Action<string, string, string, int>)((sceneId, objectId, name, value) =>
+                {
+                    Animator.SetInt(sceneId, objectId, name, value);
+                });
+            RecordLuaApi("set_animator_int", "set_animator_int(sceneId, objectId, name, value)", "设置动画机整数参数", "Animation");
+
+            instance.LuaScript.Globals["set_animator_bool"] =
+                (Action<string, string, string, bool>)((sceneId, objectId, name, value) =>
+                {
+                    Animator.SetBool(sceneId, objectId, name, value);
+                });
+            RecordLuaApi("set_animator_bool", "set_animator_bool(sceneId, objectId, name, value)", "设置动画机布尔参数", "Animation");
+
+            instance.LuaScript.Globals["set_animator_trigger"] =
+                (Action<string, string, string>)((sceneId, objectId, name) =>
+                {
+                    Animator.SetTrigger(sceneId, objectId, name);
+                });
+            RecordLuaApi("set_animator_trigger", "set_animator_trigger(sceneId, objectId, name)", "触发动画机触发器", "Animation");
+
+            instance.LuaScript.Globals["reset_animator_trigger"] =
+                (Action<string, string, string>)((sceneId, objectId, name) =>
+                {
+                    Animator.ResetTrigger(sceneId, objectId, name);
+                });
+            RecordLuaApi("reset_animator_trigger", "reset_animator_trigger(sceneId, objectId, name)", "复位动画机触发器", "Animation");
+
+            instance.LuaScript.Globals["set_animator_layer_weight"] =
+                (Action<string, string, string, double>)((sceneId, objectId, layerName, weight) =>
+                {
+                    Animator.SetLayerWeight(sceneId, objectId, layerName, weight);
+                });
+            RecordLuaApi("set_animator_layer_weight", "set_animator_layer_weight(sceneId, objectId, layerName, weight)", "设置动画机层权重", "Animation");
+
+            instance.LuaScript.Globals["set_animator_state_speed"] =
+                (Action<string, string, string, string, double>)((sceneId, objectId, layerName, stateName, speed) =>
+                {
+                    Animator.SetStateSpeed(sceneId, objectId, layerName, stateName, speed);
+                });
+            RecordLuaApi("set_animator_state_speed", "set_animator_state_speed(sceneId, objectId, layerName, stateName, speed)", "设置动画机状态播放速度", "Animation");
+
+            instance.LuaScript.Globals["set_animator_paused"] =
+                (Action<string, string, bool>)((sceneId, objectId, paused) =>
+                {
+                    if (!Animator.TryGet(sceneId, objectId, out AnimatorInstance animator))
+                        return;
+
+                    animator.Paused = paused;
+                });
+            RecordLuaApi("set_animator_paused", "set_animator_paused(sceneId, objectId, paused)", "设置动画机暂停", "Animation");
+
+            instance.LuaScript.Globals["get_animator_float"] =
+                (Func<string, string, string, double>)((sceneId, objectId, name) =>
+                {
+                    if (!Animator.TryGet(sceneId, objectId, out AnimatorInstance animator))
+                        return 0.0;
+
+                    AnimatorParameterRuntime? parameter = animator.GetParameter(name);
+
+                    return parameter != null ? parameter.FloatValue : 0.0;
+                });
+            RecordLuaApi("get_animator_float", "get_animator_float(sceneId, objectId, name) -> number", "获取动画机浮点参数", "Animation");
+
+            instance.LuaScript.Globals["get_animator_int"] =
+                (Func<string, string, string, int>)((sceneId, objectId, name) =>
+                {
+                    if (!Animator.TryGet(sceneId, objectId, out AnimatorInstance animator))
+                        return 0;
+
+                    AnimatorParameterRuntime? parameter = animator.GetParameter(name);
+
+                    return parameter != null ? parameter.IntValue : 0;
+                });
+            RecordLuaApi("get_animator_int", "get_animator_int(sceneId, objectId, name) -> int", "获取动画机整数参数", "Animation");
+
+            instance.LuaScript.Globals["get_animator_bool"] =
+                (Func<string, string, string, bool>)((sceneId, objectId, name) =>
+                {
+                    if (!Animator.TryGet(sceneId, objectId, out AnimatorInstance animator))
+                        return false;
+
+                    AnimatorParameterRuntime? parameter = animator.GetParameter(name);
+
+                    return parameter != null && parameter.BoolValue;
+                });
+            RecordLuaApi("get_animator_bool", "get_animator_bool(sceneId, objectId, name) -> bool", "获取动画机布尔参数", "Animation");
+
+            instance.LuaScript.Globals["get_animator_trigger"] =
+                (Func<string, string, string, bool>)((sceneId, objectId, name) =>
+                {
+                    if (!Animator.TryGet(sceneId, objectId, out AnimatorInstance animator))
+                        return false;
+
+                    AnimatorParameterRuntime? parameter = animator.GetParameter(name);
+
+                    return parameter != null && parameter.TriggerValue;
+                });
+            RecordLuaApi("get_animator_trigger", "get_animator_trigger(sceneId, objectId, name) -> bool", "获取动画机触发器状态", "Animation");
+
+            instance.LuaScript.Globals["get_animator_layer_weight"] =
+                (Func<string, string, string, double>)((sceneId, objectId, layerName) =>
+                {
+                    if (!Animator.TryGet(sceneId, objectId, out AnimatorInstance animator))
+                        return 0.0;
+
+                    foreach (AnimatorLayerRuntime layer in animator.Layers)
+                    {
+                        if (string.Equals(layer.Data.Name, layerName, StringComparison.Ordinal))
+                            return layer.Data.Weight;
+                    }
+
+                    return 0.0;
+                });
+            RecordLuaApi("get_animator_layer_weight", "get_animator_layer_weight(sceneId, objectId, layerName) -> number", "获取动画机层权重", "Animation");
+
+            instance.LuaScript.Globals["get_animator_layer_state"] =
+                (Func<string, string, string, string>)((sceneId, objectId, layerName) =>
+                {
+                    if (!Animator.TryGet(sceneId, objectId, out AnimatorInstance animator))
+                        return string.Empty;
+
+                    foreach (AnimatorLayerRuntime layer in animator.Layers)
+                    {
+                        if (!string.Equals(layer.Data.Name, layerName, StringComparison.Ordinal))
+                            continue;
+
+                        if (layer.Current == null || layer.Current.State == null)
+                            return string.Empty;
+
+                        return layer.Current.State.Name;
+                    }
+
+                    return string.Empty;
+                });
+            RecordLuaApi("get_animator_layer_state", "get_animator_layer_state(sceneId, objectId, layerName) -> string", "获取动画机层当前状态名", "Animation");
+
+            instance.LuaScript.Globals["get_animator_layer_time"] =
+                (Func<string, string, string, double>)((sceneId, objectId, layerName) =>
+                {
+                    if (!Animator.TryGet(sceneId, objectId, out AnimatorInstance animator))
+                        return 0.0;
+
+                    foreach (AnimatorLayerRuntime layer in animator.Layers)
+                    {
+                        if (!string.Equals(layer.Data.Name, layerName, StringComparison.Ordinal))
+                            continue;
+
+                        if (layer.Current == null)
+                            return 0.0;
+
+                        return layer.Current.Time;
+                    }
+
+                    return 0.0;
+                });
+            RecordLuaApi("get_animator_layer_time", "get_animator_layer_time(sceneId, objectId, layerName) -> number", "获取动画机层当前状态时间", "Animation");
+
+            instance.LuaScript.Globals["get_animator_paused"] =
+                (Func<string, string, bool>)((sceneId, objectId) =>
+                {
+                    if (!Animator.TryGet(sceneId, objectId, out AnimatorInstance animator))
+                        return false;
+
+                    return animator.Paused;
+                });
+            RecordLuaApi("get_animator_paused", "get_animator_paused(sceneId, objectId) -> bool", "获取动画机暂停状态", "Animation");
         }
 
         static LuaScriptInstance? CreateComponentScript(string sceneId, string objectId, SceneScriptAttachment attachment)

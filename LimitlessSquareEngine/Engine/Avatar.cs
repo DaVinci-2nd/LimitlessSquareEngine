@@ -644,13 +644,98 @@ namespace LimitlessSquareEngine.Engine
 
         public int ParentIndex { get; set; } = -1;
 
-        public Double3 LocalPosition { get; set; } = Double3.Zero;
+        internal SceneObject? Source { get; set; }
 
-        public Double3 LocalRotation { get; set; } = Double3.Zero;
+        private Double3 _localPosition = Double3.Zero;
 
-        public Double3 LocalScale { get; set; } = Double3.One;
+        private Double3 _localRotation = Double3.Zero;
 
-        internal DQuaternion? LocalRotationQuaternion { get; set; }
+        private Double3 _localScale = Double3.One;
+
+        private DQuaternion? _localRotationQuaternion;
+
+        public Double3 LocalPosition
+        {
+            get
+            {
+                SceneTransform? transform = Source?.Transform;
+
+                return transform != null ? transform.LocalPosition : _localPosition;
+            }
+
+            set
+            {
+                SceneTransform? transform = Source?.Transform;
+
+                if (transform != null)
+                    transform.LocalPosition = value;
+                else
+                    _localPosition = value;
+            }
+        }
+
+        public Double3 LocalRotation
+        {
+            get
+            {
+                SceneTransform? transform = Source?.Transform;
+
+                return transform != null ? transform.LocalRotation : _localRotation;
+            }
+
+            set
+            {
+                SceneTransform? transform = Source?.Transform;
+
+                if (transform != null)
+                    transform.LocalRotation = value;
+                else
+                    _localRotation = value;
+            }
+        }
+
+        public Double3 LocalScale
+        {
+            get
+            {
+                SceneTransform? transform = Source?.Transform;
+
+                return transform != null ? transform.LocalScale : _localScale;
+            }
+
+            set
+            {
+                SceneTransform? transform = Source?.Transform;
+
+                if (transform != null)
+                    transform.LocalScale = value;
+                else
+                    _localScale = value;
+            }
+        }
+
+        internal DQuaternion? LocalRotationQuaternion
+        {
+            get
+            {
+                SceneTransform? transform = Source?.Transform;
+
+                if (transform == null)
+                    return _localRotationQuaternion;
+
+                return transform.LocalRotationQuaternion ?? DQuaternion.FromEulerDegrees(transform.LocalRotation);
+            }
+
+            set
+            {
+                SceneTransform? transform = Source?.Transform;
+
+                if (transform != null)
+                    transform.LocalRotationQuaternion = value;
+                else
+                    _localRotationQuaternion = value;
+            }
+        }
 
         internal Double3 RestPosition { get; set; } = Double3.Zero;
 
@@ -712,6 +797,15 @@ namespace LimitlessSquareEngine.Engine
             }
 
             return -1;
+        }
+
+        internal void Attach(SceneObject?[] sources)
+        {
+            if (sources == null || sources.Length < Bones.Count)
+                return;
+
+            for (int i = 0; i < Bones.Count; i++)
+                Bones[i].Source = sources[i];
         }
 
         public Matrix4x4[] ComputeNodeGlobalMatrices()

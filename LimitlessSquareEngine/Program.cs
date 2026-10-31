@@ -2359,6 +2359,7 @@ namespace LimitlessSquareEngine
             {
                 // 动画求解
                 Animator.TickAll(deltaTime);
+                Scene.MarkAvatarBonesDirty();
                 // 处理总线指令
                 ExecuteBusCommands();
                 // 遍历所有总线脚本实例

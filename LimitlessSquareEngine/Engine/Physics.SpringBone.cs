@@ -264,7 +264,8 @@ namespace LimitlessSquareEngine.Engine
 
                 DQuaternion parentEvalRotation = (centerInverse * parentModelRotation).Normalized();
 
-                Double3 inertia = (joint.CurrentTail - joint.PrevTail) * (1.0 - joint.DragForce);
+                Double3 inertia = (joint.CurrentTail - joint.PrevTail) * (1.0 - joint.DragForce)
+                    - runtime.WorldDeltaModel * joint.DragForce;
 
                 Double3 stiffness = parentEvalRotation.Rotate(
                     joint.InitialLocalRotation.Rotate(joint.BoneAxis)) * (deltaTime * joint.Stiffness);

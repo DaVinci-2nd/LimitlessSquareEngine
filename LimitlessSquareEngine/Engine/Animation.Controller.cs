@@ -324,11 +324,11 @@ namespace LimitlessSquareEngine.Engine
 
         public int RootBoneIndex { get; set; } = -1;
 
-        private bool _hasRootSample;
+        private Double3[] _entryRootPositions = Array.Empty<Double3>();
 
-        private Double3 _lastRootPosition;
+        private double[] _entryRootTimes = Array.Empty<double>();
 
-        private double _lastRootMotionTime;
+        private bool[] _entryRootSampled = Array.Empty<bool>();
 
         private bool _bindingsResolved;
 
@@ -610,48 +610,84 @@ namespace LimitlessSquareEngine.Engine
             foreach (AnimatorLayerRuntime layer in Layers)
                 MergeLayer(layer);
 
-            ApplyPose(ResolveRootMotionTime());
+            ApplyPose();
         }
 
-        private double ResolveRootMotionTime()
+        private void ApplyRootMotionOffset()
         {
             if (Layers.Count == 0 || Layers[0].Current == null)
-                return 0.0;
+                return;
+
+            if (RootBoneIndex < 0 || RootBoneIndex >= Pose.BoneCount)
+                return;
 
             AnimatorStatePlayback playback = Layers[0].Current;
-            double duration = playback.ResolveDuration();
 
-            if (duration <= 0.0)
-                return playback.Time;
-
-            double wrapped = playback.Time % duration;
-
-            return wrapped < 0.0 ? wrapped + duration : wrapped;
-        }
-
-        private void ApplyRootMotionOffset(double sampleTime)
-        {
-            Double3 rootPosition = Pose.Translations[RootBoneIndex];
-
-            if (!_hasRootSample)
-            {
-                _lastRootPosition = rootPosition;
-                _lastRootMotionTime = sampleTime;
-                _hasRootSample = true;
+            if (playback.Entries.Count == 0 || playback.Weights.Length == 0)
                 return;
+
+            if (_entryRootPositions.Length < playback.Entries.Count)
+            {
+                int size = playback.Entries.Count;
+
+                _entryRootPositions = new Double3[size];
+                _entryRootTimes = new double[size];
+                _entryRootSampled = new bool[size];
             }
 
-            bool looped = sampleTime < _lastRootMotionTime;
+            Double3 totalDelta = Double3.Zero;
 
-            Double3 delta = rootPosition - _lastRootPosition;
+            for (int i = 0; i < playback.Entries.Count && i < playback.Weights.Length; i++)
+            {
+                float weight = playback.Weights[i];
 
-            _lastRootPosition = rootPosition;
-            _lastRootMotionTime = sampleTime;
+                if (weight <= 0f)
+                    continue;
 
-            if (looped)
+                AnimationClipRuntime clip = playback.Entries[i].Clip;
+
+                if (clip == null || clip.Duration <= 0.0)
+                    continue;
+
+                double elapsed = playback.Time % clip.Duration;
+
+                if (elapsed < 0.0)
+                    elapsed += clip.Duration;
+
+                AnimationPoseBuffer entryPose = AnimationPoseBuffer.Create(Pose.BoneCount);
+
+                clip.Sample(elapsed, playback.ResolveStepped(), entryPose, ResolveBoneIndex, ResolveBoneRest);
+
+                if (!entryPose.TouchedTranslations[RootBoneIndex])
+                    continue;
+
+                Double3 entryPosition = entryPose.Translations[RootBoneIndex];
+
+                if (!_entryRootSampled[i])
+                {
+                    _entryRootPositions[i] = entryPosition;
+                    _entryRootTimes[i] = elapsed;
+                    _entryRootSampled[i] = true;
+                    continue;
+                }
+
+                bool entryLooped = elapsed < _entryRootTimes[i];
+
+                Double3 entryDelta = entryPosition - _entryRootPositions[i];
+
+                _entryRootPositions[i] = entryPosition;
+                _entryRootTimes[i] = elapsed;
+
+                if (entryLooped)
+                    continue;
+
+                totalDelta += entryDelta * (double)weight;
+            }
+
+            if (totalDelta.X == 0.0 && totalDelta.Y == 0.0 && totalDelta.Z == 0.0)
                 return;
 
-            Double3 modelDelta = ResolveBoneRest(RootBoneIndex).ParentWorldRotation.Rotate(delta);
+            Double3 modelDelta = ResolveBoneRest(RootBoneIndex).ParentWorldRotation.Rotate(totalDelta);
 
             DQuaternion avatarWorldRotation = DQuaternion.FromEulerDegrees(Scene.GetRotation(SceneId, ObjectId));
 
@@ -1009,7 +1045,7 @@ namespace LimitlessSquareEngine.Engine
             return false;
         }
 
-        private void ApplyPose(double sampleTime)
+        private void ApplyPose()
         {
             if (Avatar != null)
             {
@@ -1020,7 +1056,7 @@ namespace LimitlessSquareEngine.Engine
                     Pose.TouchedTranslations[RootBoneIndex];
 
                 if (applyRootMotion)
-                    ApplyRootMotionOffset(sampleTime);
+                    ApplyRootMotionOffset();
 
                 for (int i = 0; i < Pose.BoneCount && i < Avatar.Skeleton.Bones.Count; i++)
                 {

@@ -605,10 +605,13 @@ namespace LimitlessSquareEngine.Engine
                 return;
             }
 
-            Linear(from.Value, to.Value, (float)ratio, output);
-
             if (string.Equals(channel.ValueType, "quaternion", StringComparison.OrdinalIgnoreCase))
-                NormalizeQuaternion(output);
+            {
+                LerpQuaternion(from.Value, to.Value, (float)ratio, output);
+                return;
+            }
+
+            Linear(from.Value, to.Value, (float)ratio, output);
         }
 
         static void CopyValue(AnimationKeyframe keyframe, Span<float> output)
@@ -628,6 +631,31 @@ namespace LimitlessSquareEngine.Engine
                 float b = i < to.Length ? to[i] : 0f;
                 output[i] = a + (b - a) * ratio;
             }
+        }
+
+        static void LerpQuaternion(float[] from, float[] to, float ratio, Span<float> output)
+        {
+            float dot = 0f;
+
+            for (int i = 0; i < output.Length; i++)
+            {
+                float a = i < from.Length ? from[i] : 0f;
+                float b = i < to.Length ? to[i] : 0f;
+
+                dot += a * b;
+            }
+
+            float sign = dot < 0f ? -1f : 1f;
+
+            for (int i = 0; i < output.Length; i++)
+            {
+                float a = i < from.Length ? from[i] : 0f;
+                float b = (i < to.Length ? to[i] : 0f) * sign;
+
+                output[i] = a + (b - a) * ratio;
+            }
+
+            NormalizeQuaternion(output);
         }
 
         static void CubicHermite(
