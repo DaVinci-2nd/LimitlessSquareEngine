@@ -47,6 +47,9 @@ namespace LimitlessSquareEngine
         private static Action<string, AnimatorControllerData>? _registerAnimatorController;
         private static Func<double, double, double, double[]>? _eulerDegreesToQuaternion;
         private static Func<double, double, double, double, double[]>? _quaternionToEulerDegrees;
+        private static Func<string, string, string[]>? _getAvatarMorphKeys;
+        private static Func<string, string, string, float>? _getAvatarMorphWeight;
+        private static Action<string, string, string, float>? _setAvatarMorphWeight;
 
         internal static void Bind(
             Func<EditorHostBootstrapInfo> bootstrapInfoProvider,
@@ -85,7 +88,10 @@ namespace LimitlessSquareEngine
             Action<string, AnimationClipData> registerAnimationClip,
             Action<string, AnimatorControllerData> registerAnimatorController,
             Func<double, double, double, double[]> eulerDegreesToQuaternion,
-            Func<double, double, double, double, double[]> quaternionToEulerDegrees)
+            Func<double, double, double, double, double[]> quaternionToEulerDegrees,
+            Func<string, string, string[]> getAvatarMorphKeys,
+            Func<string, string, string, float> getAvatarMorphWeight,
+            Action<string, string, string, float> setAvatarMorphWeight)
         {
             _bootstrapInfoProvider = bootstrapInfoProvider;
             _setRenderWindowVisible = setRenderWindowVisible;
@@ -124,6 +130,9 @@ namespace LimitlessSquareEngine
             _registerAnimatorController = registerAnimatorController;
             _eulerDegreesToQuaternion = eulerDegreesToQuaternion;
             _quaternionToEulerDegrees = quaternionToEulerDegrees;
+            _getAvatarMorphKeys = getAvatarMorphKeys;
+            _getAvatarMorphWeight = getAvatarMorphWeight;
+            _setAvatarMorphWeight = setAvatarMorphWeight;
         }
 
         internal static void Unbind()
@@ -165,6 +174,9 @@ namespace LimitlessSquareEngine
             _registerAnimatorController = null;
             _eulerDegreesToQuaternion = null;
             _quaternionToEulerDegrees = null;
+            _getAvatarMorphKeys = null;
+            _getAvatarMorphWeight = null;
+            _setAvatarMorphWeight = null;
         }
 
         public static void SetSceneObjectLocalPosition(string sceneId, string objectId, Double3 value)
@@ -549,6 +561,54 @@ namespace LimitlessSquareEngine
                 throw new InvalidOperationException("[X] Editor host bridge is not bound.");
 
             return _quaternionToEulerDegrees(x, y, z, w);
+        }
+
+        public static string[] GetAvatarMorphKeys(string sceneId, string objectId)
+        {
+            if (string.IsNullOrWhiteSpace(sceneId))
+                throw new ArgumentException("[X] Scene ID cannot be null or empty.", nameof(sceneId));
+
+            if (string.IsNullOrWhiteSpace(objectId))
+                throw new ArgumentException("[X] Object ID cannot be null or empty.", nameof(objectId));
+
+            if (_getAvatarMorphKeys == null)
+                return Array.Empty<string>();
+
+            return _getAvatarMorphKeys(sceneId, objectId);
+        }
+
+        public static float GetAvatarMorphWeight(string sceneId, string objectId, string morphKey)
+        {
+            if (string.IsNullOrWhiteSpace(sceneId))
+                throw new ArgumentException("[X] Scene ID cannot be null or empty.", nameof(sceneId));
+
+            if (string.IsNullOrWhiteSpace(objectId))
+                throw new ArgumentException("[X] Object ID cannot be null or empty.", nameof(objectId));
+
+            if (string.IsNullOrWhiteSpace(morphKey))
+                throw new ArgumentException("[X] Avatar morph key cannot be null or empty.", nameof(morphKey));
+
+            if (_getAvatarMorphWeight == null)
+                return 0f;
+
+            return _getAvatarMorphWeight(sceneId, objectId, morphKey);
+        }
+
+        public static void SetAvatarMorphWeight(string sceneId, string objectId, string morphKey, float weight)
+        {
+            if (string.IsNullOrWhiteSpace(sceneId))
+                throw new ArgumentException("[X] Scene ID cannot be null or empty.", nameof(sceneId));
+
+            if (string.IsNullOrWhiteSpace(objectId))
+                throw new ArgumentException("[X] Object ID cannot be null or empty.", nameof(objectId));
+
+            if (string.IsNullOrWhiteSpace(morphKey))
+                throw new ArgumentException("[X] Avatar morph key cannot be null or empty.", nameof(morphKey));
+
+            if (_setAvatarMorphWeight == null)
+                return;
+
+            _setAvatarMorphWeight(sceneId, objectId, morphKey, weight);
         }
 
         public readonly struct LuaApiMetadata

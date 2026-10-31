@@ -1640,7 +1640,10 @@ namespace LimitlessSquareEngine
                 {
                     Double3 euler = new DQuaternion(x, y, z, w).ToEulerDegrees();
                     return new[] { euler.X, euler.Y, euler.Z };
-                });
+                },
+                Scene.GetAvatarMorphKeys,
+                Scene.GetAvatarMorphWeight,
+                Scene.SetAvatarMorphWeight);
         }
 
         static void UnbindEditorHostBridge()

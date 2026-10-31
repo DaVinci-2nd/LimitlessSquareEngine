@@ -477,6 +477,7 @@ namespace LimitlessSquareEngine.Engine
                     return null;
 
                 EnsureAvatarBonesPersisted(scene, filePath);
+                ApplyAvatarMorphWeights(scene);
 
                 return scene;
             }
@@ -509,6 +510,7 @@ namespace LimitlessSquareEngine.Engine
                 throw new InvalidDataException($"[X] Scene ID mismatch: file contains '{scene.SceneId}', expected '{sceneId}'.");
 
             EnsureAvatarBonesPersisted(scene, filePath);
+            ApplyAvatarMorphWeights(scene);
 
             _loadedScenes[sceneId] = scene;
 
@@ -1671,6 +1673,106 @@ namespace LimitlessSquareEngine.Engine
             }
 
             return obj.Id;
+        }
+
+        private static void ApplyAvatarMorphWeights(SceneData scene)
+        {
+            foreach (SceneObject obj in scene.Objects)
+            {
+                if (!string.Equals(obj.Type, "Avatar", StringComparison.Ordinal))
+                    continue;
+
+                if (string.IsNullOrWhiteSpace(obj.Data))
+                    continue;
+
+                string avatarId = ParseAvatarId(obj);
+
+                if (string.IsNullOrWhiteSpace(avatarId))
+                    continue;
+
+                if (!AvatarRegistry.TryGet(avatarId, out Avatar? avatar) || avatar == null)
+                    continue;
+
+                try
+                {
+                    using JsonDocument doc = JsonDocument.Parse(obj.Data);
+
+                    if (doc.RootElement.ValueKind != JsonValueKind.Object)
+                        continue;
+
+                    if (!doc.RootElement.TryGetProperty("expressions", out JsonElement expressions) ||
+                        expressions.ValueKind != JsonValueKind.Object)
+                        continue;
+
+                    foreach (JsonProperty property in expressions.EnumerateObject())
+                    {
+                        if (property.Value.ValueKind != JsonValueKind.Number)
+                            continue;
+
+                        if (!property.Value.TryGetDouble(out double weight))
+                            continue;
+
+                        avatar.SetExpressionWeight(property.Name, (float)weight);
+                    }
+                }
+                catch (JsonException)
+                {
+                }
+            }
+        }
+
+        public static string[] GetAvatarMorphKeys(string sceneId, string objectId)
+        {
+            if (!TryGetNode(sceneId, objectId, out _, out SceneRuntimeNode node))
+                return Array.Empty<string>();
+
+            string avatarId = ParseAvatarId(node.Source);
+
+            if (string.IsNullOrWhiteSpace(avatarId))
+                return Array.Empty<string>();
+
+            if (!AvatarRegistry.TryGet(avatarId, out Avatar? avatar) || avatar == null)
+                return Array.Empty<string>();
+
+            return avatar.Expressions.Keys.ToArray();
+        }
+
+        public static float GetAvatarMorphWeight(string sceneId, string objectId, string morphKey)
+        {
+            if (string.IsNullOrWhiteSpace(morphKey))
+                return 0f;
+
+            if (!TryGetNode(sceneId, objectId, out _, out SceneRuntimeNode node))
+                return 0f;
+
+            string avatarId = ParseAvatarId(node.Source);
+
+            if (string.IsNullOrWhiteSpace(avatarId))
+                return 0f;
+
+            if (!AvatarRegistry.TryGet(avatarId, out Avatar? avatar) || avatar == null)
+                return 0f;
+
+            return avatar.ExpressionWeights.TryGetValue(morphKey, out float weight) ? weight : 0f;
+        }
+
+        public static void SetAvatarMorphWeight(string sceneId, string objectId, string morphKey, float weight)
+        {
+            if (string.IsNullOrWhiteSpace(morphKey))
+                throw new ArgumentException("[X] Avatar morph key cannot be null or empty.", nameof(morphKey));
+
+            if (!TryGetNode(sceneId, objectId, out _, out SceneRuntimeNode node))
+                return;
+
+            string avatarId = ParseAvatarId(node.Source);
+
+            if (string.IsNullOrWhiteSpace(avatarId))
+                return;
+
+            if (!AvatarRegistry.TryGet(avatarId, out Avatar? avatar) || avatar == null)
+                return;
+
+            avatar.SetExpressionWeight(morphKey, weight);
         }
 
         private static void EnsureAvatarBonesPersisted(SceneData scene, string filePath)

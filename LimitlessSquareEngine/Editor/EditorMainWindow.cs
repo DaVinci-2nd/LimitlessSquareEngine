@@ -5,6 +5,7 @@ using Avalonia.Input;
 using Avalonia.Interactivity;
 using Avalonia.Layout;
 using Avalonia.Media;
+using Avalonia.Media.Imaging;
 using Avalonia.Platform.Storage;
 using Avalonia.Threading;
 using Avalonia.VisualTree;
@@ -76,6 +77,7 @@ namespace LimitlessSquareEngine.Editor
         private readonly List<SceneData> _sceneUndoStack = new List<SceneData>();
         private readonly List<SceneData> _sceneRedoStack = new List<SceneData>();
         private bool _isApplyingSceneHistory;
+        private bool _sceneHasUnsavedChanges;
 
         private SceneObject? _selectedSceneObject;
         private bool _isUpdatingSceneInspector;
@@ -3085,18 +3087,7 @@ namespace LimitlessSquareEngine.Editor
                     return;
                 }
 
-                FileInfo fileInfo = new FileInfo(path);
-
-                RightDockSlot.Content = CreateViewerContent(
-                    "文件信息",
-                    new (string Label, string Value)[]
-                    {
-                        ("名称", fileInfo.Name),
-                        ("路径", fileInfo.FullName),
-                        ("类型", string.IsNullOrWhiteSpace(fileInfo.Extension) ? "未知" : fileInfo.Extension),
-                        ("大小", fileInfo.Exists ? $"{fileInfo.Length} 字节" : "-"),
-                        ("最后修改", fileInfo.Exists ? fileInfo.LastWriteTime.ToString("yyyy-MM-dd HH:mm:ss") : "-")
-                    });
+                RightDockSlot.Content = CreateResourceViewerContent(path);
             }
             catch (Exception ex)
             {
@@ -3141,7 +3132,7 @@ namespace LimitlessSquareEngine.Editor
                 return PersistSceneObjectChanges(obj, true);
             }));
 
-            root.Children.Add(CreateTextPropertyEditor("类型", () => obj.Type ?? "", value =>
+            root.Children.Add(CreateComboPropertyEditor("类型", SceneObjectTypeOptions, () => obj.Type ?? "", value =>
             {
                 string newValue = value ?? string.Empty;
                 string oldValue = obj.Type ?? string.Empty;
@@ -3151,10 +3142,31 @@ namespace LimitlessSquareEngine.Editor
 
                 BeginSceneParameterChange();
                 obj.Type = newValue;
-                return PersistSceneObjectChanges(obj, true);
+
+                if (!PersistSceneObjectChanges(obj, true))
+                    return false;
+
+                Dispatcher.UIThread.Post(() => ShowSceneObjectInspector(obj), DispatcherPriority.Background);
+                return true;
             }));
 
-            root.Children.Add(CreateTextPropertyEditor("父节点", () => obj.Transform?.ParentId ?? "", value =>
+            List<string> parentIdOptions = new List<string> { string.Empty };
+
+            if (_currentTreeScene != null)
+            {
+                foreach (SceneObject candidate in _currentTreeScene.Objects)
+                {
+                    if (ReferenceEquals(candidate, obj))
+                        continue;
+
+                    if (string.IsNullOrWhiteSpace(candidate.Id))
+                        continue;
+
+                    parentIdOptions.Add(candidate.Id);
+                }
+            }
+
+            root.Children.Add(CreateComboPropertyEditor("父节点", parentIdOptions, () => obj.Transform?.ParentId ?? "", value =>
             {
                 return TryApplyParentId(obj, value);
             }));
@@ -3346,20 +3358,8 @@ namespace LimitlessSquareEngine.Editor
             scriptPanel.Children.Add(addScriptButton);
             root.Children.Add(scriptPanel);
 
-            root.Children.Add(CreateCollapsibleDataEditor("Data", () => obj.Data ?? "", value =>
-            {
-                string? newValue = string.IsNullOrWhiteSpace(value) ? null : value;
-                string? oldValue = obj.Data;
-
-                if (string.Equals(oldValue ?? string.Empty, newValue ?? string.Empty, StringComparison.Ordinal))
-                    return true;
-
-                BeginSceneParameterChange();
-                #pragma warning disable CS8601
-                obj.Data = newValue;
-                #pragma warning restore CS8601
-                return PersistSceneObjectChanges(obj, false);
-            }));
+            root.Children.Add(CreateSceneObjectDataSection(obj));
+            root.Children.Add(CreateSceneObjectPhysicsSection(obj));
 
             return new ScrollViewer
             {
@@ -6250,6 +6250,7 @@ void main()
                 _sceneUndoStack.Clear();
                 _sceneRedoStack.Clear();
                 _isApplyingSceneHistory = false;
+                _sceneHasUnsavedChanges = false;
 
                 InitializePreviewCameraEditorState(scene);
                 _currentPreviewScene = BuildPreviewScene(scene);
@@ -6382,7 +6383,7 @@ void main()
 
         private void UpdateSceneDirtyVisualState()
         {
-            bool isDirty = IsCurrentSceneTreeDirty();
+            bool isDirty = IsCurrentSceneTreeDirty() || _sceneHasUnsavedChanges;
 
             if (_sceneTreeDockHeaderDirtyMarkText != null)
                 _sceneTreeDockHeaderDirtyMarkText.Text = isDirty ? "*" : string.Empty;
@@ -6428,17 +6429,24 @@ void main()
         private bool TrySaveCurrentSceneToOriginalFile()
         {
             if (string.IsNullOrWhiteSpace(_currentSceneOriginalPath) ||
-                string.IsNullOrWhiteSpace(_currentTreeCopyPath) ||
-                !File.Exists(_currentTreeCopyPath))
+                string.IsNullOrWhiteSpace(_currentTreeCopyPath))
+                return false;
+
+            if (_currentTreeScene != null)
+                SaveSceneData(_currentTreeCopyPath, _currentTreeScene);
+
+            if (!File.Exists(_currentTreeCopyPath))
                 return false;
 
             if (!IsCurrentSceneTreeDirty())
             {
+                _sceneHasUnsavedChanges = false;
                 UpdateSceneDirtyVisualState();
                 return false;
             }
 
             File.Copy(_currentTreeCopyPath, _currentSceneOriginalPath, true);
+            _sceneHasUnsavedChanges = false;
             UpdateSceneDirtyVisualState();
             return true;
         }
@@ -12040,6 +12048,2441 @@ void main()
 
                 InvalidateVisual();
             }
+        }
+
+        private static readonly string[] SceneObjectTypeOptions =
+        {
+            "Object",
+            "Camera",
+            "Light",
+            "AudioListener",
+            "AudioSource",
+            "Avatar"
+        };
+
+        private static readonly string[] CameraRenderModeOptions =
+        {
+            "0 屏幕天空盒",
+            "1 相机天空盒"
+        };
+
+        private static readonly string[] CameraProjectionTypeOptions =
+        {
+            "0 透视",
+            "1 正交"
+        };
+
+        private static readonly string[] LightModeOptions =
+        {
+            "0 点光",
+            "3 方向光"
+        };
+
+        private static readonly string[] AudioListenerOutputModeOptions =
+        {
+            "Direct",
+            "AudioSource"
+        };
+
+        private static readonly string[] AudioAttenuationModelOptions =
+        {
+            "InverseDistanceClamped",
+            "InverseDistance",
+            "LinearDistance",
+            "ExponentialDistance",
+            "None"
+        };
+
+        private static readonly string[] PhysicsMotionTypeOptions =
+        {
+            "Static",
+            "Dynamic",
+            "Kinematic"
+        };
+
+        private static readonly string[] PhysicsShapeTypeOptions =
+        {
+            "Box",
+            "Sphere",
+            "Capsule",
+            "Mesh"
+        };
+
+        private static readonly string[] MaterialTextureWrapOptions =
+        {
+            "Repeat",
+            "Clamp"
+        };
+
+        private static readonly string[] AnimationClipPlayModeOptions =
+        {
+            "normal",
+            "stepped"
+        };
+
+        private static readonly string[] SceneFogModeOptions =
+        {
+            "color",
+            "texture",
+            "skybox"
+        };
+
+        private static readonly string[] MaterialScalarParameterKeys =
+        {
+            "uNormalStrength",
+            "uAmbientStrength",
+            "uSpecularIntensity",
+            "uSmoothness"
+        };
+
+        private Control CreateResourceViewerContent(string path)
+        {
+            if (IsEditorConfigFile(path))
+                return CreateFileInfoViewer(path);
+
+            string extension = Path.GetExtension(path).Trim().ToLowerInvariant();
+
+            if (string.Equals(extension, ".json", StringComparison.Ordinal))
+            {
+                try
+                {
+                    using JsonDocument doc = JsonDocument.Parse(File.ReadAllText(path));
+                    JsonElement root = doc.RootElement;
+
+                    if (root.ValueKind == JsonValueKind.Object)
+                    {
+                        bool hasSceneId =
+                            root.TryGetProperty("sceneId", out JsonElement sceneIdElement) &&
+                            sceneIdElement.ValueKind == JsonValueKind.String &&
+                            !string.IsNullOrWhiteSpace(sceneIdElement.GetString());
+
+                        bool hasObjects =
+                            root.TryGetProperty("objects", out JsonElement objectsElement) &&
+                            objectsElement.ValueKind == JsonValueKind.Array;
+
+                        if (hasSceneId && hasObjects)
+                            return CreateSceneAssetViewer(path);
+
+                        if (root.TryGetProperty("assetType", out JsonElement assetTypeElement) &&
+                            assetTypeElement.ValueKind == JsonValueKind.String)
+                        {
+                            string assetType = assetTypeElement.GetString() ?? string.Empty;
+
+                            if (string.Equals(assetType, "Material", StringComparison.OrdinalIgnoreCase))
+                                return CreateMaterialAssetViewer(path);
+
+                            if (string.Equals(assetType, "AnimationClip", StringComparison.OrdinalIgnoreCase) ||
+                                string.Equals(assetType, "AnimatorController", StringComparison.OrdinalIgnoreCase))
+                                return CreateAnimationAssetViewer(path, assetType);
+                        }
+                    }
+                }
+                catch
+                {
+                }
+            }
+
+            switch (extension)
+            {
+                case ".png":
+                case ".jpg":
+                case ".jpeg":
+                case ".bmp":
+                case ".gif":
+                case ".webp":
+                case ".tga":
+                    return CreateImageAssetViewer(path);
+
+                case ".lua":
+                case ".vert":
+                case ".frag":
+                case ".vrma":
+                    return CreateTextAssetViewer(path);
+            }
+
+            return CreateFileInfoViewer(path);
+        }
+
+        private Control CreateFileInfoViewer(string path)
+        {
+            FileInfo fileInfo = new FileInfo(path);
+
+            return CreateViewerContent(
+                "文件信息",
+                new (string Label, string Value)[]
+                {
+                    ("名称", fileInfo.Name),
+                    ("路径", fileInfo.FullName),
+                    ("类型", string.IsNullOrWhiteSpace(fileInfo.Extension) ? "未知" : fileInfo.Extension),
+                    ("大小", fileInfo.Exists ? $"{fileInfo.Length} 字节" : "-"),
+                    ("最后修改", fileInfo.Exists ? fileInfo.LastWriteTime.ToString("yyyy-MM-dd HH:mm:ss") : "-")
+                });
+        }
+
+        private Control CreateTextAssetViewer(string path)
+        {
+            FileInfo fileInfo = new FileInfo(path);
+            string text = string.Empty;
+
+            try
+            {
+                text = File.ReadAllText(path);
+            }
+            catch
+            {
+            }
+
+            int lineCount = string.IsNullOrEmpty(text)
+                ? 0
+                : text.Count(character => character == '\n') + 1;
+
+            StackPanel stack = new StackPanel
+            {
+                Spacing = 4
+            };
+
+            stack.Children.Add(CreateViewerTitle(Path.GetFileName(path)));
+
+            stack.Children.Add(CreateViewerInfoRow("路径", fileInfo.FullName));
+            stack.Children.Add(CreateViewerInfoRow("大小", $"{fileInfo.Length} 字节"));
+            stack.Children.Add(CreateViewerInfoRow("行数", lineCount.ToString(CultureInfo.InvariantCulture)));
+            stack.Children.Add(CreateViewerInfoRow("最后修改", fileInfo.LastWriteTime.ToString("yyyy-MM-dd HH:mm:ss")));
+
+            Button openButton = CreateTextCommandButton("打开", 80);
+            openButton.Margin = new Thickness(12, 8, 12, 12);
+            openButton.HorizontalAlignment = HorizontalAlignment.Left;
+            openButton.Click += (_, _) => OnResourceItemDoubleTapped(path, false);
+
+            stack.Children.Add(openButton);
+
+            return new ScrollViewer
+            {
+                VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+                HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+                Content = stack
+            };
+        }
+
+        private Control CreateImageAssetViewer(string path)
+        {
+            FileInfo fileInfo = new FileInfo(path);
+
+            StackPanel stack = new StackPanel
+            {
+                Spacing = 4
+            };
+
+            stack.Children.Add(CreateViewerTitle(Path.GetFileName(path)));
+
+            try
+            {
+                using FileStream stream = File.OpenRead(path);
+                Bitmap bitmap = new Bitmap(stream);
+
+                stack.Children.Add(new Border
+                {
+                    Margin = new Thickness(12, 4, 12, 4),
+                    Padding = new Thickness(4),
+                    Background = new SolidColorBrush(Color.Parse("#1A1A1A")),
+                    BorderBrush = new SolidColorBrush(Color.Parse("#555555")),
+                    BorderThickness = new Thickness(1),
+                    CornerRadius = new CornerRadius(3),
+                    Child = new Image
+                    {
+                        Source = bitmap,
+                        Stretch = Stretch.Uniform,
+                        Width = 272,
+                        Height = 272,
+                        HorizontalAlignment = HorizontalAlignment.Center
+                    }
+                });
+
+                stack.Children.Add(CreateViewerInfoRow("像素", $"{bitmap.PixelSize.Width} x {bitmap.PixelSize.Height}"));
+            }
+            catch (Exception ex)
+            {
+                stack.Children.Add(CreateViewerInfoRow("预览", ex.Message));
+            }
+
+            stack.Children.Add(CreateViewerInfoRow("路径", fileInfo.FullName));
+            stack.Children.Add(CreateViewerInfoRow("大小", $"{fileInfo.Length} 字节"));
+            stack.Children.Add(CreateViewerInfoRow("最后修改", fileInfo.LastWriteTime.ToString("yyyy-MM-dd HH:mm:ss")));
+
+            return new ScrollViewer
+            {
+                VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+                HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+                Content = stack
+            };
+        }
+
+        private Control CreateViewerTitle(string title)
+        {
+            return new Border
+            {
+                Margin = new Thickness(12, 12, 12, 4),
+                Child = new TextBlock
+                {
+                    Text = title,
+                    Foreground = Brushes.White,
+                    FontSize = 14,
+                    FontWeight = FontWeight.Bold,
+                    TextWrapping = TextWrapping.Wrap
+                }
+            };
+        }
+
+        private Control CreateViewerInfoRow(string label, string value)
+        {
+            return new Border
+            {
+                Margin = new Thickness(12, 0, 12, 0),
+                Child = new TextBlock
+                {
+                    Text = $"{label}: {value}",
+                    Foreground = new SolidColorBrush(Color.Parse("#DDDDDD")),
+                    TextWrapping = TextWrapping.Wrap
+                }
+            };
+        }
+
+        private Control CreateMaterialAssetViewer(string path)
+        {
+            JsonObject root;
+
+            try
+            {
+                root = JsonNode.Parse(File.ReadAllText(path)) as JsonObject ?? new JsonObject();
+            }
+            catch (Exception ex)
+            {
+                return CreateViewerContent(
+                    "材质参数",
+                    new (string Label, string Value)[]
+                    {
+                        ("路径", path),
+                        ("错误", ex.Message)
+                    });
+            }
+
+            root["assetType"] = "Material";
+
+            if (root["parameters"] is not JsonObject)
+                root["parameters"] = new JsonObject();
+
+            JsonObject parameters = (JsonObject)root["parameters"]!;
+
+            StackPanel stack = new StackPanel
+            {
+                Spacing = 4
+            };
+
+            stack.Children.Add(CreateViewerTitle(Path.GetFileName(path)));
+
+            List<string> shaderOptions = CollectAssetKeys("*.vert", true);
+
+            stack.Children.Add(CreateComboPropertyEditor(
+                "shader",
+                shaderOptions,
+                () => TryReadJsonValue(root, "shader", out string value) ? value : string.Empty,
+                value =>
+                {
+                    root["shader"] = string.IsNullOrWhiteSpace(value) ? null : value;
+                    return true;
+                }));
+
+            stack.Children.Add(CreateColorPropertyEditor(
+                "uColor",
+                () => new[]
+                {
+                    ReadJsonArrayComponent(parameters, "uColor", 0, 1.0),
+                    ReadJsonArrayComponent(parameters, "uColor", 1, 1.0),
+                    ReadJsonArrayComponent(parameters, "uColor", 2, 1.0),
+                    ReadJsonArrayComponent(parameters, "uColor", 3, 1.0)
+                },
+                components =>
+                {
+                    for (int index = 0; index < 4; index++)
+                        WriteJsonArrayComponent(parameters, "uColor", index, 4, components[index]);
+
+                    return true;
+                },
+                1.0,
+                true));
+
+            stack.Children.Add(CreateTextPropertyEditor(
+                "uTexture",
+                () => TryReadJsonValue(parameters, "uTexture", out string value) ? value : string.Empty,
+                value =>
+                {
+                    parameters["uTexture"] = value;
+                    return true;
+                }));
+
+            stack.Children.Add(CreateComboPropertyEditor(
+                "uTextureWrap",
+                MaterialTextureWrapOptions,
+                () => TryReadJsonValue(parameters, "uTextureWrap", out string value) ? value : MaterialTextureWrapOptions[0],
+                value =>
+                {
+                    parameters["uTextureWrap"] = value;
+                    return true;
+                }));
+
+            for (int index = 0; index < 2; index++)
+            {
+                int component = index;
+                string suffix = component == 0 ? ".u" : ".v";
+
+                stack.Children.Add(CreateNumberPropertyEditor(
+                    "uTextureUV" + suffix,
+                    () => ReadJsonArrayComponent(parameters, "uTextureUV", component, 1.0),
+                    value =>
+                    {
+                        WriteJsonArrayComponent(parameters, "uTextureUV", component, 2, value);
+                        return true;
+                    }));
+            }
+
+            stack.Children.Add(CreateCheckPropertyEditor(
+                "uUseNormalTexture",
+                () => TryReadJsonValue(parameters, "uUseNormalTexture", out int value) && value != 0,
+                value =>
+                {
+                    parameters["uUseNormalTexture"] = value ? 1 : 0;
+                    return true;
+                }));
+
+            stack.Children.Add(CreateTextPropertyEditor(
+                "uNormalTexture",
+                () => TryReadJsonValue(parameters, "uNormalTexture", out string value) ? value : string.Empty,
+                value =>
+                {
+                    parameters["uNormalTexture"] = value;
+                    return true;
+                }));
+
+            stack.Children.Add(CreateColorPropertyEditor(
+                "uSpecularColor",
+                () => new[]
+                {
+                    ReadJsonArrayComponent(parameters, "uSpecularColor", 0, 1.0),
+                    ReadJsonArrayComponent(parameters, "uSpecularColor", 1, 1.0),
+                    ReadJsonArrayComponent(parameters, "uSpecularColor", 2, 1.0)
+                },
+                components =>
+                {
+                    for (int index = 0; index < 3; index++)
+                        WriteJsonArrayComponent(parameters, "uSpecularColor", index, 3, components[index]);
+
+                    return true;
+                },
+                1.0,
+                false));
+
+            foreach (string key in MaterialScalarParameterKeys)
+            {
+                double maximum = string.Equals(key, "uNormalStrength", StringComparison.Ordinal) ? 10.0 : 1.0;
+                double fallback = string.Equals(key, "uNormalStrength", StringComparison.Ordinal) ? 1.0 : 0.0;
+
+                stack.Children.Add(CreateSliderPropertyEditor(
+                    key,
+                    () => TryReadJsonValue(parameters, key, out double value) ? value : fallback,
+                    value =>
+                    {
+                        parameters[key] = value;
+                        return true;
+                    },
+                    0.0,
+                    maximum));
+            }
+
+            Button applyButton = CreateTextCommandButton("应用", 80);
+            applyButton.Margin = new Thickness(12, 8, 12, 12);
+            applyButton.HorizontalAlignment = HorizontalAlignment.Left;
+
+            applyButton.Click += (_, _) =>
+            {
+                try
+                {
+                    File.WriteAllText(path, root.ToJsonString(SceneJsonWriteOptions), Encoding.UTF8);
+                    EditorHostBridge.SetAssetRootAndReloadAssets(ResolveSceneAssetRoot(path));
+                    RightDockSlot.Content = CreateMaterialAssetViewer(path);
+                }
+                catch (Exception ex)
+                {
+                    _ = ShowSimpleWarningDialogAsync("保存失败", ex.Message);
+                }
+            };
+
+            stack.Children.Add(applyButton);
+
+            return new ScrollViewer
+            {
+                VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+                HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+                Content = stack
+            };
+        }
+
+        private Control CreateSceneAssetViewer(string path)
+        {
+            JsonObject root;
+
+            try
+            {
+                root = JsonNode.Parse(File.ReadAllText(path)) as JsonObject ?? new JsonObject();
+            }
+            catch (Exception ex)
+            {
+                return CreateViewerContent(
+                    "场景属性",
+                    new (string Label, string Value)[]
+                    {
+                        ("路径", path),
+                        ("错误", ex.Message)
+                    });
+            }
+
+            string sceneId = TryReadJsonValue(root, "sceneId", out string parsedSceneId) ? parsedSceneId : string.Empty;
+            int objectCount = root["objects"] is JsonArray objects ? objects.Count : 0;
+
+            StackPanel stack = new StackPanel
+            {
+                Spacing = 4
+            };
+
+            stack.Children.Add(CreateViewerTitle(Path.GetFileName(path)));
+            stack.Children.Add(CreateViewerInfoRow("sceneId", sceneId));
+            stack.Children.Add(CreateViewerInfoRow("物体数", objectCount.ToString(CultureInfo.InvariantCulture)));
+
+            if (root["properties"] is not JsonObject)
+                root["properties"] = new JsonObject();
+
+            JsonObject properties = (JsonObject)root["properties"]!;
+
+            if (properties["fog"] is not JsonObject)
+                properties["fog"] = new JsonObject();
+
+            JsonObject fog = (JsonObject)properties["fog"]!;
+
+            if (properties["ambientLight"] is not JsonObject)
+                properties["ambientLight"] = new JsonObject();
+
+            JsonObject ambientLight = (JsonObject)properties["ambientLight"]!;
+
+            if (properties["skybox"] is not JsonObject)
+                properties["skybox"] = new JsonObject();
+
+            JsonObject skybox = (JsonObject)properties["skybox"]!;
+
+            stack.Children.Add(CreateInspectorSectionHeader("雾"));
+
+            stack.Children.Add(CreateCheckPropertyEditor(
+                "enabled",
+                () => TryReadJsonValue(fog, "enabled", out bool value) && value,
+                value =>
+                {
+                    fog["enabled"] = value;
+                    return true;
+                }));
+
+            stack.Children.Add(CreateComboPropertyEditor(
+                "mode",
+                SceneFogModeOptions,
+                () => TryReadJsonValue(fog, "mode", out string value) ? value : SceneFogModeOptions[0],
+                value =>
+                {
+                    fog["mode"] = value;
+                    return true;
+                }));
+
+            if (fog["color"] is not JsonObject)
+                fog["color"] = new JsonObject();
+
+            JsonObject fogColor = (JsonObject)fog["color"]!;
+
+            stack.Children.Add(CreateColorPropertyEditor(
+                "color",
+                () => new[]
+                {
+                    TryReadJsonValue(fogColor, "r", out int red) ? (double)Math.Clamp(red, 0, 255) : 0.0,
+                    TryReadJsonValue(fogColor, "g", out int green) ? (double)Math.Clamp(green, 0, 255) : 0.0,
+                    TryReadJsonValue(fogColor, "b", out int blue) ? (double)Math.Clamp(blue, 0, 255) : 0.0,
+                    TryReadJsonValue(fogColor, "a", out int alpha) ? (double)Math.Clamp(alpha, 0, 255) : 255.0
+                },
+                components =>
+                {
+                    fogColor["r"] = (int)Math.Round(components[0]);
+                    fogColor["g"] = (int)Math.Round(components[1]);
+                    fogColor["b"] = (int)Math.Round(components[2]);
+                    fogColor["a"] = (int)Math.Round(components[3]);
+                    return true;
+                },
+                255.0,
+                true));
+
+            stack.Children.Add(CreateSliderPropertyEditor(
+                "start",
+                () => TryReadJsonValue(fog, "start", out double value) ? value : 100.0,
+                value =>
+                {
+                    fog["start"] = value;
+                    return true;
+                },
+                0.0,
+                5000.0));
+
+            stack.Children.Add(CreateSliderPropertyEditor(
+                "end",
+                () => TryReadJsonValue(fog, "end", out double value) ? value : 1000.0,
+                value =>
+                {
+                    fog["end"] = value;
+                    return true;
+                },
+                0.0,
+                20000.0));
+
+            stack.Children.Add(CreateCheckPropertyEditor(
+                "edgeTransitionToSkybox",
+                () => TryReadJsonValue(fog, "edgeTransitionToSkybox", out bool value) && value,
+                value =>
+                {
+                    fog["edgeTransitionToSkybox"] = value;
+                    return true;
+                }));
+
+            stack.Children.Add(CreateInspectorSectionHeader("环境光"));
+
+            stack.Children.Add(CreateColorPropertyEditor(
+                "rgba",
+                () => new[]
+                {
+                    TryReadJsonValue(ambientLight, "r", out int red) ? (double)Math.Clamp(red, 0, 255) : 128.0,
+                    TryReadJsonValue(ambientLight, "g", out int green) ? (double)Math.Clamp(green, 0, 255) : 128.0,
+                    TryReadJsonValue(ambientLight, "b", out int blue) ? (double)Math.Clamp(blue, 0, 255) : 128.0,
+                    TryReadJsonValue(ambientLight, "a", out int alpha) ? (double)Math.Clamp(alpha, 0, 255) : 255.0
+                },
+                components =>
+                {
+                    ambientLight["r"] = (int)Math.Round(components[0]);
+                    ambientLight["g"] = (int)Math.Round(components[1]);
+                    ambientLight["b"] = (int)Math.Round(components[2]);
+                    ambientLight["a"] = (int)Math.Round(components[3]);
+                    return true;
+                },
+                255.0,
+                true));
+
+            stack.Children.Add(CreateSliderPropertyEditor(
+                "intensity",
+                () => TryReadJsonValue(ambientLight, "intensity", out double value) ? value : 1.0,
+                value =>
+                {
+                    ambientLight["intensity"] = value;
+                    return true;
+                },
+                0.0,
+                10.0));
+
+            stack.Children.Add(CreateInspectorSectionHeader("天空盒"));
+
+            stack.Children.Add(CreateCheckPropertyEditor(
+                "enabled",
+                () => TryReadJsonValue(skybox, "enabled", out bool value) && value,
+                value =>
+                {
+                    skybox["enabled"] = value;
+                    return true;
+                }));
+
+            List<string> shaderOptions = CollectAssetKeys("*.vert", true);
+
+            stack.Children.Add(CreateComboPropertyEditor(
+                "shaderName",
+                shaderOptions,
+                () => TryReadJsonValue(skybox, "shaderName", out string value) ? value : string.Empty,
+                value =>
+                {
+                    skybox["shaderName"] = value;
+                    return true;
+                }));
+
+            Grid buttons = new Grid
+            {
+                ColumnDefinitions = new ColumnDefinitions("Auto,8,Auto"),
+                Margin = new Thickness(12, 8, 12, 12),
+                HorizontalAlignment = HorizontalAlignment.Left
+            };
+
+            Button openButton = CreateTextCommandButton("打开", 80);
+            Button applyButton = CreateTextCommandButton("应用", 80);
+
+            Grid.SetColumn(openButton, 0);
+            Grid.SetColumn(applyButton, 2);
+
+            openButton.Click += (_, _) => OnResourceItemDoubleTapped(path, false);
+
+            applyButton.Click += (_, _) =>
+            {
+                try
+                {
+                    File.WriteAllText(path, root.ToJsonString(SceneJsonWriteOptions), Encoding.UTF8);
+
+                    string? currentSceneOriginalPath = _currentSceneOriginalPath;
+
+                    if (!string.IsNullOrWhiteSpace(currentSceneOriginalPath) && PathsEqual(currentSceneOriginalPath, path))
+                        TryOpenSceneJson(path);
+                }
+                catch (Exception ex)
+                {
+                    _ = ShowSimpleWarningDialogAsync("保存失败", ex.Message);
+                }
+            };
+
+            buttons.Children.Add(openButton);
+            buttons.Children.Add(applyButton);
+
+            stack.Children.Add(buttons);
+
+            return new ScrollViewer
+            {
+                VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+                HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+                Content = stack
+            };
+        }
+
+        private Control CreateAnimationAssetViewer(string path, string assetType)
+        {
+            StackPanel stack = new StackPanel
+            {
+                Spacing = 4
+            };
+
+            stack.Children.Add(CreateViewerTitle(Path.GetFileName(path)));
+
+            Button openButton = CreateTextCommandButton("打开", 80);
+            openButton.Margin = new Thickness(12, 8, 12, 12);
+            openButton.HorizontalAlignment = HorizontalAlignment.Left;
+            openButton.Click += (_, _) => OnResourceItemDoubleTapped(path, false);
+
+            if (string.Equals(assetType, "AnimationClip", StringComparison.OrdinalIgnoreCase))
+            {
+                AnimationClipData? clip = EditorHostBridge.LoadAnimationClip(path);
+
+                if (clip == null)
+                {
+                    stack.Children.Add(CreateViewerInfoRow("状态", "无法解析动画剪辑"));
+                    stack.Children.Add(openButton);
+
+                    return new ScrollViewer
+                    {
+                        VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+                        HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+                        Content = stack
+                    };
+                }
+
+                stack.Children.Add(CreateInspectorSectionHeader("动画剪辑"));
+
+                stack.Children.Add(CreateSliderPropertyEditor(
+                    "frameRate",
+                    () => clip.FrameRate,
+                    value =>
+                    {
+                        if (Math.Abs(clip.FrameRate - (float)value) < 1e-9f)
+                            return true;
+
+                        clip.FrameRate = (float)value;
+                        return true;
+                    },
+                    1.0,
+                    120.0));
+
+                stack.Children.Add(CreateNumberPropertyEditor(
+                    "duration",
+                    () => clip.Duration,
+                    value =>
+                    {
+                        if (value < 0.0)
+                            return false;
+
+                        clip.Duration = value;
+                        return true;
+                    }));
+
+                stack.Children.Add(CreateCheckPropertyEditor(
+                    "loop",
+                    () => clip.Loop,
+                    value =>
+                    {
+                        clip.Loop = value;
+                        return true;
+                    }));
+
+                stack.Children.Add(CreateComboPropertyEditor(
+                    "playMode",
+                    AnimationClipPlayModeOptions,
+                    () => string.IsNullOrWhiteSpace(clip.PlayMode) ? AnimationClipPlayModeOptions[0] : clip.PlayMode,
+                    value =>
+                    {
+                        clip.PlayMode = value;
+                        return true;
+                    }));
+
+                stack.Children.Add(CreateViewerInfoRow("通道数", clip.Channels.Count.ToString(CultureInfo.InvariantCulture)));
+
+                Button applyButton = CreateTextCommandButton("应用", 80);
+                applyButton.Margin = new Thickness(12, 8, 12, 4);
+                applyButton.HorizontalAlignment = HorizontalAlignment.Left;
+
+                applyButton.Click += (_, _) =>
+                {
+                    try
+                    {
+                        SaveAnimationClipFile(path, clip);
+                        EditorHostBridge.RegisterAnimationClip(BuildAnimationAssetKey(path), clip);
+                    }
+                    catch (Exception ex)
+                    {
+                        _ = ShowSimpleWarningDialogAsync("保存失败", ex.Message);
+                    }
+                };
+
+                stack.Children.Add(applyButton);
+                stack.Children.Add(openButton);
+
+                return new ScrollViewer
+                {
+                    VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+                    HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+                    Content = stack
+                };
+            }
+
+            AnimatorControllerData? controller = EditorHostBridge.LoadAnimatorController(path);
+
+            if (controller == null)
+            {
+                stack.Children.Add(CreateViewerInfoRow("状态", "无法解析动画器控制器"));
+                stack.Children.Add(openButton);
+
+                return new ScrollViewer
+                {
+                    VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+                    HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+                    Content = stack
+                };
+            }
+
+            StackPanel parameterPanel = new StackPanel
+            {
+                Spacing = InspectorPropertySpacing
+            };
+
+            foreach (AnimatorParameterData parameter in controller.Parameters)
+            {
+                StackPanel parameterRow = new StackPanel
+                {
+                    Orientation = Orientation.Horizontal,
+                    Spacing = 4,
+                    Margin = new Thickness(12, 0, 12, 0)
+                };
+
+                parameterRow.Children.Add(new TextBlock
+                {
+                    Text = string.IsNullOrWhiteSpace(parameter.Name) ? "(未命名)" : parameter.Name,
+                    Foreground = new SolidColorBrush(Color.Parse("#DDDDDD")),
+                    Width = 120,
+                    VerticalAlignment = VerticalAlignment.Center,
+                    TextTrimming = TextTrimming.CharacterEllipsis
+                });
+
+                parameterRow.Children.Add(new TextBlock
+                {
+                    Text = parameter.Type,
+                    Foreground = new SolidColorBrush(Color.Parse("#9A9A9A")),
+                    Width = 64,
+                    VerticalAlignment = VerticalAlignment.Center
+                });
+
+                parameterRow.Children.Add(new TextBlock
+                {
+                    Text = parameter.Default.ToString(CultureInfo.InvariantCulture),
+                    Foreground = new SolidColorBrush(Color.Parse("#9A9A9A")),
+                    VerticalAlignment = VerticalAlignment.Center
+                });
+
+                parameterPanel.Children.Add(parameterRow);
+            }
+
+            stack.Children.Add(CreateInspectorSectionHeader("动画器"));
+
+            int stateCount = controller.Layers.Sum(layer => layer.States.Count);
+            int transitionCount = controller.Layers.Sum(layer => layer.Transitions.Count + layer.AnyStateTransitions.Count);
+
+            stack.Children.Add(CreateViewerInfoRow("名称", controller.Name ?? string.Empty));
+            stack.Children.Add(CreateViewerInfoRow("层数", controller.Layers.Count.ToString(CultureInfo.InvariantCulture)));
+            stack.Children.Add(CreateViewerInfoRow("状态数", stateCount.ToString(CultureInfo.InvariantCulture)));
+            stack.Children.Add(CreateViewerInfoRow("过渡数", transitionCount.ToString(CultureInfo.InvariantCulture)));
+            stack.Children.Add(CreateViewerInfoRow("参数数", controller.Parameters.Count.ToString(CultureInfo.InvariantCulture)));
+
+            stack.Children.Add(CreateInspectorSectionHeader("参数"));
+            stack.Children.Add(parameterPanel);
+
+            stack.Children.Add(openButton);
+
+            return new ScrollViewer
+            {
+                VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+                HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+                Content = stack
+            };
+        }
+
+        private Control CreateComboPropertyEditor(
+            string label,
+            IEnumerable<string> options,
+            Func<string> getter,
+            Func<string, bool> apply)
+        {
+            List<string> optionList = options.ToList();
+            string currentValue = getter();
+
+            ComboBox comboBox = new ComboBox
+            {
+                ItemsSource = optionList,
+                SelectedItem = optionList.Contains(currentValue) ? currentValue : optionList.FirstOrDefault(),
+                Height = 30,
+                MinHeight = 30,
+                HorizontalAlignment = HorizontalAlignment.Stretch,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+
+            bool isUpdating = false;
+
+            comboBox.SelectionChanged += (_, _) =>
+            {
+                if (isUpdating)
+                    return;
+
+                string selected = comboBox.SelectedItem as string ?? string.Empty;
+
+                if (apply(selected))
+                    return;
+
+                isUpdating = true;
+                string restored = getter();
+                comboBox.SelectedItem = optionList.Contains(restored) ? restored : optionList.FirstOrDefault();
+                isUpdating = false;
+            };
+
+            return CreatePropertyRow(label, comboBox);
+        }
+
+        private Control CreateSliderPropertyEditor(
+            string label,
+            Func<double> getter,
+            Func<double, bool> apply,
+            double minimum,
+            double maximum)
+        {
+            double current = Math.Clamp(getter(), minimum, maximum);
+
+            Slider slider = new Slider
+            {
+                Minimum = minimum,
+                Maximum = maximum,
+                Value = current,
+                MinHeight = 32,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+
+            TextBox valueBox = CreateInspectorTextBox(FormatDouble(current));
+            valueBox.Width = 84;
+
+            bool isUpdating = false;
+
+            slider.PropertyChanged += (_, e) =>
+            {
+                if (e.Property != Slider.ValueProperty)
+                    return;
+
+                if (isUpdating)
+                    return;
+
+                double value = Math.Clamp(slider.Value, minimum, maximum);
+
+                if (!apply(value))
+                    return;
+
+                isUpdating = true;
+                valueBox.Text = FormatDouble(value);
+                isUpdating = false;
+            };
+
+            void CommitText()
+            {
+                if (isUpdating)
+                    return;
+
+                if (!TryParseEditorDouble(valueBox.Text, out double parsed))
+                {
+                    isUpdating = true;
+                    valueBox.Text = FormatDouble(slider.Value);
+                    isUpdating = false;
+                    return;
+                }
+
+                double clamped = Math.Clamp(parsed, minimum, maximum);
+
+                isUpdating = true;
+                slider.Value = clamped;
+                valueBox.Text = FormatDouble(clamped);
+                isUpdating = false;
+
+                apply(clamped);
+            }
+
+            valueBox.LostFocus += (_, _) => CommitText();
+            valueBox.KeyDown += (_, e) =>
+            {
+                if (e.Key == Key.Enter)
+                    CommitText();
+            };
+
+            Grid grid = new Grid
+            {
+                ColumnDefinitions = new ColumnDefinitions("*,6,Auto"),
+                VerticalAlignment = VerticalAlignment.Center
+            };
+
+            Grid.SetColumn(slider, 0);
+            Grid.SetColumn(valueBox, 2);
+
+            grid.Children.Add(slider);
+            grid.Children.Add(valueBox);
+
+            return CreatePropertyRow(label, grid);
+        }
+
+        private Control CreateNumberPropertyEditor(
+            string label,
+            Func<double> getter,
+            Func<double, bool> apply)
+        {
+            TextBox textBox = CreateInspectorTextBox(FormatDouble(getter()));
+
+            void ResetText()
+            {
+                _isUpdatingSceneInspector = true;
+                textBox.Text = FormatDouble(getter());
+                _isUpdatingSceneInspector = false;
+            }
+
+            void Commit()
+            {
+                if (_isUpdatingSceneInspector)
+                    return;
+
+                if (!TryParseEditorDouble(textBox.Text, out double value))
+                {
+                    ResetText();
+                    return;
+                }
+
+                if (!apply(value))
+                {
+                    ResetText();
+                    return;
+                }
+
+                ResetText();
+            }
+
+            textBox.LostFocus += (_, _) => Commit();
+            textBox.KeyDown += (_, e) =>
+            {
+                if (e.Key == Key.Enter)
+                    Commit();
+            };
+
+            return CreatePropertyRow(label, textBox);
+        }
+
+        private Control CreateCheckPropertyEditor(
+            string label,
+            Func<bool> getter,
+            Func<bool, bool> apply)
+        {
+            CheckBox checkBox = new CheckBox
+            {
+                IsChecked = getter(),
+                Foreground = Brushes.White,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+
+            bool isUpdating = false;
+
+            checkBox.IsCheckedChanged += (_, _) =>
+            {
+                if (isUpdating)
+                    return;
+
+                bool newValue = checkBox.IsChecked == true;
+
+                if (apply(newValue))
+                    return;
+
+                isUpdating = true;
+                checkBox.IsChecked = getter();
+                isUpdating = false;
+            };
+
+            return CreatePropertyRow(label, checkBox);
+        }
+
+        private Control CreateColorPropertyEditor(
+            string label,
+            Func<double[]> getter,
+            Func<double[], bool> apply,
+            double maximum,
+            bool hasAlpha)
+        {
+            int componentCount = hasAlpha ? 4 : 3;
+            bool normalized = maximum <= 1.0;
+
+            TextBox hexBox = CreateInspectorTextBox(string.Empty);
+            hexBox.Width = 116;
+            hexBox.TextAlignment = TextAlignment.Center;
+
+            Border previewSwatch = new Border
+            {
+                Width = 28,
+                Height = InspectorTextBoxHeight,
+                MinHeight = InspectorTextBoxHeight,
+                CornerRadius = new CornerRadius(3),
+                BorderBrush = new SolidColorBrush(Color.Parse("#4A4A4A")),
+                BorderThickness = new Thickness(1),
+                HorizontalAlignment = HorizontalAlignment.Left,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+
+            bool isUpdatingHex = false;
+
+            void ToBytes(double[] components, out byte redByte, out byte greenByte, out byte blueByte, out byte alphaByte)
+            {
+                byte ToByte(double value)
+                {
+                    double scaled = normalized ? value * 255.0 : value;
+                    return (byte)Math.Clamp(Math.Round(scaled), 0.0, 255.0);
+                }
+
+                redByte = ToByte(components.Length > 0 ? components[0] : 0.0);
+                greenByte = ToByte(components.Length > 1 ? components[1] : 0.0);
+                blueByte = ToByte(components.Length > 2 ? components[2] : 0.0);
+                alphaByte = ToByte(hasAlpha && components.Length > 3 ? components[3] : maximum);
+            }
+
+            void RefreshPreview()
+            {
+                double[] components = getter();
+
+                ToBytes(components, out byte redByte, out byte greenByte, out byte blueByte, out byte alphaByte);
+
+                previewSwatch.Background = new SolidColorBrush(
+                    Color.FromArgb(alphaByte, redByte, greenByte, blueByte));
+
+                isUpdatingHex = true;
+                hexBox.Text = hasAlpha
+                    ? $"#{alphaByte:X2}{redByte:X2}{greenByte:X2}{blueByte:X2}"
+                    : $"#{redByte:X2}{greenByte:X2}{blueByte:X2}";
+                isUpdatingHex = false;
+            }
+
+            void CommitHex()
+            {
+                if (isUpdatingHex)
+                    return;
+
+                string raw = (hexBox.Text ?? string.Empty).Trim().TrimStart('#');
+
+                bool parsed = hasAlpha
+                    ? raw.Length == 8
+                    : raw.Length == 6;
+
+                if (parsed)
+                {
+                    foreach (char character in raw)
+                    {
+                        if (!Uri.IsHexDigit(character))
+                        {
+                            parsed = false;
+                            break;
+                        }
+                    }
+                }
+
+                if (!parsed)
+                {
+                    RefreshPreview();
+                    return;
+                }
+
+                byte alphaByte = 255;
+                int offset = 0;
+
+                if (hasAlpha)
+                {
+                    alphaByte = byte.Parse(raw[..2], NumberStyles.HexNumber, CultureInfo.InvariantCulture);
+                    offset = 2;
+                }
+
+                byte redByte = byte.Parse(raw.Substring(offset, 2), NumberStyles.HexNumber, CultureInfo.InvariantCulture);
+                byte greenByte = byte.Parse(raw.Substring(offset + 2, 2), NumberStyles.HexNumber, CultureInfo.InvariantCulture);
+                byte blueByte = byte.Parse(raw.Substring(offset + 4, 2), NumberStyles.HexNumber, CultureInfo.InvariantCulture);
+
+                double ToComponent(byte value)
+                {
+                    return normalized ? value / 255.0 : value;
+                }
+
+                double[] components = hasAlpha
+                    ? new[] { ToComponent(redByte), ToComponent(greenByte), ToComponent(blueByte), ToComponent(alphaByte) }
+                    : new[] { ToComponent(redByte), ToComponent(greenByte), ToComponent(blueByte) };
+
+                if (!apply(components))
+                {
+                    RefreshPreview();
+                    return;
+                }
+
+                RefreshPreview();
+            }
+
+            hexBox.LostFocus += (_, _) => CommitHex();
+            hexBox.KeyDown += (_, e) =>
+            {
+                if (e.Key == Key.Enter)
+                    CommitHex();
+            };
+
+            Grid header = new Grid
+            {
+                ColumnDefinitions = new ColumnDefinitions("*,6,Auto,6,Auto"),
+                VerticalAlignment = VerticalAlignment.Center
+            };
+
+            TextBlock labelText = new TextBlock
+            {
+                Text = label,
+                Foreground = new SolidColorBrush(Color.Parse("#CFCFCF")),
+                VerticalAlignment = VerticalAlignment.Center
+            };
+
+            Grid.SetColumn(labelText, 0);
+            Grid.SetColumn(hexBox, 2);
+            Grid.SetColumn(previewSwatch, 4);
+
+            header.Children.Add(labelText);
+            header.Children.Add(hexBox);
+            header.Children.Add(previewSwatch);
+
+            StackPanel panel = new StackPanel
+            {
+                Orientation = Orientation.Vertical,
+                Spacing = InspectorPropertySpacing
+            };
+
+            panel.Children.Add(new Border
+            {
+                Margin = new Thickness(12, 0, 12, 0),
+                Child = header
+            });
+
+            string[] channelLabels = hasAlpha
+                ? new[] { "r", "g", "b", "a" }
+                : new[] { "r", "g", "b" };
+
+            for (int index = 0; index < componentCount; index++)
+            {
+                int component = index;
+
+                panel.Children.Add(CreateSliderPropertyEditor(
+                    channelLabels[component],
+                    () => getter()[component],
+                    value =>
+                    {
+                        double[] components = getter();
+                        components[component] = value;
+
+                        if (!apply(components))
+                            return false;
+
+                        RefreshPreview();
+                        return true;
+                    },
+                    0.0,
+                    maximum));
+            }
+
+            RefreshPreview();
+            return panel;
+        }
+
+        private Control CreateSceneObjectDataSection(SceneObject obj)
+        {
+            if (string.Equals(obj.Type, "Camera", StringComparison.Ordinal))
+                return CreateCameraDataSection(obj);
+
+            if (string.Equals(obj.Type, "Light", StringComparison.Ordinal))
+                return CreateLightDataSection(obj);
+
+            if (string.Equals(obj.Type, "AudioListener", StringComparison.Ordinal))
+                return CreateAudioListenerDataSection(obj);
+
+            if (string.Equals(obj.Type, "AudioSource", StringComparison.Ordinal))
+                return CreateAudioSourceDataSection(obj);
+
+            if (string.Equals(obj.Type, "Avatar", StringComparison.Ordinal))
+                return CreateAvatarDataSection(obj);
+
+            return CreateCollapsibleDataEditor("Data", () => obj.Data ?? "", value =>
+            {
+                string? newValue = string.IsNullOrWhiteSpace(value) ? null : value;
+                string? oldValue = obj.Data;
+
+                if (string.Equals(oldValue ?? string.Empty, newValue ?? string.Empty, StringComparison.Ordinal))
+                    return true;
+
+                BeginSceneParameterChange();
+                #pragma warning disable CS8601
+                obj.Data = newValue;
+                #pragma warning restore CS8601
+                return PersistSceneObjectChanges(obj, false);
+            });
+        }
+
+        private Control CreateCameraDataSection(SceneObject obj)
+        {
+            JsonObject data = ParseSceneObjectData(obj.Data);
+
+            StackPanel panel = new StackPanel
+            {
+                Spacing = InspectorPropertySpacing
+            };
+
+            bool Commit()
+            {
+                return ApplySceneObjectData(obj, data);
+            }
+
+            JsonObject? ReadSubObject(string key)
+            {
+                return data[key] as JsonObject;
+            }
+
+            JsonObject GetOrCreateSubObject(string key)
+            {
+                if (data[key] is JsonObject existing)
+                    return existing;
+
+                JsonObject created = new JsonObject();
+                data[key] = created;
+                return created;
+            }
+
+            JsonObject GetOrCreateChildObject(JsonObject parent, string key)
+            {
+                if (parent[key] is JsonObject existing)
+                    return existing;
+
+                JsonObject created = new JsonObject();
+                parent[key] = created;
+                return created;
+            }
+
+            panel.Children.Add(CreateInspectorSectionHeader("相机"));
+
+            panel.Children.Add(CreateComboPropertyEditor(
+                "renderMode",
+                CameraRenderModeOptions,
+                () => TryReadJsonValue(data, "renderMode", out int value) && value == 1
+                    ? CameraRenderModeOptions[1]
+                    : CameraRenderModeOptions[0],
+                value =>
+                {
+                    data["renderMode"] = string.Equals(value, CameraRenderModeOptions[1], StringComparison.Ordinal) ? 1 : 0;
+                    return Commit();
+                }));
+
+            panel.Children.Add(CreateComboPropertyEditor(
+                "projectionType",
+                CameraProjectionTypeOptions,
+                () => TryReadJsonValue(data, "projectionType", out int value) && value == 1
+                    ? CameraProjectionTypeOptions[1]
+                    : CameraProjectionTypeOptions[0],
+                value =>
+                {
+                    data["projectionType"] = string.Equals(value, CameraProjectionTypeOptions[1], StringComparison.Ordinal) ? 1 : 0;
+                    return Commit();
+                }));
+
+            panel.Children.Add(CreateSliderPropertyEditor(
+                "fovOrSize",
+                () => TryReadJsonValue(data, "fovOrSize", out double value) ? value : 75.0,
+                value =>
+                {
+                    data["fovOrSize"] = value;
+                    return Commit();
+                },
+                1.0,
+                179.0));
+
+            panel.Children.Add(CreateNumberPropertyEditor(
+                "renderPlaneOffset.x",
+                () =>
+                {
+                    JsonObject? offset = ReadSubObject("renderPlaneOffset");
+                    return offset != null && TryReadJsonValue(offset, "x", out double value) ? value : 0.0;
+                },
+                value =>
+                {
+                    GetOrCreateSubObject("renderPlaneOffset")["x"] = value;
+                    return Commit();
+                }));
+
+            panel.Children.Add(CreateNumberPropertyEditor(
+                "renderPlaneOffset.y",
+                () =>
+                {
+                    JsonObject? offset = ReadSubObject("renderPlaneOffset");
+                    return offset != null && TryReadJsonValue(offset, "y", out double value) ? value : 0.0;
+                },
+                value =>
+                {
+                    GetOrCreateSubObject("renderPlaneOffset")["y"] = value;
+                    return Commit();
+                }));
+
+            panel.Children.Add(CreateSliderPropertyEditor(
+                "nearClip",
+                () => TryReadJsonValue(data, "nearClip", out double value) ? value : 0.01,
+                value =>
+                {
+                    data["nearClip"] = value;
+                    return Commit();
+                },
+                0.01,
+                10.0));
+
+            panel.Children.Add(CreateSliderPropertyEditor(
+                "farClip",
+                () => TryReadJsonValue(data, "farClip", out double value) ? value : 1000.0,
+                value =>
+                {
+                    data["farClip"] = value;
+                    return Commit();
+                },
+                10.0,
+                5000.0));
+
+            panel.Children.Add(CreateCheckPropertyEditor(
+                "isMainCamera",
+                () => TryReadJsonValue(data, "isMainCamera", out bool value) && value,
+                value =>
+                {
+                    data["isMainCamera"] = value;
+                    return Commit();
+                }));
+
+            panel.Children.Add(CreateInspectorSectionHeader("后期"));
+
+            panel.Children.Add(CreateCheckPropertyEditor(
+                "postProcess.enabled",
+                () =>
+                {
+                    JsonObject? postProcess = ReadSubObject("postProcess");
+                    return postProcess != null && TryReadJsonValue(postProcess, "enabled", out bool value) && value;
+                },
+                value =>
+                {
+                    GetOrCreateSubObject("postProcess")["enabled"] = value;
+                    return Commit();
+                }));
+
+            foreach (string key in new[] { "brightness", "contrast", "saturation" })
+            {
+                string capturedKey = key;
+
+                panel.Children.Add(CreateCheckPropertyEditor(
+                    capturedKey + ".enabled",
+                    () =>
+                    {
+                        JsonObject? settings = ReadSubObject("postProcess")?[capturedKey] as JsonObject;
+                        return settings != null && TryReadJsonValue(settings, "enabled", out bool value) && value;
+                    },
+                    value =>
+                    {
+                        JsonObject parent = GetOrCreateSubObject("postProcess");
+                        GetOrCreateChildObject(parent, capturedKey)["enabled"] = value;
+                        return Commit();
+                    }));
+
+                panel.Children.Add(CreateSliderPropertyEditor(
+                    capturedKey + ".value",
+                    () =>
+                    {
+                        JsonObject? settings = ReadSubObject("postProcess")?[capturedKey] as JsonObject;
+                        return settings != null && TryReadJsonValue(settings, "value", out double value) ? value : 1.0;
+                    },
+                    value =>
+                    {
+                        JsonObject parent = GetOrCreateSubObject("postProcess");
+                        GetOrCreateChildObject(parent, capturedKey)["value"] = value;
+                        return Commit();
+                    },
+                    0.0,
+                    3.0));
+            }
+
+            panel.Children.Add(CreateCheckPropertyEditor(
+                "hue.enabled",
+                () =>
+                {
+                    JsonObject? settings = ReadSubObject("postProcess")?["hue"] as JsonObject;
+                    return settings != null && TryReadJsonValue(settings, "enabled", out bool value) && value;
+                },
+                value =>
+                {
+                    JsonObject parent = GetOrCreateSubObject("postProcess");
+                    GetOrCreateChildObject(parent, "hue")["enabled"] = value;
+                    return Commit();
+                }));
+
+            panel.Children.Add(CreateSliderPropertyEditor(
+                "hue.degrees",
+                () =>
+                {
+                    JsonObject? settings = ReadSubObject("postProcess")?["hue"] as JsonObject;
+                    return settings != null && TryReadJsonValue(settings, "degrees", out double value) ? value : 0.0;
+                },
+                value =>
+                {
+                    JsonObject parent = GetOrCreateSubObject("postProcess");
+                    GetOrCreateChildObject(parent, "hue")["degrees"] = value;
+                    return Commit();
+                },
+                0.0,
+                360.0));
+
+            panel.Children.Add(CreateCheckPropertyEditor(
+                "temperature.enabled",
+                () =>
+                {
+                    JsonObject? settings = ReadSubObject("postProcess")?["temperature"] as JsonObject;
+                    return settings != null && TryReadJsonValue(settings, "enabled", out bool value) && value;
+                },
+                value =>
+                {
+                    JsonObject parent = GetOrCreateSubObject("postProcess");
+                    GetOrCreateChildObject(parent, "temperature")["enabled"] = value;
+                    return Commit();
+                }));
+
+            panel.Children.Add(CreateSliderPropertyEditor(
+                "temperature.value",
+                () =>
+                {
+                    JsonObject? settings = ReadSubObject("postProcess")?["temperature"] as JsonObject;
+                    return settings != null && TryReadJsonValue(settings, "value", out double value) ? value : 0.0;
+                },
+                value =>
+                {
+                    JsonObject parent = GetOrCreateSubObject("postProcess");
+                    GetOrCreateChildObject(parent, "temperature")["value"] = value;
+                    return Commit();
+                },
+                -100.0,
+                100.0));
+
+            panel.Children.Add(CreateCheckPropertyEditor(
+                "bloom.enabled",
+                () =>
+                {
+                    JsonObject? settings = ReadSubObject("postProcess")?["bloom"] as JsonObject;
+                    return settings != null && TryReadJsonValue(settings, "enabled", out bool value) && value;
+                },
+                value =>
+                {
+                    JsonObject parent = GetOrCreateSubObject("postProcess");
+                    GetOrCreateChildObject(parent, "bloom")["enabled"] = value;
+                    return Commit();
+                }));
+
+            panel.Children.Add(CreateSliderPropertyEditor(
+                "bloom.threshold",
+                () =>
+                {
+                    JsonObject? settings = ReadSubObject("postProcess")?["bloom"] as JsonObject;
+                    return settings != null && TryReadJsonValue(settings, "threshold", out double value) ? value : 1.0;
+                },
+                value =>
+                {
+                    JsonObject parent = GetOrCreateSubObject("postProcess");
+                    GetOrCreateChildObject(parent, "bloom")["threshold"] = value;
+                    return Commit();
+                },
+                0.0,
+                10.0));
+
+            panel.Children.Add(CreateSliderPropertyEditor(
+                "bloom.softKnee",
+                () =>
+                {
+                    JsonObject? settings = ReadSubObject("postProcess")?["bloom"] as JsonObject;
+                    return settings != null && TryReadJsonValue(settings, "softKnee", out double value) ? value : 0.5;
+                },
+                value =>
+                {
+                    JsonObject parent = GetOrCreateSubObject("postProcess");
+                    GetOrCreateChildObject(parent, "bloom")["softKnee"] = value;
+                    return Commit();
+                },
+                0.0,
+                1.0));
+
+            panel.Children.Add(CreateSliderPropertyEditor(
+                "bloom.intensity",
+                () =>
+                {
+                    JsonObject? settings = ReadSubObject("postProcess")?["bloom"] as JsonObject;
+                    return settings != null && TryReadJsonValue(settings, "intensity", out double value) ? value : 0.5;
+                },
+                value =>
+                {
+                    JsonObject parent = GetOrCreateSubObject("postProcess");
+                    GetOrCreateChildObject(parent, "bloom")["intensity"] = value;
+                    return Commit();
+                },
+                0.0,
+                10.0));
+
+            panel.Children.Add(CreateSliderPropertyEditor(
+                "bloom.iterations",
+                () =>
+                {
+                    JsonObject? settings = ReadSubObject("postProcess")?["bloom"] as JsonObject;
+                    return settings != null && TryReadJsonValue(settings, "iterations", out int value) ? value : 16;
+                },
+                value =>
+                {
+                    JsonObject parent = GetOrCreateSubObject("postProcess");
+                    GetOrCreateChildObject(parent, "bloom")["iterations"] = (int)Math.Round(value);
+                    return Commit();
+                },
+                1.0,
+                32.0));
+
+            panel.Children.Add(CreateSliderPropertyEditor(
+                "bloom.downsample",
+                () =>
+                {
+                    JsonObject? settings = ReadSubObject("postProcess")?["bloom"] as JsonObject;
+                    return settings != null && TryReadJsonValue(settings, "downsample", out int value) ? value : 2;
+                },
+                value =>
+                {
+                    JsonObject parent = GetOrCreateSubObject("postProcess");
+                    GetOrCreateChildObject(parent, "bloom")["downsample"] = (int)Math.Round(value);
+                    return Commit();
+                },
+                1.0,
+                8.0));
+
+            panel.Children.Add(CreateSliderPropertyEditor(
+                "bloom.range",
+                () =>
+                {
+                    JsonObject? settings = ReadSubObject("postProcess")?["bloom"] as JsonObject;
+                    return settings != null && TryReadJsonValue(settings, "range", out double value) ? value : 100.0;
+                },
+                value =>
+                {
+                    JsonObject parent = GetOrCreateSubObject("postProcess");
+                    GetOrCreateChildObject(parent, "bloom")["range"] = value;
+                    return Commit();
+                },
+                0.0,
+                500.0));
+
+            panel.Children.Add(CreateCheckPropertyEditor(
+                "smaa.enabled",
+                () =>
+                {
+                    JsonObject? settings = ReadSubObject("postProcess")?["smaa"] as JsonObject;
+                    return settings != null && TryReadJsonValue(settings, "enabled", out bool value) && value;
+                },
+                value =>
+                {
+                    JsonObject parent = GetOrCreateSubObject("postProcess");
+                    GetOrCreateChildObject(parent, "smaa")["enabled"] = value;
+                    return Commit();
+                }));
+
+            return panel;
+        }
+
+        private Control CreateLightDataSection(SceneObject obj)
+        {
+            JsonObject data = ParseSceneObjectData(obj.Data);
+
+            StackPanel panel = new StackPanel
+            {
+                Spacing = InspectorPropertySpacing
+            };
+
+            bool Commit()
+            {
+                return ApplySceneObjectData(obj, data);
+            }
+
+            panel.Children.Add(CreateInspectorSectionHeader("灯光"));
+
+            panel.Children.Add(CreateComboPropertyEditor(
+                "lightMode",
+                LightModeOptions,
+                () => TryReadJsonValue(data, "lightMode", out int value) && value == 3
+                    ? LightModeOptions[1]
+                    : LightModeOptions[0],
+                value =>
+                {
+                    data["lightMode"] = string.Equals(value, LightModeOptions[1], StringComparison.Ordinal) ? 3 : 0;
+                    return Commit();
+                }));
+
+            panel.Children.Add(CreateColorPropertyEditor(
+                "color",
+                () => new[]
+                {
+                    ReadJsonArrayComponent(data, "color", 0, 1.0),
+                    ReadJsonArrayComponent(data, "color", 1, 1.0),
+                    ReadJsonArrayComponent(data, "color", 2, 1.0)
+                },
+                components =>
+                {
+                    for (int index = 0; index < 3; index++)
+                        WriteJsonArrayComponent(data, "color", index, 3, components[index]);
+
+                    return Commit();
+                },
+                1.0,
+                false));
+
+            panel.Children.Add(CreateSliderPropertyEditor(
+                "intensity",
+                () => TryReadJsonValue(data, "intensity", out double value) ? value : 1.0,
+                value =>
+                {
+                    data["intensity"] = value;
+                    return Commit();
+                },
+                0.0,
+                10.0));
+
+            panel.Children.Add(CreateSliderPropertyEditor(
+                "range",
+                () => TryReadJsonValue(data, "range", out double value) ? value : 1.0,
+                value =>
+                {
+                    data["range"] = value;
+                    return Commit();
+                },
+                0.1,
+                100.0));
+
+            panel.Children.Add(CreateSliderPropertyEditor(
+                "attenuationCurve",
+                () => TryReadJsonValue(data, "attenuationCurve", out double value) ? value : 0.5,
+                value =>
+                {
+                    data["attenuationCurve"] = value;
+                    return Commit();
+                },
+                0.0,
+                1.0));
+
+            panel.Children.Add(CreateCheckPropertyEditor(
+                "castShadow",
+                () => TryReadJsonValue(data, "castShadow", out bool value) && value,
+                value =>
+                {
+                    data["castShadow"] = value;
+                    return Commit();
+                }));
+
+            return panel;
+        }
+
+        private Control CreateAudioListenerDataSection(SceneObject obj)
+        {
+            JsonObject data = ParseSceneObjectData(obj.Data);
+
+            StackPanel panel = new StackPanel
+            {
+                Spacing = InspectorPropertySpacing
+            };
+
+            bool Commit()
+            {
+                return ApplySceneObjectData(obj, data);
+            }
+
+            List<string> sourceOptions = new List<string> { string.Empty };
+
+            if (_currentTreeScene != null)
+            {
+                foreach (SceneObject candidate in _currentTreeScene.Objects)
+                {
+                    if (!string.Equals(candidate.Type, "AudioSource", StringComparison.Ordinal))
+                        continue;
+
+                    if (!string.IsNullOrWhiteSpace(candidate.Id) && !sourceOptions.Contains(candidate.Id))
+                        sourceOptions.Add(candidate.Id);
+                }
+            }
+
+            panel.Children.Add(CreateInspectorSectionHeader("音频监听"));
+
+            panel.Children.Add(CreateComboPropertyEditor(
+                "outputMode",
+                AudioListenerOutputModeOptions,
+                () => TryReadJsonValue(data, "outputMode", out string value) ? value : AudioListenerOutputModeOptions[0],
+                value =>
+                {
+                    data["outputMode"] = value;
+                    return Commit();
+                }));
+
+            panel.Children.Add(CreateComboPropertyEditor(
+                "targetSourceId",
+                sourceOptions,
+                () => TryReadJsonValue(data, "targetSourceId", out string value) ? value : string.Empty,
+                value =>
+                {
+                    data["targetSourceId"] = string.IsNullOrWhiteSpace(value) ? null : value;
+                    return Commit();
+                }));
+
+            panel.Children.Add(CreateCheckPropertyEditor(
+                "mute",
+                () => TryReadJsonValue(data, "mute", out bool value) && value,
+                value =>
+                {
+                    data["mute"] = value;
+                    return Commit();
+                }));
+
+            return panel;
+        }
+
+        private Control CreateAudioSourceDataSection(SceneObject obj)
+        {
+            JsonObject data = ParseSceneObjectData(obj.Data);
+
+            StackPanel panel = new StackPanel
+            {
+                Spacing = InspectorPropertySpacing
+            };
+
+            bool Commit()
+            {
+                return ApplySceneObjectData(obj, data);
+            }
+
+            List<string> clipOptions = CollectAssetKeys("*.ogg", false);
+            clipOptions.AddRange(CollectAssetKeys("*.wav", false));
+            clipOptions.AddRange(CollectAssetKeys("*.mp3", false));
+            clipOptions.Sort(StringComparer.OrdinalIgnoreCase);
+
+            panel.Children.Add(CreateInspectorSectionHeader("音频源"));
+
+            panel.Children.Add(CreateComboPropertyEditor(
+                "clipId",
+                clipOptions,
+                () => TryReadJsonValue(data, "clipId", out string value) ? value : string.Empty,
+                value =>
+                {
+                    data["clipId"] = value;
+                    return Commit();
+                }));
+
+            panel.Children.Add(CreateSliderPropertyEditor(
+                "volume",
+                () => TryReadJsonValue(data, "volume", out double value) ? value : 1.0,
+                value =>
+                {
+                    data["volume"] = value;
+                    return Commit();
+                },
+                0.0,
+                2.0));
+
+            panel.Children.Add(CreateSliderPropertyEditor(
+                "minDistance",
+                () => TryReadJsonValue(data, "minDistance", out double value) ? value : 1.0,
+                value =>
+                {
+                    data["minDistance"] = value;
+                    return Commit();
+                },
+                0.01,
+                100.0));
+
+            panel.Children.Add(CreateSliderPropertyEditor(
+                "maxDistance",
+                () => TryReadJsonValue(data, "maxDistance", out double value) ? value : 100.0,
+                value =>
+                {
+                    data["maxDistance"] = value;
+                    return Commit();
+                },
+                0.01,
+                1000.0));
+
+            panel.Children.Add(CreateSliderPropertyEditor(
+                "rolloffFactor",
+                () => TryReadJsonValue(data, "rolloffFactor", out double value) ? value : 1.0,
+                value =>
+                {
+                    data["rolloffFactor"] = value;
+                    return Commit();
+                },
+                0.0,
+                10.0));
+
+            panel.Children.Add(CreateComboPropertyEditor(
+                "attenuationModel",
+                AudioAttenuationModelOptions,
+                () => TryReadJsonValue(data, "attenuationModel", out string value) ? value : AudioAttenuationModelOptions[0],
+                value =>
+                {
+                    data["attenuationModel"] = value;
+                    return Commit();
+                }));
+
+            panel.Children.Add(CreateSliderPropertyEditor(
+                "spatialBlend",
+                () => TryReadJsonValue(data, "spatialBlend", out double value) ? value : 1.0,
+                value =>
+                {
+                    data["spatialBlend"] = value;
+                    return Commit();
+                },
+                0.0,
+                1.0));
+
+            panel.Children.Add(CreateCheckPropertyEditor(
+                "loop",
+                () => TryReadJsonValue(data, "loop", out bool value) && value,
+                value =>
+                {
+                    data["loop"] = value;
+                    return Commit();
+                }));
+
+            panel.Children.Add(CreateCheckPropertyEditor(
+                "playOnAwake",
+                () => TryReadJsonValue(data, "playOnAwake", out bool value) && value,
+                value =>
+                {
+                    data["playOnAwake"] = value;
+                    return Commit();
+                }));
+
+            panel.Children.Add(CreateSliderPropertyEditor(
+                "dopplerFactor",
+                () => TryReadJsonValue(data, "dopplerFactor", out double value) ? value : 1.0,
+                value =>
+                {
+                    data["dopplerFactor"] = value;
+                    return Commit();
+                },
+                0.0,
+                10.0));
+
+            panel.Children.Add(CreateNumberPropertyEditor(
+                "referenceDbLevel",
+                () => TryReadJsonValue(data, "referenceDbLevel", out double value) ? value : 0.0,
+                value =>
+                {
+                    data["referenceDbLevel"] = value;
+                    return Commit();
+                }));
+
+            panel.Children.Add(CreateNumberPropertyEditor(
+                "cullDbThreshold",
+                () => TryReadJsonValue(data, "cullDbThreshold", out double value) ? value : -80.0,
+                value =>
+                {
+                    data["cullDbThreshold"] = value;
+                    return Commit();
+                }));
+
+            panel.Children.Add(CreateSliderPropertyEditor(
+                "speedOfSound",
+                () => TryReadJsonValue(data, "speedOfSound", out double value) ? value : 343.0,
+                value =>
+                {
+                    data["speedOfSound"] = value;
+                    return Commit();
+                },
+                1.0,
+                2000.0));
+
+            return panel;
+        }
+
+        private Control CreateAvatarDataSection(SceneObject obj)
+        {
+            JsonObject data = ParseSceneObjectData(obj.Data);
+
+            StackPanel panel = new StackPanel
+            {
+                Spacing = InspectorPropertySpacing
+            };
+
+            void CommitToMemory()
+            {
+                obj.Data = data.ToJsonString(SceneJsonWriteOptions);
+                _sceneHasUnsavedChanges = true;
+                UpdateSceneDirtyVisualState();
+            }
+
+            panel.Children.Add(CreateInspectorSectionHeader("角色"));
+
+            panel.Children.Add(CreateTextPropertyEditor(
+                "avatarId",
+                () => TryReadJsonValue(data, "avatarId", out string value) ? value : string.Empty,
+                value =>
+                {
+                    string newValue = (value ?? string.Empty).Trim();
+                    string oldValue = TryReadJsonValue(data, "avatarId", out string existing) ? existing : string.Empty;
+
+                    if (string.Equals(oldValue, newValue, StringComparison.Ordinal))
+                        return true;
+
+                    data["avatarId"] = string.IsNullOrWhiteSpace(newValue) ? null : newValue;
+                    CommitToMemory();
+
+                    Dispatcher.UIThread.Post(() => ShowSceneObjectInspector(obj), DispatcherPriority.Background);
+                    return true;
+                }));
+
+            string[] morphKeys = EditorHostBridge.GetAvatarMorphKeys(EditorPreviewSceneId, obj.Id);
+
+            panel.Children.Add(CreateInspectorSectionHeader("型态键"));
+
+            if (morphKeys.Length == 0)
+            {
+                panel.Children.Add(new Border
+                {
+                    Margin = new Thickness(12, 2, 12, 2),
+                    Child = new TextBlock
+                    {
+                        Text = "该角色没有可用型态键",
+                        Foreground = new SolidColorBrush(Color.Parse("#9A9A9A")),
+                        TextWrapping = TextWrapping.Wrap
+                    }
+                });
+
+                return panel;
+            }
+
+            foreach (string morphKey in morphKeys)
+            {
+                string capturedKey = morphKey;
+
+                panel.Children.Add(CreateSliderPropertyEditor(
+                    capturedKey,
+                    () => ReadJsonObjectComponent(data, "expressions", capturedKey,
+                        EditorHostBridge.GetAvatarMorphWeight(EditorPreviewSceneId, obj.Id, capturedKey)),
+                    value =>
+                    {
+                        WriteJsonObjectComponent(data, "expressions", capturedKey, value);
+                        EditorHostBridge.SetAvatarMorphWeight(EditorPreviewSceneId, obj.Id, capturedKey, (float)value);
+                        CommitToMemory();
+                        return true;
+                    },
+                    0.0,
+                    1.0));
+            }
+
+            return panel;
+        }
+
+        private Control CreateSceneObjectPhysicsSection(SceneObject obj)
+        {
+            StackPanel panel = new StackPanel
+            {
+                Spacing = InspectorPropertySpacing
+            };
+
+            panel.Children.Add(CreateInspectorSectionHeader("物理"));
+
+            PhysicsBody? body = obj.Physics;
+
+            if (body == null)
+            {
+                Button addButton = CreateTextCommandButton("添加物理", 96);
+                addButton.Margin = new Thickness(12, 2, 12, 2);
+                addButton.HorizontalAlignment = HorizontalAlignment.Left;
+
+                addButton.Click += (_, _) =>
+                {
+                    BeginSceneParameterChange();
+                    obj.Physics = new PhysicsBody();
+                    PersistSceneObjectChanges(obj, false);
+                    ShowSceneObjectInspector(obj);
+                };
+
+                panel.Children.Add(addButton);
+                return panel;
+            }
+
+            panel.Children.Add(CreateCheckPropertyEditor(
+                "enabled",
+                () => body.Enabled,
+                value =>
+                {
+                    if (body.Enabled == value)
+                        return true;
+
+                    BeginSceneParameterChange();
+                    body.Enabled = value;
+                    return PersistSceneObjectChanges(obj, false);
+                }));
+
+            panel.Children.Add(CreateComboPropertyEditor(
+                "motionType",
+                PhysicsMotionTypeOptions,
+                () => string.IsNullOrWhiteSpace(body.MotionType) ? PhysicsMotionTypeOptions[0] : body.MotionType,
+                value =>
+                {
+                    if (string.Equals(body.MotionType, value, StringComparison.Ordinal))
+                        return true;
+
+                    BeginSceneParameterChange();
+                    body.MotionType = value;
+                    return PersistSceneObjectChanges(obj, false);
+                }));
+
+            panel.Children.Add(CreateComboPropertyEditor(
+                "shapeType",
+                PhysicsShapeTypeOptions,
+                () => string.IsNullOrWhiteSpace(body.ShapeType) ? PhysicsShapeTypeOptions[0] : body.ShapeType,
+                value =>
+                {
+                    if (string.Equals(body.ShapeType, value, StringComparison.Ordinal))
+                        return true;
+
+                    BeginSceneParameterChange();
+                    body.ShapeType = value;
+                    return PersistSceneObjectChanges(obj, false);
+                }));
+
+            panel.Children.Add(CreateVector3PropertyEditor(
+                "size",
+                () => body.Size,
+                value =>
+                {
+                    if (Double3Equals(body.Size, value))
+                        return true;
+
+                    BeginSceneParameterChange();
+                    body.Size = value;
+                    return PersistSceneObjectChanges(obj, false);
+                }));
+
+            panel.Children.Add(CreateSliderPropertyEditor(
+                "radius",
+                () => body.Radius,
+                value =>
+                {
+                    if (body.Radius == value)
+                        return true;
+
+                    BeginSceneParameterChange();
+                    body.Radius = value;
+                    return PersistSceneObjectChanges(obj, false);
+                },
+                0.01,
+                50.0));
+
+            panel.Children.Add(CreateSliderPropertyEditor(
+                "length",
+                () => body.Length,
+                value =>
+                {
+                    if (body.Length == value)
+                        return true;
+
+                    BeginSceneParameterChange();
+                    body.Length = value;
+                    return PersistSceneObjectChanges(obj, false);
+                },
+                0.0,
+                50.0));
+
+            panel.Children.Add(CreateSliderPropertyEditor(
+                "mass",
+                () => body.Mass,
+                value =>
+                {
+                    if (body.Mass == value)
+                        return true;
+
+                    BeginSceneParameterChange();
+                    body.Mass = value;
+                    return PersistSceneObjectChanges(obj, false);
+                },
+                0.01,
+                1000.0));
+
+            panel.Children.Add(CreateSliderPropertyEditor(
+                "friction",
+                () => body.Friction,
+                value =>
+                {
+                    if (body.Friction == value)
+                        return true;
+
+                    BeginSceneParameterChange();
+                    body.Friction = value;
+                    return PersistSceneObjectChanges(obj, false);
+                },
+                0.0,
+                1.0));
+
+            panel.Children.Add(CreateSliderPropertyEditor(
+                "restitution",
+                () => body.Restitution,
+                value =>
+                {
+                    if (body.Restitution == value)
+                        return true;
+
+                    BeginSceneParameterChange();
+                    body.Restitution = value;
+                    return PersistSceneObjectChanges(obj, false);
+                },
+                0.0,
+                1.0));
+
+            panel.Children.Add(CreateCheckPropertyEditor(
+                "useGravity",
+                () => body.UseGravity,
+                value =>
+                {
+                    if (body.UseGravity == value)
+                        return true;
+
+                    BeginSceneParameterChange();
+                    body.UseGravity = value;
+                    return PersistSceneObjectChanges(obj, false);
+                }));
+
+            panel.Children.Add(CreateCheckPropertyEditor(
+                "enableSpeculativeContacts",
+                () => body.EnableSpeculativeContacts,
+                value =>
+                {
+                    if (body.EnableSpeculativeContacts == value)
+                        return true;
+
+                    BeginSceneParameterChange();
+                    body.EnableSpeculativeContacts = value;
+                    return PersistSceneObjectChanges(obj, false);
+                }));
+
+            panel.Children.Add(CreateSliderPropertyEditor(
+                "linearDamping",
+                () => body.LinearDamping,
+                value =>
+                {
+                    if (body.LinearDamping == value)
+                        return true;
+
+                    BeginSceneParameterChange();
+                    body.LinearDamping = value;
+                    return PersistSceneObjectChanges(obj, false);
+                },
+                0.0,
+                1.0));
+
+            panel.Children.Add(CreateSliderPropertyEditor(
+                "angularDamping",
+                () => body.AngularDamping,
+                value =>
+                {
+                    if (body.AngularDamping == value)
+                        return true;
+
+                    BeginSceneParameterChange();
+                    body.AngularDamping = value;
+                    return PersistSceneObjectChanges(obj, false);
+                },
+                0.0,
+                1.0));
+
+            Button removeButton = CreateTextCommandButton("移除物理", 96);
+            removeButton.Margin = new Thickness(12, 2, 12, 2);
+            removeButton.HorizontalAlignment = HorizontalAlignment.Left;
+
+            removeButton.Click += (_, _) =>
+            {
+                BeginSceneParameterChange();
+                obj.Physics = null;
+                PersistSceneObjectChanges(obj, false);
+                ShowSceneObjectInspector(obj);
+            };
+
+            panel.Children.Add(removeButton);
+
+            return panel;
+        }
+
+        private List<string> CollectAssetKeys(string searchPattern, bool withoutExtension)
+        {
+            List<string> keys = new List<string>();
+
+            string rootPath = !string.IsNullOrWhiteSpace(_projectAssetRootPath) && Directory.Exists(_projectAssetRootPath)
+                ? _projectAssetRootPath
+                : string.Empty;
+
+            if (string.IsNullOrWhiteSpace(rootPath))
+                return keys;
+
+            try
+            {
+                foreach (string filePath in Directory.GetFiles(rootPath, searchPattern, SearchOption.AllDirectories))
+                {
+                    string key = Path.GetRelativePath(rootPath, filePath).Replace('\\', '/');
+
+                    if (key.StartsWith(".lse-editor-runtime/", StringComparison.OrdinalIgnoreCase))
+                        continue;
+
+                    if (withoutExtension)
+                    {
+                        string extension = Path.GetExtension(key);
+
+                        if (!string.IsNullOrEmpty(extension))
+                            key = key[..^extension.Length];
+                    }
+
+                    if (!keys.Contains(key))
+                        keys.Add(key);
+                }
+            }
+            catch
+            {
+            }
+
+            keys.Sort(StringComparer.OrdinalIgnoreCase);
+            return keys;
+        }
+
+        private JsonObject ParseSceneObjectData(string? data)
+        {
+            if (string.IsNullOrWhiteSpace(data))
+                return new JsonObject();
+
+            try
+            {
+                if (JsonNode.Parse(data) is JsonObject parsed)
+                    return parsed;
+            }
+            catch
+            {
+            }
+
+            return new JsonObject();
+        }
+
+        private bool ApplySceneObjectData(SceneObject obj, JsonObject data)
+        {
+            string json = data.ToJsonString(SceneJsonWriteOptions);
+
+            if (string.Equals(obj.Data ?? string.Empty, json, StringComparison.Ordinal))
+                return true;
+
+            BeginSceneParameterChange();
+            obj.Data = json;
+            return PersistSceneObjectChanges(obj, false);
+        }
+
+        private static bool TryReadJsonValue<T>(JsonObject data, string key, out T value)
+        {
+            value = default!;
+
+            if (!data.TryGetPropertyValue(key, out JsonNode? node))
+                return false;
+
+            if (node is not JsonValue jsonValue)
+                return false;
+
+            return jsonValue.TryGetValue(out value);
+        }
+
+        private static double ReadJsonArrayComponent(JsonObject data, string key, int index, double fallback)
+        {
+            if (data[key] is not JsonArray array)
+                return fallback;
+
+            if (index < 0 || index >= array.Count)
+                return fallback;
+
+            if (array[index] is JsonValue value && value.TryGetValue(out double parsed))
+                return parsed;
+
+            return fallback;
+        }
+
+        private static void WriteJsonArrayComponent(JsonObject data, string key, int index, int count, double value)
+        {
+            JsonArray array = data[key] as JsonArray ?? new JsonArray();
+
+            while (array.Count < count)
+                array.Add(JsonValue.Create(0.0));
+
+            if (index >= 0 && index < array.Count)
+                array[index] = JsonValue.Create(value);
+
+            data[key] = array;
+        }
+
+        private static double ReadJsonObjectComponent(JsonObject data, string objectKey, string componentKey, double fallback)
+        {
+            if (data[objectKey] is not JsonObject container)
+                return fallback;
+
+            if (!container.TryGetPropertyValue(componentKey, out JsonNode? node))
+                return fallback;
+
+            if (node is JsonValue value && value.TryGetValue(out double parsed))
+                return parsed;
+
+            return fallback;
+        }
+
+        private static void WriteJsonObjectComponent(JsonObject data, string objectKey, string componentKey, double value)
+        {
+            JsonObject container = data[objectKey] as JsonObject ?? new JsonObject();
+
+            container[componentKey] = value;
+            data[objectKey] = container;
         }
     }
 
