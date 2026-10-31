@@ -690,6 +690,11 @@ namespace LimitlessSquareEngine
                 parameters["uAlphaCutoff"] = material.AlphaCutoff;
             }
 
+            if (string.Equals(material.AlphaMode, "Blend", StringComparison.OrdinalIgnoreCase))
+            {
+                parameters["uAlphaBlend"] = 1;
+            }
+
             if (material.DoubleSided)
                 parameters["uCull"] = "both";
 

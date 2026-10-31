@@ -359,6 +359,7 @@ namespace LimitlessSquareEngine
             public MaterialTextureWrapMode TextureWrap { get; init; } = MaterialTextureWrapMode.Repeat;
             public RenderCullMode CullMode { get; init; } = RenderCullMode.Front;
             public bool IsCloud { get; init; }
+            public bool IsAlphaBlend { get; init; }
         }
 
         private sealed class SkyboxData
@@ -7560,7 +7561,8 @@ namespace LimitlessSquareEngine
                         TextureUV = ReadMaterialTextureUV(parameters),
                         TextureWrap = ReadMaterialTextureWrap(parameters),
                         CullMode = ReadMaterialCullMode(parameters, RenderCullMode.Front),
-                        IsCloud = string.Equals(shaderKey, _cloudShaderKey, StringComparison.OrdinalIgnoreCase)
+                        IsCloud = string.Equals(shaderKey, _cloudShaderKey, StringComparison.OrdinalIgnoreCase),
+                        IsAlphaBlend = ReadMaterialAlphaBlend(parameters)
                     };
 
                     _materialCache[key] = material;
@@ -7600,7 +7602,8 @@ namespace LimitlessSquareEngine
                     TextureUV = ReadMaterialTextureUV(parameters),
                     TextureWrap = ReadMaterialTextureWrap(parameters),
                     CullMode = ReadMaterialCullMode(parameters, RenderCullMode.Front),
-                    IsCloud = string.Equals(shaderKey, _cloudShaderKey, StringComparison.OrdinalIgnoreCase)
+                    IsCloud = string.Equals(shaderKey, _cloudShaderKey, StringComparison.OrdinalIgnoreCase),
+                    IsAlphaBlend = ReadMaterialAlphaBlend(parameters)
                 };
 
                 _materialCache[key] = material;
@@ -8820,6 +8823,23 @@ namespace LimitlessSquareEngine
             return MaterialTextureWrapMode.Repeat;
         }
 
+        private bool ReadMaterialAlphaBlend(JsonElement parameters)
+        {
+            if (parameters.ValueKind != JsonValueKind.Object)
+                return false;
+
+            if (!parameters.TryGetProperty("uAlphaBlend", out JsonElement value))
+                return false;
+
+            return value.ValueKind switch
+            {
+                JsonValueKind.True => true,
+                JsonValueKind.False => false,
+                JsonValueKind.Number => value.GetDouble() != 0.0,
+                _ => false
+            };
+        }
+
         private RenderCullMode ReadMaterialCullMode(JsonElement parameters, RenderCullMode defaultValue)
         {
             if (parameters.ValueKind != JsonValueKind.Object)
@@ -9869,7 +9889,7 @@ namespace LimitlessSquareEngine
                                 Model = model,
                                 View = view,
                                 Projection = projection,
-                                QueueType = surface.TransparentByColorAlpha ? RenderQueueType.Transparent : RenderQueueType.Opaque,
+                                QueueType = (surface.TransparentByColorAlpha || surface.Material.IsAlphaBlend) ? RenderQueueType.Transparent : RenderQueueType.Opaque,
                                 UsePremultipliedTransparentBlend = surface.TransparentByColorAlpha,
                                 SortDepth = ComputeSortDepth(surface.LocalCenter, model, view, RenderSpace.Camera),
                                 SubmissionIndex = _submissionCounter++,
@@ -9928,7 +9948,7 @@ namespace LimitlessSquareEngine
                             Model = model,
                             View = view,
                             Projection = projection,
-                            QueueType = transparentByColorAlpha ? RenderQueueType.Transparent : RenderQueueType.Opaque,
+                            QueueType = (transparentByColorAlpha || material.IsAlphaBlend) ? RenderQueueType.Transparent : RenderQueueType.Opaque,
                             UsePremultipliedTransparentBlend = transparentByColorAlpha,
                             SortDepth = ComputeSortDepth(surface.LocalCenter, model, view, RenderSpace.Camera),
                             SubmissionIndex = _submissionCounter++,
@@ -10138,7 +10158,7 @@ namespace LimitlessSquareEngine
                     Model = model,
                     View = view,
                     Projection = projection,
-                    QueueType = transparentByColorAlpha ? RenderQueueType.Transparent : RenderQueueType.Opaque,
+                    QueueType = (transparentByColorAlpha || material.IsAlphaBlend) ? RenderQueueType.Transparent : RenderQueueType.Opaque,
                     UsePremultipliedTransparentBlend = transparentByColorAlpha,
                     SortDepth = ComputeSortDepth(surface.LocalCenter, model, view, RenderSpace.Camera),
                     SubmissionIndex = _submissionCounter++,
