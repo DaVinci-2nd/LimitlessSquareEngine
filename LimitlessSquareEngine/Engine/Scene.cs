@@ -326,6 +326,24 @@ namespace LimitlessSquareEngine.Engine
 
         public double LinearDamping { get; set; } = 0.002;
         public double AngularDamping { get; set; } = 0.005;
+
+        public bool CharacterController { get; set; } = false;
+        public Double3 Center { get; set; } = Double3.Zero;
+        public double SlopeLimit { get; set; } = 45.0;
+        public double StepOffset { get; set; } = 0.3;
+        public double SkinWidth { get; set; } = 0.02;
+        public double MoveAcceleration { get; set; } = 40.0;
+        public double MoveDeceleration { get; set; } = 60.0;
+        public double AirControl { get; set; } = 0.2;
+        public double GroundStickSpeed { get; set; } = 2.0;
+        public double KnockbackBlend { get; set; } = 0.85;
+        public double KnockbackWindow { get; set; } = 0.25;
+
+        public List<string>? IgnoreColliders { get; set; }
+
+        public List<string>? Constraints { get; set; }
+
+        public bool? VariableTimestep { get; set; }
     }
 
     public sealed class PhysicsRaycastHit

@@ -36,12 +36,18 @@ namespace LimitlessSquareEngine.Engine
             public Dictionary<string, bool> ForceWakeState { get; } = new(StringComparer.Ordinal);
             public Dictionary<string, Double3> LastWorldScale { get; } = new(StringComparer.Ordinal);
             public Dictionary<string, AvatarPhysicsRuntime> Avatars { get; } = new(StringComparer.Ordinal);
+            public Dictionary<string, CharacterControllerRuntime> Characters { get; } = new(StringComparer.Ordinal);
+            public Dictionary<string, List<string>> ColliderIgnores { get; } = new(StringComparer.Ordinal);
+            public Dictionary<string, int> LockedAxes { get; } = new(StringComparer.Ordinal);
+            public Dictionary<string, JVector> LockedPositions { get; } = new(StringComparer.Ordinal);
+            public Dictionary<string, Double3> RootMotionDeltas { get; } = new(StringComparer.Ordinal);
 
             public int AvatarsDiscoveryNodeCount = -1;
             public bool AvatarsDiscoveryComplete;
 
             public double FixedDeltaAccumulator;
             public bool SkipFirstPhysicsStep = true;
+            public bool VariableTimestep;
 
             public void Dispose()
             {
@@ -64,6 +70,9 @@ namespace LimitlessSquareEngine.Engine
             };
 
             physics.World.Gravity = new JVector(0.0, -9.81, 0.0);
+            physics.World.SubstepCount = 3;
+            physics.World.SolverIterations = (12, 8);
+            physics.World.BroadPhaseFilter = new CharacterBroadPhaseFilter(physics);
 
             foreach (var node in runtime.Nodes.Values.OrderBy(n => n.Depth))
             {
@@ -77,6 +86,23 @@ namespace LimitlessSquareEngine.Engine
                 physics.OrderedPhysicsNodes.Add(node);
                 physics.ForceWakeState[node.Source.Id] = false;
                 physics.LastWorldScale[node.Source.Id] = ResolveWorld(node).Scale;
+
+                if (config.CharacterController)
+                    physics.Characters[node.Source.Id] = BuildCharacterRuntime(config, body);
+
+                if (config.IgnoreColliders != null && config.IgnoreColliders.Count > 0)
+                    physics.ColliderIgnores[node.Source.Id] = config.IgnoreColliders;
+
+                if (config.VariableTimestep ?? config.CharacterController)
+                    physics.VariableTimestep = true;
+
+                int lockedAxes = ResolveLockedAxes(config);
+
+                if ((lockedAxes & FreezePosition) != 0)
+                {
+                    physics.LockedAxes[node.Source.Id] = lockedAxes & FreezePosition;
+                    physics.LockedPositions[node.Source.Id] = ToJVector(ResolveWorld(node).Position);
+                }
             }
 
             _sceneWorlds[sceneId] = physics;
@@ -87,6 +113,7 @@ namespace LimitlessSquareEngine.Engine
             if (_sceneWorlds.TryRemove(sceneId, out var runtime))
             {
                 ClearAvatarPhysics(runtime);
+                ClearCharacterControllers(runtime);
                 runtime.Dispose();
             }
         }
@@ -122,6 +149,7 @@ namespace LimitlessSquareEngine.Engine
             physics.OrderedPhysicsNodes.RemoveAll(node => string.Equals(node.Source.Id, objectId, StringComparison.Ordinal));
             physics.ForceWakeState.Remove(objectId);
             physics.LastWorldScale.Remove(objectId);
+            physics.Characters.Remove(objectId);
         }
 
         public static void ClearAll()
@@ -129,6 +157,7 @@ namespace LimitlessSquareEngine.Engine
             foreach (var pair in _sceneWorlds)
             {
                 ClearAvatarPhysics(pair.Value);
+                ClearCharacterControllers(pair.Value);
                 pair.Value.Dispose();
             }
 
@@ -153,6 +182,23 @@ namespace LimitlessSquareEngine.Engine
                     continue;
                 }
 
+                if (physics.VariableTimestep)
+                {
+                    if (deltaTime > 0.0)
+                    {
+                        PushDirtySceneTransformsToPhysics(physics);
+                        WakeBodiesUnderForce(physics);
+                        StepAvatarPhysics(physics, deltaTime);
+                        ApplyRootMotionBoost(physics, deltaTime);
+                        physics.World.Step(deltaTime, false);
+                        RestoreLockedPositions(physics);
+                        CollectAvatarContacts(physics);
+                        PullPhysicsTransformsToScene(physics);
+                    }
+
+                    continue;
+                }
+
                 physics.FixedDeltaAccumulator += deltaTime;
 
                 double maxAccumulatedTime = fixedDeltaTime * 2.0;
@@ -164,12 +210,107 @@ namespace LimitlessSquareEngine.Engine
                     PushDirtySceneTransformsToPhysics(physics);
                     WakeBodiesUnderForce(physics);
                     StepAvatarPhysics(physics, fixedDeltaTime);
+                    ApplyRootMotionBoost(physics, fixedDeltaTime);
                     physics.World.Step(fixedDeltaTime, false);
+                    RestoreLockedPositions(physics);
                     CollectAvatarContacts(physics);
                     PullPhysicsTransformsToScene(physics);
 
                     physics.FixedDeltaAccumulator -= fixedDeltaTime;
                 }
+            }
+        }
+
+        private const int FreezePositionX = 2;
+        private const int FreezePositionY = 4;
+        private const int FreezePositionZ = 8;
+        private const int FreezeRotationX = 16;
+        private const int FreezeRotationY = 32;
+        private const int FreezeRotationZ = 64;
+        private const int FreezePosition = 14;
+        private const int FreezeRotation = 112;
+        private const int FreezeAll = 126;
+
+        private static int ResolveLockedAxes(PhysicsBody config)
+        {
+            int axes = 0;
+
+            if (config.Constraints == null)
+                return axes;
+
+            foreach (string constraint in config.Constraints)
+            {
+                switch (constraint)
+                {
+                    case "FreezePositionX": axes |= FreezePositionX; break;
+                    case "FreezePositionY": axes |= FreezePositionY; break;
+                    case "FreezePositionZ": axes |= FreezePositionZ; break;
+                    case "FreezeRotationX": axes |= FreezeRotationX; break;
+                    case "FreezeRotationY": axes |= FreezeRotationY; break;
+                    case "FreezeRotationZ": axes |= FreezeRotationZ; break;
+                    case "FreezePosition": axes |= FreezePosition; break;
+                    case "FreezeRotation": axes |= FreezeRotation; break;
+                    case "FreezeAll": axes |= FreezeAll; break;
+                }
+            }
+
+            return axes;
+        }
+
+        private static JMatrix BuildPartialInverseInertia(RigidBody body, int lockedAxes)
+        {
+            JMatrix inverseInertia = body.InverseInertia;
+
+            JVector column0 = inverseInertia.GetColumn(0);
+            JVector column1 = inverseInertia.GetColumn(1);
+            JVector column2 = inverseInertia.GetColumn(2);
+
+            return JMatrix.CreateScale(
+                (lockedAxes & FreezeRotationX) != 0 ? 0.0 : column0.X,
+                (lockedAxes & FreezeRotationY) != 0 ? 0.0 : column1.Y,
+                (lockedAxes & FreezeRotationZ) != 0 ? 0.0 : column2.Z);
+        }
+
+        private static void RestoreLockedPositions(ScenePhysicsRuntime physics)
+        {
+            if (physics.LockedAxes.Count == 0)
+                return;
+
+            foreach (var pair in physics.LockedAxes)
+            {
+                if (!physics.Bodies.TryGetValue(pair.Key, out RigidBody? body))
+                    continue;
+
+                if (body.MotionType != MotionType.Dynamic)
+                    continue;
+
+                if (!physics.LockedPositions.TryGetValue(pair.Key, out JVector locked))
+                    continue;
+
+                int axes = pair.Value;
+                JVector position = body.Position;
+                JVector velocity = body.Velocity;
+
+                if ((axes & FreezePositionX) != 0)
+                {
+                    position.X = locked.X;
+                    velocity.X = 0.0;
+                }
+
+                if ((axes & FreezePositionY) != 0)
+                {
+                    position.Y = locked.Y;
+                    velocity.Y = 0.0;
+                }
+
+                if ((axes & FreezePositionZ) != 0)
+                {
+                    position.Z = locked.Z;
+                    velocity.Z = 0.0;
+                }
+
+                body.Position = position;
+                body.Velocity = velocity;
             }
         }
 
@@ -182,14 +323,29 @@ namespace LimitlessSquareEngine.Engine
             RigidBody body = world.CreateRigidBody();
             body.Tag = node.Source.Id;
 
-            body.Position = ToJVector(initialWorld.Position);
             body.Orientation = ToJQuaternion(initialWorld.Rotation);
+
+            if (config.CharacterController)
+                body.Position = ToJVector(initialWorld.Position + initialWorld.Rotation.Rotate(config.Center));
+            else
+                body.Position = ToJVector(initialWorld.Position);
 
             AddConfiguredShapes(body, node, config, initialWorld, motionType);
 
             if (shapeType != "Mesh")
             {
                 body.SetMassInertia(config.Mass);
+            }
+
+            int lockedAxes = ResolveLockedAxes(config);
+
+            if ((lockedAxes & FreezeRotation) != 0)
+            {
+                JMatrix inverseInertia = (lockedAxes & FreezeRotation) == FreezeRotation
+                    ? JMatrix.Zero
+                    : BuildPartialInverseInertia(body, lockedAxes);
+
+                body.SetMassInertia(inverseInertia, 1.0 / config.Mass, true);
             }
 
             body.Friction = config.Friction;
@@ -543,10 +699,61 @@ namespace LimitlessSquareEngine.Engine
             return true;
         }
 
+        internal static void SetRootMotionDelta(string sceneId, string objectId, Double3 worldDelta)
+        {
+            if (!TryGetScenePhysicsRuntime(sceneId, out ScenePhysicsRuntime physics))
+                return;
+
+            physics.RootMotionDeltas[objectId] = worldDelta;
+        }
+
+        private static void ApplyRootMotionBoost(ScenePhysicsRuntime physics, double deltaTime)
+        {
+            if (physics.RootMotionDeltas.Count == 0 || !(deltaTime > 0.0))
+                return;
+
+            double inverseDeltaTime = 1.0 / deltaTime;
+
+            foreach (var pair in physics.RootMotionDeltas)
+            {
+                if (!physics.Bodies.TryGetValue(pair.Key, out RigidBody? body))
+                    continue;
+
+                if (body.MotionType != MotionType.Dynamic)
+                    continue;
+
+                Double3 target = pair.Value * inverseDeltaTime;
+                double targetLength = LengthOf(target);
+
+                if (targetLength <= 1e-12)
+                    continue;
+
+                Double3 direction = target / targetLength;
+                Double3 current = ToDouble3(body.Velocity);
+
+                double currentAlong =
+                    current.X * direction.X +
+                    current.Y * direction.Y +
+                    current.Z * direction.Z;
+
+                double delta = targetLength - currentAlong;
+
+                if (Math.Abs(delta) <= 1e-12)
+                    continue;
+
+                body.Velocity = ToJVector(current + direction * delta);
+            }
+        }
+
         private static void SyncBodyPoseToScene(ScenePhysicsRuntime physics, Scene.SceneRuntimeNode node, RigidBody body)
         {
             Double3 worldPosition = ToDouble3(body.Position);
             DQuaternion worldRotation = ToDQuaternion(body.Orientation);
+
+            PhysicsBody? config = node.Source.Physics;
+
+            if (config != null && config.CharacterController)
+                worldPosition = worldPosition - worldRotation.Rotate(config.Center);
 
             ApplyWorldPoseToNode(node, worldPosition, worldRotation);
             MarkSubtreeDirtyFromPhysics(physics.Runtime, node);
@@ -572,8 +779,11 @@ namespace LimitlessSquareEngine.Engine
 
         internal static bool TrySetBodyWorldPosition(string sceneId, string objectId, Double3 worldPosition)
         {
-            if (!TryGetBody(sceneId, objectId, out var physics, out var node, out var body, out _))
+            if (!TryGetBody(sceneId, objectId, out var physics, out var node, out var body, out var config))
                 return false;
+
+            if (config.CharacterController)
+                worldPosition = worldPosition + ToDQuaternion(body.Orientation).Rotate(config.Center);
 
             body.Position = ToJVector(worldPosition);
             SyncBodyPoseToScene(physics, node, body);
@@ -582,10 +792,19 @@ namespace LimitlessSquareEngine.Engine
 
         internal static bool TrySetBodyWorldRotation(string sceneId, string objectId, DQuaternion worldRotation)
         {
-            if (!TryGetBody(sceneId, objectId, out var physics, out var node, out var body, out _))
+            if (!TryGetBody(sceneId, objectId, out var physics, out var node, out var body, out var config))
                 return false;
 
-            body.Orientation = ToJQuaternion(worldRotation.Normalized());
+            DQuaternion normalized = worldRotation.Normalized();
+
+            body.Orientation = ToJQuaternion(normalized);
+
+            if (config.CharacterController &&
+                physics.Characters.TryGetValue(objectId, out CharacterControllerRuntime? runtime))
+            {
+                runtime.LockedOrientation = normalized;
+            }
+
             SyncBodyPoseToScene(physics, node, body);
             return true;
         }

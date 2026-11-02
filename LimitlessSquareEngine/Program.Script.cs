@@ -451,6 +451,46 @@ namespace LimitlessSquareEngine
                 });
             RecordLuaApi("raycast", "raycast(sceneId, ox, oy, oz, dx, dy, dz, maxDistance) -> hit", "射线检测", "Physics");
 
+            // 注入角色控制器移动函数
+            instance.LuaScript.Globals["set_character_move"] =
+                (Action<string, string, double, double, double, double>)((sceneId, objectId, dx, dy, dz, speed) =>
+                {
+                    Physics.SetCharacterMove(sceneId, objectId, new Double3(dx, dy, dz), speed);
+                });
+            RecordLuaApi("set_character_move", "set_character_move(sceneId, objectId, dx, dy, dz, speed)", "设置角色控制器移动方向与速度", "Physics");
+
+            // 注入角色控制器速度设置函数
+            instance.LuaScript.Globals["set_character_velocity"] =
+                (Action<string, string, double, double, double>)((sceneId, objectId, x, y, z) =>
+                {
+                    Physics.SetCharacterVelocity(sceneId, objectId, new Double3(x, y, z));
+                });
+            RecordLuaApi("set_character_velocity", "set_character_velocity(sceneId, objectId, x, y, z)", "设置角色控制器速度", "Physics");
+
+            // 注入角色控制器速度读取函数
+            instance.LuaScript.Globals["get_character_velocity"] =
+                (Func<string, string, Double3>)((sceneId, objectId) =>
+                {
+                    return Physics.GetCharacterVelocity(sceneId, objectId);
+                });
+            RecordLuaApi("get_character_velocity", "get_character_velocity(sceneId, objectId) -> Double3", "获取角色控制器速度", "Physics");
+
+            // 注入角色控制器接地读取函数
+            instance.LuaScript.Globals["get_character_grounded"] =
+                (Func<string, string, bool>)((sceneId, objectId) =>
+                {
+                    return Physics.GetCharacterGrounded(sceneId, objectId);
+                });
+            RecordLuaApi("get_character_grounded", "get_character_grounded(sceneId, objectId) -> bool", "获取角色控制器接地状态", "Physics");
+
+            // 注入角色控制器阻挡读取函数
+            instance.LuaScript.Globals["get_character_blocked"] =
+                (Func<string, string, bool>)((sceneId, objectId) =>
+                {
+                    return Physics.GetCharacterBlocked(sceneId, objectId);
+                });
+            RecordLuaApi("get_character_blocked", "get_character_blocked(sceneId, objectId) -> bool", "获取角色控制器阻挡状态", "Physics");
+
             // 注入重建摄像机队列函数
             instance.LuaScript.Globals["rescan_scene_cameras"] = (Action<string>)((sceneId) =>
             {

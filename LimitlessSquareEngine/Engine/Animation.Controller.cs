@@ -109,6 +109,10 @@ namespace LimitlessSquareEngine.Engine
 
         public bool ApplyRootMotion { get; set; } = true;
 
+        public bool PhysicalRootMotion { get; set; } = false;
+
+        public string PhysicalRootMotionBodyId { get; set; } = "";
+
         public List<AnimatorParameterData> Parameters { get; set; } = new();
 
         public List<AnimatorLayerData> Layers { get; set; } = new();
@@ -610,10 +614,10 @@ namespace LimitlessSquareEngine.Engine
             foreach (AnimatorLayerRuntime layer in Layers)
                 MergeLayer(layer);
 
-            ApplyPose();
+            ApplyPose(deltaTime);
         }
 
-        private void ApplyRootMotionOffset()
+        private void ApplyRootMotionOffset(double deltaTime)
         {
             if (Layers.Count == 0 || Layers[0].Current == null)
                 return;
@@ -692,6 +696,12 @@ namespace LimitlessSquareEngine.Engine
             DQuaternion avatarWorldRotation = DQuaternion.FromEulerDegrees(Scene.GetRotation(SceneId, ObjectId));
 
             Double3 worldDelta = avatarWorldRotation.Rotate(new Double3(modelDelta.X, modelDelta.Y, -modelDelta.Z));
+
+            if (Data.PhysicalRootMotion && !string.IsNullOrWhiteSpace(Data.PhysicalRootMotionBodyId))
+            {
+                Physics.SetRootMotionDelta(SceneId, Data.PhysicalRootMotionBodyId, worldDelta);
+                return;
+            }
 
             Scene.SetLocalPosition(SceneId, ObjectId, Scene.GetLocalPosition(SceneId, ObjectId) + Scene.WorldDeltaToLocalDelta(SceneId, ObjectId, worldDelta));
         }
@@ -1045,7 +1055,7 @@ namespace LimitlessSquareEngine.Engine
             return false;
         }
 
-        private void ApplyPose()
+        private void ApplyPose(double deltaTime)
         {
             if (Avatar != null)
             {
@@ -1056,7 +1066,7 @@ namespace LimitlessSquareEngine.Engine
                     Pose.TouchedTranslations[RootBoneIndex];
 
                 if (applyRootMotion)
-                    ApplyRootMotionOffset();
+                    ApplyRootMotionOffset(deltaTime);
 
                 for (int i = 0; i < Pose.BoneCount && i < Avatar.Skeleton.Bones.Count; i++)
                 {

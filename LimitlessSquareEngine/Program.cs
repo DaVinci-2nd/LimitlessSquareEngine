@@ -1214,6 +1214,9 @@ namespace LimitlessSquareEngine
             if (realtimeDelta < 0f)
                 realtimeDelta = 0f;
 
+            if (realtimeDelta > _fixedDeltaTime)
+                realtimeDelta = _fixedDeltaTime;
+
             if (_runtimePaused)
             {
                 if (_pendingStepFrameCount > 0)
@@ -2382,10 +2385,10 @@ namespace LimitlessSquareEngine
                         }
                     }
                 }
-                // 遍历所有场景脚本实例
-                TickSceneScripts(deltaTime, fixedDeltaTime);
                 // 物理引擎
                 Physics.Step(deltaTime, fixedDeltaTime);
+                // 遍历所有场景脚本实例
+                TickSceneScripts(deltaTime, fixedDeltaTime);
                 // 把场景层的脏transform同步到Graphics缓存
                 Scene.FlushDirtyToRenderer();
                 // 角色更新
@@ -3424,6 +3427,188 @@ namespace LimitlessSquareEngine
                             angularDamping > 1.0)
                         {
                             reason = $"Object '{objectId}' physics.angularDamping must be between 0 and 1.";
+                            return false;
+                        }
+                        break;
+
+                    case "characterController":
+                        if (prop.Value.ValueKind != JsonValueKind.True &&
+                            prop.Value.ValueKind != JsonValueKind.False)
+                        {
+                            reason = $"[X] Object '{objectId}' physics.characterController must be true or false.";
+                            return false;
+                        }
+                        break;
+
+                    case "center":
+                        if (!TryValidateStrictDouble3Object(prop.Value, $"Object '{objectId}' physics.center", requirePositive: false, out reason))
+                            return false;
+                        break;
+
+                    case "slopeLimit":
+                        if (prop.Value.ValueKind != JsonValueKind.Number ||
+                            !prop.Value.TryGetDouble(out double slopeLimit) ||
+                            slopeLimit < 0.0 ||
+                            slopeLimit > 90.0)
+                        {
+                            reason = $"[X] Object '{objectId}' physics.slopeLimit must be between 0 and 90.";
+                            return false;
+                        }
+                        break;
+
+                    case "stepOffset":
+                        if (prop.Value.ValueKind != JsonValueKind.Number ||
+                            !prop.Value.TryGetDouble(out double stepOffset) ||
+                            stepOffset < 0.0)
+                        {
+                            reason = $"[X] Object '{objectId}' physics.stepOffset must be >= 0.";
+                            return false;
+                        }
+                        break;
+
+                    case "skinWidth":
+                        if (prop.Value.ValueKind != JsonValueKind.Number ||
+                            !prop.Value.TryGetDouble(out double skinWidth) ||
+                            skinWidth < 0.0)
+                        {
+                            reason = $"[X] Object '{objectId}' physics.skinWidth must be >= 0.";
+                            return false;
+                        }
+                        break;
+
+                    case "moveAcceleration":
+                        if (prop.Value.ValueKind != JsonValueKind.Number ||
+                            !prop.Value.TryGetDouble(out double moveAcceleration) ||
+                            moveAcceleration < 0.0)
+                        {
+                            reason = $"[X] Object '{objectId}' physics.moveAcceleration must be >= 0.";
+                            return false;
+                        }
+                        break;
+
+                    case "moveDeceleration":
+                        if (prop.Value.ValueKind != JsonValueKind.Number ||
+                            !prop.Value.TryGetDouble(out double moveDeceleration) ||
+                            moveDeceleration < 0.0)
+                        {
+                            reason = $"[X] Object '{objectId}' physics.moveDeceleration must be >= 0.";
+                            return false;
+                        }
+                        break;
+
+                    case "airControl":
+                        if (prop.Value.ValueKind != JsonValueKind.Number ||
+                            !prop.Value.TryGetDouble(out double airControl) ||
+                            airControl < 0.0 ||
+                            airControl > 1.0)
+                        {
+                            reason = $"[X] Object '{objectId}' physics.airControl must be between 0 and 1.";
+                            return false;
+                        }
+                        break;
+
+                    case "groundStickSpeed":
+                        if (prop.Value.ValueKind != JsonValueKind.Number ||
+                            !prop.Value.TryGetDouble(out double groundStickSpeed) ||
+                            groundStickSpeed < 0.0)
+                        {
+                            reason = $"[X] Object '{objectId}' physics.groundStickSpeed must be >= 0.";
+                            return false;
+                        }
+                        break;
+
+                    case "knockbackBlend":
+                        if (prop.Value.ValueKind != JsonValueKind.Number ||
+                            !prop.Value.TryGetDouble(out double knockbackBlend) ||
+                            knockbackBlend < 0.0 ||
+                            knockbackBlend > 1.0)
+                        {
+                            reason = $"[X] Object '{objectId}' physics.knockbackBlend must be between 0 and 1.";
+                            return false;
+                        }
+                        break;
+
+                    case "knockbackWindow":
+                        if (prop.Value.ValueKind != JsonValueKind.Number ||
+                            !prop.Value.TryGetDouble(out double knockbackWindow) ||
+                            knockbackWindow < 0.0)
+                        {
+                            reason = $"[X] Object '{objectId}' physics.knockbackWindow must be >= 0.";
+                            return false;
+                        }
+                        break;
+
+                    case "ignoreColliders":
+                        if (prop.Value.ValueKind == JsonValueKind.Null)
+                            break;
+
+                        if (prop.Value.ValueKind != JsonValueKind.Array)
+                        {
+                            reason = $"[X] Object '{objectId}' physics.ignoreColliders must be array or null.";
+                            return false;
+                        }
+
+                        foreach (JsonElement colliderElement in prop.Value.EnumerateArray())
+                        {
+                            if (colliderElement.ValueKind != JsonValueKind.String ||
+                                string.IsNullOrWhiteSpace(colliderElement.GetString()))
+                            {
+                                reason = $"[X] Object '{objectId}' physics.ignoreColliders item must be a non-empty string.";
+                                return false;
+                            }
+                        }
+                        break;
+
+                    case "lockRotation":
+                        if (prop.Value.ValueKind != JsonValueKind.True &&
+                            prop.Value.ValueKind != JsonValueKind.False)
+                        {
+                            reason = $"[X] Object '{objectId}' physics.lockRotation must be true or false.";
+                            return false;
+                        }
+                        break;
+
+                    case "constraints":
+                        if (prop.Value.ValueKind == JsonValueKind.Null)
+                            break;
+
+                        if (prop.Value.ValueKind != JsonValueKind.Array)
+                        {
+                            reason = $"[X] Object '{objectId}' physics.constraints must be array or null.";
+                            return false;
+                        }
+
+                        foreach (JsonElement constraintElement in prop.Value.EnumerateArray())
+                        {
+                            if (constraintElement.ValueKind != JsonValueKind.String)
+                            {
+                                reason = $"[X] Object '{objectId}' physics.constraints item must be string.";
+                                return false;
+                            }
+
+                            string constraint = constraintElement.GetString()?.Trim() ?? string.Empty;
+
+                            if (constraint != "FreezePositionX" &&
+                                constraint != "FreezePositionY" &&
+                                constraint != "FreezePositionZ" &&
+                                constraint != "FreezeRotationX" &&
+                                constraint != "FreezeRotationY" &&
+                                constraint != "FreezeRotationZ" &&
+                                constraint != "FreezePosition" &&
+                                constraint != "FreezeRotation" &&
+                                constraint != "FreezeAll")
+                            {
+                                reason = $"[X] Object '{objectId}' physics.constraints contains unsupported value '{constraint}'.";
+                                return false;
+                            }
+                        }
+                        break;
+
+                    case "variableTimestep":
+                        if (prop.Value.ValueKind != JsonValueKind.True &&
+                            prop.Value.ValueKind != JsonValueKind.False)
+                        {
+                            reason = $"[X] Object '{objectId}' physics.variableTimestep must be true or false.";
                             return false;
                         }
                         break;

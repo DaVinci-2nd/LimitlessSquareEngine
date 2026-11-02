@@ -14337,6 +14337,180 @@ void main()
                 0.0,
                 1.0));
 
+            panel.Children.Add(CreateCheckPropertyEditor(
+                "characterController",
+                () => body.CharacterController,
+                value =>
+                {
+                    if (body.CharacterController == value)
+                        return true;
+
+                    BeginSceneParameterChange();
+                    body.CharacterController = value;
+                    return PersistSceneObjectChanges(obj, false);
+                }));
+
+            panel.Children.Add(CreateVector3PropertyEditor(
+                "center",
+                () => body.Center,
+                value =>
+                {
+                    if (Double3Equals(body.Center, value))
+                        return true;
+
+                    BeginSceneParameterChange();
+                    body.Center = value;
+                    return PersistSceneObjectChanges(obj, false);
+                }));
+
+            panel.Children.Add(CreateSliderPropertyEditor(
+                "slopeLimit",
+                () => body.SlopeLimit,
+                value =>
+                {
+                    if (body.SlopeLimit == value)
+                        return true;
+
+                    BeginSceneParameterChange();
+                    body.SlopeLimit = value;
+                    return PersistSceneObjectChanges(obj, false);
+                },
+                0.0,
+                90.0));
+
+            panel.Children.Add(CreateSliderPropertyEditor(
+                "stepOffset",
+                () => body.StepOffset,
+                value =>
+                {
+                    if (body.StepOffset == value)
+                        return true;
+
+                    BeginSceneParameterChange();
+                    body.StepOffset = value;
+                    return PersistSceneObjectChanges(obj, false);
+                },
+                0.0,
+                2.0));
+
+            panel.Children.Add(CreateSliderPropertyEditor(
+                "skinWidth",
+                () => body.SkinWidth,
+                value =>
+                {
+                    if (body.SkinWidth == value)
+                        return true;
+
+                    BeginSceneParameterChange();
+                    body.SkinWidth = value;
+                    return PersistSceneObjectChanges(obj, false);
+                },
+                0.0,
+                0.2));
+
+            panel.Children.Add(CreateSliderPropertyEditor(
+                "moveAcceleration",
+                () => body.MoveAcceleration,
+                value =>
+                {
+                    if (body.MoveAcceleration == value)
+                        return true;
+
+                    BeginSceneParameterChange();
+                    body.MoveAcceleration = value;
+                    return PersistSceneObjectChanges(obj, false);
+                },
+                0.0,
+                200.0));
+
+            panel.Children.Add(CreateSliderPropertyEditor(
+                "moveDeceleration",
+                () => body.MoveDeceleration,
+                value =>
+                {
+                    if (body.MoveDeceleration == value)
+                        return true;
+
+                    BeginSceneParameterChange();
+                    body.MoveDeceleration = value;
+                    return PersistSceneObjectChanges(obj, false);
+                },
+                0.0,
+                200.0));
+
+            panel.Children.Add(CreateSliderPropertyEditor(
+                "airControl",
+                () => body.AirControl,
+                value =>
+                {
+                    if (body.AirControl == value)
+                        return true;
+
+                    BeginSceneParameterChange();
+                    body.AirControl = value;
+                    return PersistSceneObjectChanges(obj, false);
+                },
+                0.0,
+                1.0));
+
+            panel.Children.Add(CreateSliderPropertyEditor(
+                "groundStickSpeed",
+                () => body.GroundStickSpeed,
+                value =>
+                {
+                    if (body.GroundStickSpeed == value)
+                        return true;
+
+                    BeginSceneParameterChange();
+                    body.GroundStickSpeed = value;
+                    return PersistSceneObjectChanges(obj, false);
+                },
+                0.0,
+                20.0));
+
+            panel.Children.Add(CreateSliderPropertyEditor(
+                "knockbackBlend",
+                () => body.KnockbackBlend,
+                value =>
+                {
+                    if (body.KnockbackBlend == value)
+                        return true;
+
+                    BeginSceneParameterChange();
+                    body.KnockbackBlend = value;
+                    return PersistSceneObjectChanges(obj, false);
+                },
+                0.0,
+                1.0));
+
+            panel.Children.Add(CreateSliderPropertyEditor(
+                "knockbackWindow",
+                () => body.KnockbackWindow,
+                value =>
+                {
+                    if (body.KnockbackWindow == value)
+                        return true;
+
+                    BeginSceneParameterChange();
+                    body.KnockbackWindow = value;
+                    return PersistSceneObjectChanges(obj, false);
+                },
+                0.0,
+                2.0));
+
+            panel.Children.Add(CreateCheckPropertyEditor(
+                "variableTimestep",
+                () => body.VariableTimestep ?? false,
+                value =>
+                {
+                    if (body.VariableTimestep == value)
+                        return true;
+
+                    BeginSceneParameterChange();
+                    body.VariableTimestep = value;
+                    return PersistSceneObjectChanges(obj, false);
+                }));
+
             Button removeButton = CreateTextCommandButton("移除物理", 96);
             removeButton.Margin = new Thickness(12, 2, 12, 2);
             removeButton.HorizontalAlignment = HorizontalAlignment.Left;
