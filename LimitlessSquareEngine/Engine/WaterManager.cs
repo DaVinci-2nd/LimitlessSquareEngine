@@ -127,10 +127,9 @@ namespace LimitlessSquareEngine.Engine
             {
                 int baseLevel = TryGetNumber(profile, "baseLevel", out double bl) ? (int)bl : water.Profile.RenderBaseLevel;
                 double baseRadius = TryGetNumber(profile, "baseRadius", out double br) ? br : water.Profile.RenderBaseRadius;
-                int maxLevel = TryGetNumber(profile, "maxLevel", out double ml) ? (int)ml : water.Profile.RenderMaxLevel;
                 int tileResolution = TryGetNumber(profile, "tileResolution", out double tr) ? (int)tr : water.Profile.RenderBaseTileResolution;
 
-                water.ConfigureProfile(baseLevel, baseRadius, maxLevel, tileResolution);
+                water.ConfigureProfile(baseLevel, baseRadius, tileResolution);
             }
 
             if (root.TryGetProperty("streaming", out JsonElement streaming) && streaming.ValueKind == JsonValueKind.Object)

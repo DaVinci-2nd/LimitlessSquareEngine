@@ -66,35 +66,46 @@ float sampleDensity(vec3 planetLocal, float h, float t, float detailScale)
 
     float lod = cloudLodBias(t);
 
+    float webY = -0.6 + h * 3.6;
+
+    float shapeWeb = textureLod(uCloudShapeNoise, p / max(uCloudShapeTile, 1.0) * 0.32, 0.0).r;
+    float coverageWeb = smoothstep(0.20, 0.80, shapeWeb);
+
+    float topY = 0.5 + 2.5 * coverageWeb;
+    float heightMask = smoothstep(-0.6, 0.3, webY) * (1.0 - smoothstep(topY - 1.0, topY, webY));
+
+    float detailWeb = textureLod(uCloudShapeNoise, p / max(uCloudShapeTile, 1.0) * 1.45, 0.0).r;
+    float dWeb = coverageWeb - 0.42 * detailWeb * (1.0 - coverageWeb);
+    float densityWeb = clamp(dWeb * heightMask * 2.0, 0.0, 1.0);
+
+    if (densityWeb <= 0.001)
+        return 0.0;
+
     vec3 shapeCoord = (p + vec3(evo * 14.0, evo * 3.0, evo * 8.0)) / max(uCloudShapeTile, 1.0);
 
     vec3 warpVec = textureLod(uCloudShapeNoise, shapeCoord * 0.125 + vec3(0.0, evo * 0.001, 0.0), 3.5).gba - 0.5;
     vec3 warpedCoord = shapeCoord + warpVec * uCloudWarpStrength * 0.08;
 
-    vec4 shapeTex = textureLod(uCloudShapeNoise, warpedCoord, lod);
-
-    float heightGrad = smoothstep(0.0, 0.10, h) * (1.0 - smoothstep(0.35, 0.9, h));
+    float shapeOrig = textureLod(uCloudShapeNoise, warpedCoord, lod).r;
 
     float coarse = textureLod(uCloudShapeNoise, shapeCoord * max(uCloudCoverageScale, 0.0001), 1.5).r;
 
-    float conc = clamp(coarse, 0.0, 1.0) * clamp(shapeTex.r, 0.0, 1.0);
+    float heightGrad = smoothstep(0.0, 0.10, h) * (1.0 - smoothstep(0.35, 0.9, h));
+
+    float conc = clamp(coarse, 0.0, 1.0) * clamp(shapeOrig, 0.0, 1.0);
     conc = clamp(conc * 8.0, 0.0, 1.0);
 
     float threshold = 0.1;
-    float density;
-    if (conc >= threshold)
-    {
-        float t2 = (conc - threshold) / (1.0 - threshold);
-        float levels = 4.0;
-        t2 = floor(t2 * levels + 0.001) / levels;
-        density = t2 * heightGrad;
-    }
-    else
-    {
-        density = 0.0;
-    }
 
-    return density;
+    if (conc < threshold)
+        return 0.0;
+
+    float concT = (conc - threshold) / (1.0 - threshold);
+    concT = floor(concT * 4.0 + 0.001) / 4.0;
+
+    float densityOrig = concT * heightGrad;
+
+    return clamp(max(densityWeb * densityOrig * 2.0, densityOrig), 0.0, 1.0);
 }
 
 float rayInT(vec3 origin, vec3 dir, float r)

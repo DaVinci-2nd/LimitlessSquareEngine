@@ -41,6 +41,7 @@ namespace LimitlessSquareEngine.Engine
             public Dictionary<string, int> LockedAxes { get; } = new(StringComparer.Ordinal);
             public Dictionary<string, JVector> LockedPositions { get; } = new(StringComparer.Ordinal);
             public Dictionary<string, Double3> RootMotionDeltas { get; } = new(StringComparer.Ordinal);
+            public Dictionary<string, RigidBody> VoxelBodies { get; } = new(StringComparer.Ordinal);
 
             public int AvatarsDiscoveryNodeCount = -1;
             public bool AvatarsDiscoveryComplete;
@@ -1089,6 +1090,65 @@ namespace LimitlessSquareEngine.Engine
                 "Mesh" => "Mesh",
                 _ => throw new InvalidOperationException($"[X] Unsupported physics shapeType '{shapeType}'.")
             };
+        }
+
+        internal static void SetVoxelCollider(string sceneId, string colliderKey, Double3 origin, float[] vertices)
+        {
+            if (string.IsNullOrWhiteSpace(sceneId) || string.IsNullOrWhiteSpace(colliderKey))
+                return;
+
+            if (vertices == null || vertices.Length < 48)
+                return;
+
+            if (!_sceneWorlds.TryGetValue(sceneId, out ScenePhysicsRuntime? physics))
+                return;
+
+            RemoveVoxelCollider(sceneId, colliderKey);
+
+            var triangles = new List<JTriangle>(vertices.Length / 48);
+
+            for (int i = 0; i + 47 < vertices.Length; i += 48)
+            {
+                JVector a = new JVector(vertices[i + 0], vertices[i + 1], -vertices[i + 2]);
+                JVector b = new JVector(vertices[i + 16], vertices[i + 17], -vertices[i + 18]);
+                JVector c = new JVector(vertices[i + 32], vertices[i + 33], -vertices[i + 34]);
+
+                if (IsDegenerateTriangle(a, b, c))
+                    continue;
+
+                triangles.Add(new JTriangle(a, c, b));
+            }
+
+            if (triangles.Count == 0)
+                return;
+
+            RigidBody body = physics.World.CreateRigidBody();
+            body.Tag = colliderKey;
+            body.MotionType = MotionType.Static;
+            body.AffectedByGravity = false;
+            body.Position = ToJVector(origin);
+
+            foreach (TriangleShape triangleShape in TriangleShape.CreateAllShapes(new TriangleMesh(triangles)))
+            {
+                body.AddShape(triangleShape, MassInertiaUpdateMode.Preserve);
+            }
+
+            physics.VoxelBodies[colliderKey] = body;
+        }
+
+        internal static void RemoveVoxelCollider(string sceneId, string colliderKey)
+        {
+            if (string.IsNullOrWhiteSpace(sceneId) || string.IsNullOrWhiteSpace(colliderKey))
+                return;
+
+            if (!_sceneWorlds.TryGetValue(sceneId, out ScenePhysicsRuntime? physics))
+                return;
+
+            if (!physics.VoxelBodies.TryGetValue(colliderKey, out RigidBody? body))
+                return;
+
+            physics.World.Remove(body);
+            physics.VoxelBodies.Remove(colliderKey);
         }
 
         private static JVector ToJVector(Double3 value)

@@ -33,7 +33,7 @@ namespace LimitlessSquareEngine.Engine
 
         public string TerrainObjectId { get; private set; } = "";
 
-        private double[] _color = { 0.03, 0.16, 0.28, 1.0 };
+        private double[] _color = { 0.10, 0.34, 0.52, 0.55 };
         private double[] _specularColor = { 1.0, 1.0, 1.0 };
         private double _specularIntensity = 2.0;
         private double _specularRange = 0.05;
@@ -98,16 +98,13 @@ namespace LimitlessSquareEngine.Engine
             Streamer.Clear();
         }
 
-        public void ConfigureProfile(int baseLevel, double baseRadius, int maxLevel, int tileResolution)
+        public void ConfigureProfile(int baseLevel, double baseRadius, int tileResolution)
         {
             if (baseLevel >= 0)
                 Profile.RenderBaseLevel = baseLevel;
 
             if (baseRadius > 0.0)
                 Profile.RenderBaseRadius = baseRadius;
-
-            if (maxLevel > 0)
-                Profile.RenderMaxLevel = maxLevel;
 
             if (tileResolution >= 2)
                 Profile.RenderBaseTileResolution = tileResolution;
@@ -231,7 +228,7 @@ namespace LimitlessSquareEngine.Engine
                     ? Math.Sqrt(camDist * camDist - surfaceRadius * surfaceRadius)
                     : 0.0;
 
-                _cameraInterest.Add(local, horizon * StreamRadiusScale + StreamRadiusMargin, Profile.RenderMaxLevel);
+                _cameraInterest.Add(local, horizon * StreamRadiusScale + StreamRadiusMargin, int.MaxValue);
             }
         }
 

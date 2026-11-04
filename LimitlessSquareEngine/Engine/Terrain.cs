@@ -63,6 +63,7 @@ namespace LimitlessSquareEngine.Engine
 
             Streamer.Profile = Profile;
             Streamer.PlanetRadius = Radius;
+            Streamer.VoxelCoverRadius = Profile.VoxelCoverRadius;
             Streamer.RenderInterestSources.Add(_cameraInterest);
             Streamer.RenderInterestSources.Add(_manualRenderInterest);
             Streamer.PhysicsInterestSources.Add(_manualPhysicsInterest);
@@ -76,6 +77,16 @@ namespace LimitlessSquareEngine.Engine
 
             Voxel = new TerrainVoxel(this);
             Voxel.CoverRadius = Profile.VoxelCoverRadius;
+
+            Streamer.VoxelReadyAt = Voxel.IsBlockReadyAt;
+            Streamer.VoxelTileReady = Voxel.IsTileReady;
+
+            Profile.ApplyFinest(Radius);
+
+            QuadSphere.LevelPerAxis = Profile.LevelPerAxis(Radius);
+            QuadSphere.FinestLevel = Profile.RenderFinestLevel(Radius);
+
+            VoxelBlock.Configure(Profile.RenderBaseTileResolution, Radius, Profile.RenderMaxLevel);
         }
 
         // 配置
@@ -87,6 +98,12 @@ namespace LimitlessSquareEngine.Engine
             Radius = radius;
             Streamer.PlanetRadius = radius;
             _centerDirty = true;
+            Profile.ApplyFinest(radius);
+
+            QuadSphere.LevelPerAxis = Profile.LevelPerAxis(radius);
+            QuadSphere.FinestLevel = Profile.RenderFinestLevel(radius);
+
+            VoxelBlock.Configure(Profile.RenderBaseTileResolution, radius, Profile.RenderMaxLevel);
         }
 
         public void SetSeed(uint seed)
@@ -254,7 +271,7 @@ namespace LimitlessSquareEngine.Engine
             artifact.LayerTags = tags;
             artifact.LayerCount = layerCount;
             artifact.BuiltStitchLevels = result.StitchLevels;
-            artifact.BuildData = buildData;
+            artifact.BuildData = null;
         }
 
         // 卸载渲染产物
@@ -290,40 +307,33 @@ namespace LimitlessSquareEngine.Engine
         {
             var image = new Image<Rgba32>(tileSize * tilesX, tileSize * tilesY);
 
-            var baseColors = new[]
-            {
-                new Rgba32(96, 160, 80),
-                new Rgba32(120, 110, 100),
-                new Rgba32(200, 180, 130),
-                new Rgba32(235, 235, 245)
-            };
-
             for (int y = 0; y < image.Height; y++)
             {
                 int ty = y / tileSize;
+                int ly = y % tileSize;
+
                 for (int x = 0; x < image.Width; x++)
                 {
                     int tx = x / tileSize;
-                    Rgba32 baseColor = baseColors[(ty * tilesX + tx) % baseColors.Length];
-                    bool checker = ((x / 16) + (y / 16)) % 2 == 0;
-                    int shade = checker ? 3 : 1;
-                    image[x, y] = new Rgba32(
-                        (byte)Math.Clamp(baseColor.R * shade / 4, 0, 255),
-                        (byte)Math.Clamp(baseColor.G * shade / 4, 0, 255),
-                        (byte)Math.Clamp(baseColor.B * shade / 4, 0, 255),
-                        255);
+                    int lx = x % tileSize;
+
+                    bool edge = lx == 0 || ly == 0 || lx == tileSize - 1 || ly == tileSize - 1;
+
+                    image[x, y] = edge
+                        ? new Rgba32(255, 255, 255, 255)
+                        : new Rgba32(64, 160, 64, 255);
                 }
             }
 
             return image;
         }
 
-        private static string BuildTerrainMaterialJson(string atlasKey)
+        private string BuildTerrainMaterialJson(string atlasKey)
         {
             var parameters = new Dictionary<string, object?>
             {
                 ["uColor"] = new[] { 1.0, 1.0, 1.0, 1.0 },
-                ["uUseTexture"] = 1,
+                ["uUseTexture"] = 0,
                 ["uTexture"] = atlasKey,
                 ["uTextureWrap"] = "Clamp",
                 ["uUseAlphaCutoff"] = 0,
@@ -339,13 +349,15 @@ namespace LimitlessSquareEngine.Engine
                 ["uReceiveReflection"] = 0,
                 ["uEnableColorBanding"] = 0,
                 ["uEnableOutline"] = 0,
+                ["uPlanetSeaLevelRadius"] = Radius,
+                ["uTerrainHeightScale"] = 1.0,
                 ["uCull"] = "front"
             };
 
             var root = new Dictionary<string, object?>
             {
                 ["assetType"] = "Material",
-                ["shader"] = "Shaders/Builtin/Lit",
+                ["shader"] = "Shaders/Builtin/Terrain",
                 ["parameters"] = parameters
             };
 
@@ -562,7 +574,7 @@ namespace LimitlessSquareEngine.Engine
                 double fovRadians = item.Settings.ProjectionType == 1
                     ? 0.0
                     : item.Settings.FovOrSize * Math.PI / 180.0;
-                cameras.Add((pos, Profile.RenderMaxLevel, 1.0, forward, fovRadians, 16.0 / 9.0));
+                cameras.Add((pos, int.MaxValue, 1.0, forward, fovRadians, 16.0 / 9.0));
             }
 
             _cameraInterest.SetCameras(cameras);

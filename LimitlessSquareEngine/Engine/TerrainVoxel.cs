@@ -24,7 +24,7 @@ namespace LimitlessSquareEngine.Engine
         public double CoverRadius = 128.0;
         public double CoverExtent => VoxelBlock.CellSize * VoxelBlock.VoxelSize * 0.8660254037844386;
         public int MaxBlocksPerTick = 24;
-        public int MaxCommitsPerTick = 6;
+        public int MaxCommitsPerTick = 8;
         public int MaxInFlightBuilds = 4;
         public double UnloadGraceSeconds = 1.0;
 
@@ -105,6 +105,48 @@ namespace LimitlessSquareEngine.Engine
                 block.State = TileArtifactState.Invalidated;
         }
 
+        public bool IsBlockReadyAt(in Double3 worldPos)
+        {
+            Double3 dir = Normalize(worldPos);
+            double surface = _terrain.Height.SampleDirection(dir);
+            double shellHeight = VoxelBlock.ShellHeight;
+            int shell = (int)Math.Floor(surface / shellHeight);
+
+            QuadSphere.DirToFaceUV(dir, out int face, out double u, out double v);
+            int level = _terrain.Profile.RenderMaxLevel;
+            int per = QuadSphere.TileCountPerAxis(level);
+            int lx = Math.Clamp((int)Math.Floor((u + 1.0) * 0.5 * per), 0, per - 1);
+            int ly = Math.Clamp((int)Math.Floor((v + 1.0) * 0.5 * per), 0, per - 1);
+
+            var key = new VoxelBlockKey(face, level, lx, ly, shell);
+
+            return _blocks.TryGetValue(key, out VoxelBlock? block) &&
+                block.State == TileArtifactState.Ready;
+        }
+
+        public bool IsTileReady(int face, int level, int lx, int ly)
+        {
+            double shellHeight = VoxelBlock.ShellHeight;
+
+            if (!(shellHeight > 0.0))
+                return false;
+
+            Double3 centerDir = QuadSphere.TileCenterDir(new TileKey(face, level, lx, ly));
+            double surface = _terrain.Radius + _terrain.Height.SampleDirection(centerDir);
+            int shellCenter = (int)Math.Floor(surface / shellHeight);
+
+            for (int shell = shellCenter - 2; shell <= shellCenter + 2; shell++)
+            {
+                var key = new VoxelBlockKey(face, level, lx, ly, shell);
+
+                if (_blocks.TryGetValue(key, out VoxelBlock? block) &&
+                    block.State == TileArtifactState.Ready)
+                    return true;
+            }
+
+            return false;
+        }
+
         public void Clear()
         {
             Graphics? graphics = Scene.BoundGraphics;
@@ -148,59 +190,64 @@ namespace LimitlessSquareEngine.Engine
 
         private void ComputeWindow()
         {
-            double half = CoverRadius;
-            int bxMin = (int)Math.Floor((_center.X - half) / VoxelBlock.CellSize);
-            int bxMax = (int)Math.Floor((_center.X + half) / VoxelBlock.CellSize);
-            int byMin = (int)Math.Floor((_center.Y - half) / VoxelBlock.CellSize);
-            int byMax = (int)Math.Floor((_center.Y + half) / VoxelBlock.CellSize);
-            int bzMin = (int)Math.Floor((_center.Z - half) / VoxelBlock.CellSize);
-            int bzMax = (int)Math.Floor((_center.Z + half) / VoxelBlock.CellSize);
-
             int enqueued = 0;
+            int finestLevel = _terrain.Profile.RenderMaxLevel;
+            double per = QuadSphere.TilesPerAxis(finestLevel);
 
-            for (int bz = bzMin; bz <= bzMax; bz++)
+            if (!(per > 0.0))
+                return;
+
+            double tileSize = 2.0 * _terrain.Radius / per;
+            int half = Math.Max(1, (int)Math.Ceiling(CoverRadius / tileSize) + 1);
+
+            int bound = QuadSphere.TileCountPerAxis(finestLevel);
+            var visited = new HashSet<VoxelBlockKey>();
+
+            Double3 camDir = Normalize(_center);
+
+            for (int face = 0; face < QuadSphere.FaceCount; face++)
             {
-                for (int by = byMin; by <= byMax; by++)
+                QuadSphere.GetFaceAxes(face, out Double3 faceNormal, out Double3 faceRight, out Double3 faceUp);
+
+                double dn = camDir.X * faceNormal.X + camDir.Y * faceNormal.Y + camDir.Z * faceNormal.Z;
+                if (Math.Abs(dn) <= 1e-6)
+                    continue;
+
+                double camU = (camDir.X * faceRight.X + camDir.Y * faceRight.Y + camDir.Z * faceRight.Z) / dn;
+                double camV = (camDir.X * faceUp.X + camDir.Y * faceUp.Y + camDir.Z * faceUp.Z) / dn;
+
+                camU = Math.Clamp(camU, -1.0, 1.0);
+                camV = Math.Clamp(camV, -1.0, 1.0);
+
+                int cx = (int)Math.Floor((camU + 1.0) * 0.5 * per);
+                int cy = (int)Math.Floor((camV + 1.0) * 0.5 * per);
+
+                cx = Math.Clamp(cx, 0, bound - 1);
+                cy = Math.Clamp(cy, 0, bound - 1);
+
+                for (int ring = 0; ring <= half; ring++)
                 {
-                    for (int bx = bxMin; bx <= bxMax; bx++)
+                    for (int dy = -ring; dy <= ring; dy++)
                     {
-                        var key = new VoxelBlockKey(bx, by, bz);
-
-                        if (_blocks.TryGetValue(key, out VoxelBlock? existing))
+                        for (int dx = -ring; dx <= ring; dx++)
                         {
-                            existing.LastAccessTime = _time;
+                            if (Math.Max(Math.Abs(dx), Math.Abs(dy)) != ring)
+                                continue;
 
-                            if (existing.State == TileArtifactState.Invalidated &&
-                                enqueued < MaxBlocksPerTick)
-                            {
-                                existing.State = TileArtifactState.Queued;
-                                _pending.Enqueue(new VoxelBuildJob { Block = existing });
-                                enqueued++;
-                            }
+                            int lx = cx + dx;
+                            int ly = cy + dy;
 
-                            continue;
-                        }
+                            if (lx < 0 || lx >= bound || ly < 0 || ly >= bound)
+                                continue;
 
-                        var origin = new Double3(
-                            bx * VoxelBlock.CellSize * VoxelBlock.VoxelSize,
-                            by * VoxelBlock.CellSize * VoxelBlock.VoxelSize,
-                            bz * VoxelBlock.CellSize * VoxelBlock.VoxelSize);
+                            var node = new TileKey(face, finestLevel, lx, ly);
+                            Double3 centerDir = QuadSphere.TileCenterDir(node);
+                            double centerDist = DistanceToTile(_center, centerDir);
 
-                        if (!IsBlockOnSurface(origin))
-                            continue;
+                            if (centerDist > CoverRadius)
+                                continue;
 
-                        var block = new VoxelBlock(key, origin);
-                        _blocks[key] = block;
-
-                        if (enqueued < MaxBlocksPerTick)
-                        {
-                            block.State = TileArtifactState.Queued;
-                            _pending.Enqueue(new VoxelBuildJob { Block = block });
-                            enqueued++;
-                        }
-                        else
-                        {
-                            block.State = TileArtifactState.Invalidated;
+                            EnqueueShells(node, centerDir, centerDist, visited, ref enqueued);
                         }
                     }
                 }
@@ -235,52 +282,122 @@ namespace LimitlessSquareEngine.Engine
                     _blocks.Remove(key);
                 }
             }
+
+            int staleCount = _pending.Count;
+
+            for (int i = 0; i < staleCount; i++)
+            {
+                if (!_pending.TryDequeue(out VoxelBuildJob? job))
+                    break;
+
+                if (job.Block.LastAccessTime == _time)
+                {
+                    _pending.Enqueue(job);
+                    continue;
+                }
+
+                if (job.Block.State == TileArtifactState.Queued)
+                    job.Block.State = TileArtifactState.Invalidated;
+            }
         }
 
-        private bool IsBlockOnSurface(in Double3 origin)
+        private void EnqueueShells(in TileKey node, in Double3 centerDir, double centerDist,
+            HashSet<VoxelBlockKey> visited, ref int enqueued)
         {
-            double half = VoxelBlock.CellSize * VoxelBlock.VoxelSize * 0.5;
-            double extent = VoxelBlock.CellSize * VoxelBlock.VoxelSize * 0.8660254037844386;
-            double cx = origin.X + half;
-            double cy = origin.Y + half;
-            double cz = origin.Z + half;
+            if (centerDist > CoverRadius)
+                return;
 
-            double dx = cx - _center.X;
-            double dy = cy - _center.Y;
-            double dz = cz - _center.Z;
+            double shellHeight = VoxelBlock.ShellHeight;
+            double minSurface = double.MaxValue;
+            double maxSurface = double.MinValue;
 
-            if (Math.Sqrt(dx * dx + dy * dy + dz * dz) - extent >= CoverRadius)
-                return false;
+            for (int c = 0; c < 5; c++)
+            {
+                Double3 dir = c == 4 ? centerDir : QuadSphere.TileCornerDir(node, c);
+                double h = _terrain.Radius + _terrain.Height.SampleDirection(dir);
 
-            double len = Math.Sqrt(cx * cx + cy * cy + cz * cz);
+                if (h < minSurface)
+                    minSurface = h;
 
-            if (len <= 1e-300)
-                return true;
+                if (h > maxSurface)
+                    maxSurface = h;
+            }
 
-            var dir = new Double3(cx / len, cy / len, cz / len);
-            double surface = _terrain.Radius + _terrain.Height.SampleDirection(dir);
+            int shellMin = (int)Math.Floor((minSurface - VoxelBlock.VoxelSize) / shellHeight);
+            int shellMax = (int)Math.Floor((maxSurface + VoxelBlock.VoxelSize) / shellHeight);
 
-            return Math.Abs(len - surface) <= extent + 1.0;
+            for (int shell = shellMin; shell <= shellMax; shell++)
+            {
+                var key = new VoxelBlockKey(node.Face, node.Level, node.LX, node.LY, shell);
+
+                if (!visited.Add(key))
+                    continue;
+
+                if (_blocks.TryGetValue(key, out VoxelBlock? existing))
+                {
+                    existing.LastAccessTime = _time;
+
+                    if (existing.State == TileArtifactState.Invalidated && enqueued < MaxBlocksPerTick)
+                    {
+                        existing.State = TileArtifactState.Queued;
+                        _pending.Enqueue(new VoxelBuildJob { Block = existing });
+                        enqueued++;
+                    }
+
+                    continue;
+                }
+
+                var block = new VoxelBlock(key);
+                block.LastAccessTime = _time;
+                _blocks[key] = block;
+
+                if (enqueued < MaxBlocksPerTick)
+                {
+                    block.State = TileArtifactState.Queued;
+                    _pending.Enqueue(new VoxelBuildJob { Block = block });
+                    enqueued++;
+                }
+                else
+                {
+                    block.State = TileArtifactState.Invalidated;
+                }
+            }
         }
 
         private void InvalidateRegion(in Double3 center, double radius)
         {
-            double half = VoxelBlock.CellSize * VoxelBlock.VoxelSize * 0.5;
-            double extent = VoxelBlock.CellSize * VoxelBlock.VoxelSize * 0.8660254037844386;
-
             foreach (VoxelBlock block in _blocks.Values)
             {
-                double dx = block.Origin.X + half - center.X;
-                double dy = block.Origin.Y + half - center.Y;
-                double dz = block.Origin.Z + half - center.Z;
-                double dist = Math.Sqrt(dx * dx + dy * dy + dz * dz);
+                Double3 centerDir = QuadSphere.TileCenterDir(
+                    new TileKey(block.Key.Face, block.Key.Level, block.Key.LX, block.Key.LY));
+                double dist = DistanceToTile(center, centerDir);
 
-                if (dist > radius + extent)
+                if (dist > radius + VoxelBlock.ShellHeight)
                     continue;
 
                 if (block.State == TileArtifactState.Ready || block.State == TileArtifactState.None)
                     block.State = TileArtifactState.Invalidated;
             }
+        }
+
+        private static double DistanceToTile(in Double3 point, in Double3 dir)
+        {
+            double len = Math.Sqrt(point.X * point.X + point.Y * point.Y + point.Z * point.Z);
+            double px = dir.X * len;
+            double py = dir.Y * len;
+            double pz = dir.Z * len;
+            double dx = point.X - px;
+            double dy = point.Y - py;
+            double dz = point.Z - pz;
+            return Math.Sqrt(dx * dx + dy * dy + dz * dz);
+        }
+
+        private static Double3 Normalize(in Double3 v)
+        {
+            double len = Math.Sqrt(v.X * v.X + v.Y * v.Y + v.Z * v.Z);
+            if (len <= 1e-300)
+                return new Double3(0, 0, 1);
+            return new Double3(v.X / len, v.Y / len, v.Z / len);
         }
 
         private void EnsureWorkers()
@@ -337,6 +454,7 @@ namespace LimitlessSquareEngine.Engine
                 {
                     Console.WriteLine($"[X] Voxel build failed for {job.Block.Key}: {ex.Message}");
                     job.Block.State = TileArtifactState.None;
+                    job.Block.LastAccessTime = _time + 5.0;
                 }
                 finally
                 {
@@ -379,14 +497,14 @@ namespace LimitlessSquareEngine.Engine
                 Program._generatedMaterialJsonRegistry[_voxelMaterialKey] = BuildVoxelMaterialJson(atlasKey);
         }
 
-        private static string BuildVoxelMaterialJson(string atlasKey)
+        private string BuildVoxelMaterialJson(string atlasKey)
         {
             var parameters = new Dictionary<string, object?>
             {
                 ["uColor"] = new[] { 1.0, 1.0, 1.0, 1.0 },
-                ["uUseTexture"] = 1,
+                ["uUseTexture"] = 0,
                 ["uTexture"] = atlasKey,
-                ["uTextureWrap"] = "Repeat",
+                ["uTextureWrap"] = "Clamp",
                 ["uUseAlphaCutoff"] = 0,
                 ["uUseNormalTexture"] = 0,
                 ["uAmbientStrength"] = 1.0,
@@ -400,13 +518,15 @@ namespace LimitlessSquareEngine.Engine
                 ["uReceiveReflection"] = 0,
                 ["uEnableColorBanding"] = 0,
                 ["uEnableOutline"] = 0,
+                ["uPlanetSeaLevelRadius"] = _terrain.Radius,
+                ["uTerrainHeightScale"] = 1.0,
                 ["uCull"] = "front"
             };
 
             var root = new Dictionary<string, object?>
             {
                 ["assetType"] = "Material",
-                ["shader"] = "Shaders/Builtin/Lit",
+                ["shader"] = "Shaders/Builtin/Terrain",
                 ["parameters"] = parameters
             };
 
@@ -426,6 +546,7 @@ namespace LimitlessSquareEngine.Engine
             if (result.IsEmpty)
             {
                 UnloadBlockGraphics(block, graphics);
+                Physics.RemoveVoxelCollider(_terrain.SceneId, BuildObjectId(block.Key));
                 block.State = TileArtifactState.Ready;
                 block.LastAccessTime = _time;
                 return;
@@ -458,12 +579,16 @@ namespace LimitlessSquareEngine.Engine
             _meshIds[block.Key] = meshId;
             _objectIds[block.Key] = objectId;
 
+            Physics.SetVoxelCollider(_terrain.SceneId, objectId, result.Origin, result.Vertices);
+
             block.State = TileArtifactState.Ready;
             block.LastAccessTime = _time;
         }
 
         private void UnloadBlockGraphics(VoxelBlock block, Graphics? graphics)
         {
+            Physics.RemoveVoxelCollider(_terrain.SceneId, BuildObjectId(block.Key));
+
             if (graphics == null)
                 return;
 
@@ -483,13 +608,13 @@ namespace LimitlessSquareEngine.Engine
         private string BuildMeshId(VoxelBlockKey key)
         {
             return "voxel:" + _terrain.SceneId + ":" + _terrain.ObjectId +
-                ":v" + key.BX + ":" + key.BY + ":" + key.BZ;
+                ":v" + key.Face + ":" + key.Level + ":" + key.LX + ":" + key.LY + ":" + key.Shell;
         }
 
         private string BuildObjectId(VoxelBlockKey key)
         {
             return "voxel:" + _terrain.SceneId + ":" + _terrain.ObjectId +
-                ":o" + key.BX + ":" + key.BY + ":" + key.BZ;
+                ":o" + key.Face + ":" + key.Level + ":" + key.LX + ":" + key.LY + ":" + key.Shell;
         }
     }
 }

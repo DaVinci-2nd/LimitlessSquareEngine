@@ -136,6 +136,8 @@ namespace LimitlessSquareEngine.Engine
             if (root.TryGetProperty("profile", out JsonElement profile) && profile.ValueKind == JsonValueKind.Object)
                 ApplyProfile(terrain.Profile, profile);
 
+            terrain.Profile.ApplyFinest(terrain.Radius);
+
             if (root.TryGetProperty("atlas", out JsonElement atlas) && atlas.ValueKind == JsonValueKind.Object)
                 ApplyAtlas(terrain, atlas);
         }
@@ -159,7 +161,6 @@ namespace LimitlessSquareEngine.Engine
         {
             if (TryGetNumber(p, "renderBaseLevel", out double rbl)) profile.RenderBaseLevel = (int)rbl;
             if (TryGetNumber(p, "renderBaseRadius", out double rbr)) profile.RenderBaseRadius = rbr;
-            if (TryGetNumber(p, "renderMaxLevel", out double rml)) profile.RenderMaxLevel = (int)rml;
             if (TryGetNumber(p, "renderStreamRadius", out double rsr)) profile.RenderStreamRadius = rsr;
             if (TryGetNumber(p, "renderBudgetMilliseconds", out double rbms)) profile.RenderBudgetMilliseconds = rbms;
             if (TryGetNumber(p, "renderBaseTileResolution", out double rbtr)) profile.RenderBaseTileResolution = (int)rbtr;

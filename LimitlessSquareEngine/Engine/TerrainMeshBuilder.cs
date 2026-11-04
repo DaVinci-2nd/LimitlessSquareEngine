@@ -96,20 +96,13 @@ namespace LimitlessSquareEngine.Engine
                 for (int i = 0; i < grid; i++)
                 {
                     int idx = j * grid + i;
-                    double u = u0 + i * du;
-                    double v = v0 + j * dv;
-                    double um = u - du;
-                    double up = u + du;
-                    double vm = v - dv;
-                    double vp = v + dv;
+                    int im = j * grid + Math.Max(i - 1, 0);
+                    int ip = j * grid + Math.Min(i + 1, grid - 1);
+                    int jm = Math.Max(j - 1, 0) * grid + i;
+                    int jp = Math.Min(j + 1, grid - 1) * grid + i;
 
-                    Double3 pm = NegateZ(ScaleDir(QuadSphere.FaceDir(key.Face, um, v), radius + HeightAt(key.Face, um, v)));
-                    Double3 pp = NegateZ(ScaleDir(QuadSphere.FaceDir(key.Face, up, v), radius + HeightAt(key.Face, up, v)));
-                    Double3 qm = NegateZ(ScaleDir(QuadSphere.FaceDir(key.Face, u, vm), radius + HeightAt(key.Face, u, vm)));
-                    Double3 qp = NegateZ(ScaleDir(QuadSphere.FaceDir(key.Face, u, vp), radius + HeightAt(key.Face, u, vp)));
-
-                    Double3 dU = pp - pm;
-                    Double3 dV = qp - qm;
+                    Double3 dU = worldRender[ip] - worldRender[im];
+                    Double3 dV = worldRender[jp] - worldRender[jm];
 
                     Double3 n = Cross(dU, dV);
                     if (Dot(n, dirsRender[idx]) < 0.0)
@@ -188,10 +181,8 @@ namespace LimitlessSquareEngine.Engine
             double baseU, double baseV, double sizeU, double sizeV,
             Double3[] worldRender, in Double3 originRender, Double3[] normals, Double3[] tangents, double[] bitSigns)
         {
-            double tileU = (double)(vi % grid) / (grid - 1) * tilingPerFace;
-            double tileV = (double)(vi / grid) / (grid - 1) * tilingPerFace;
-            double fu = tileU - Math.Floor(tileU);
-            double fv = tileV - Math.Floor(tileV);
+            double fu = (double)(vi % grid) / (grid - 1);
+            double fv = (double)(vi / grid) / (grid - 1);
 
             WriteVertex(
                 floats,

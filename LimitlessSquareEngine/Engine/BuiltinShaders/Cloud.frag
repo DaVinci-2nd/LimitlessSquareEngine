@@ -121,19 +121,34 @@ float sampleDensity(vec3 planetLocal, float h, float t, float detailScale)
 
     float lod = cloudLodBias(t);
 
+    float webY = -0.6 + h * 3.6;
+
+    float shapeWeb = textureLod(uCloudShapeNoise, p / max(uCloudShapeTile, 1.0) * 0.32, 0.0).r;
+    float coverageWeb = smoothstep(0.20, 0.80, shapeWeb);
+
+    float topY = 0.5 + 2.5 * coverageWeb;
+    float heightMask = smoothstep(-0.6, 0.3, webY) * (1.0 - smoothstep(topY - 1.0, topY, webY));
+
+    float detailWeb = textureLod(uCloudDetailNoise, p / max(uCloudShapeTile, 1.0) * 1.45, 0.0).r;
+    float dWeb = coverageWeb - 0.42 * detailWeb * (1.0 - coverageWeb);
+    float densityWeb = clamp(dWeb * heightMask * 2.0, 0.0, 1.0);
+
+    if (densityWeb <= 0.001)
+        return 0.0;
+
     vec3 shapeCoord = (p + vec3(evo * 14.0, evo * 3.0, evo * 8.0)) / max(uCloudShapeTile, 1.0);
 
     vec3 warpVec = textureLod(uCloudShapeNoise, shapeCoord * 0.125 + vec3(0.0, evo * 0.001, 0.0), 3.5).gba - 0.5;
     vec3 warpedCoord = shapeCoord + warpVec * uCloudWarpStrength * 0.08;
 
-    vec4 shapeTex = textureLod(uCloudShapeNoise, warpedCoord, lod);
+    float shapeOrig = textureLod(uCloudShapeNoise, warpedCoord, lod).r;
 
     float coarse = textureLod(uCloudShapeNoise, shapeCoord * max(uCloudCoverageScale, 0.0001), 1.5).r;
 
-    float heightGrad = smoothstep(0.0, 0.10, h) * (1.0 - smoothstep(0.35, 0.9, h));
+    float heightGrad = smoothstep(0.0, 0.10, h) * (1.0 - smoothstep(0.55, 1.0, h));
 
-    float conc = clamp(coarse, 0.0, 1.0) * clamp(shapeTex.r, 0.0, 1.0);
-    conc = clamp(conc * 8.0, 0.0, 1.0);
+    float conc = clamp(coarse, 0.0, 1.0) * clamp(shapeOrig, 0.0, 1.0);
+    conc = clamp(conc * 14.0, 0.0, 1.0);
 
     if (detailScale > 0.5)
     {
@@ -141,21 +156,17 @@ float sampleDensity(vec3 planetLocal, float h, float t, float detailScale)
         conc *= mix(1.0, clamp((detailNoise - 0.5) * 2.0 + 0.5, 0.15, 1.0), uCloudDetailStrength);
     }
 
-    float threshold = 0.1;
-    float density;
-    if (conc >= threshold)
-    {
-        float t = (conc - threshold) / (1.0 - threshold);
-        float levels = 4.0;
-        t = floor(t * levels + 0.001) / levels;
-        density = t * heightGrad;
-    }
-    else
-    {
-        density = 0.0;
-    }
+    float threshold = 0.05;
 
-    return density;
+    if (conc < threshold)
+        return 0.0;
+
+    float concT = (conc - threshold) / (1.0 - threshold);
+    concT = floor(concT * 4.0 + 0.001) / 4.0;
+
+    float densityOrig = concT * heightGrad;
+
+    return clamp(max(densityWeb * densityOrig * 2.0, densityOrig), 0.0, 1.0);
 }
 
 vec3 findSunDir()
@@ -272,109 +283,103 @@ void main()
     float darkTwilightWeight;
     float nightBlend;
     EvaluateTwilightBlends(cloudSunAngle, dayBlend, twilightWeight, darkTwilightWeight, nightBlend);
+
+    float nightMulOuter = mix(1.0, 0.03, 1.0 - smoothstep(-0.15, 0.05, cos(cloudSunAngle)));
+
     vec3 cloudCol = uCloudLightColor * dayBlend
                   + uCloudTwilightColor * twilightWeight
-                  + uCloudDarkTwilightColor * darkTwilightWeight
-                  + uCloudShadeColor * nightBlend;
+                  + uCloudDarkTwilightColor * darkTwilightWeight;
 
     float extinct = max(uCloudExtinction, 0.0000001);
 
     float transmittance = 1.0;
     float firstCloudT = -1.0;
     float firstShade = 0.0;
+    vec3 cloudAccum = vec3(0.0);
     float cloudTopRadius = uPlanetRadius + uCloudBaseAltitude + uCloudThickness;
 
-    int budget = max(uCloudMaxSteps, 8);
-    float minStep = max(0.0, (fullExit - fullEntry) / float(budget));
-    int emptyStreak = 0;
-
-    float grid = max(min(stepForT(tEntry, minStep), tExit - tEntry), 1.0);
-    float t = tEntry + jitter * grid;
+    int budget = 24;
+    float stepLen = max((tExit - tEntry) / float(budget), 1.0);
+    float t = tEntry + jitter * stepLen;
 
     for (int i = 0; i < budget && t < tExit; i++)
     {
-        float stepLen = stepForT(t, minStep);
-        float stride = emptyStreak >= 2 ? stepLen * 2.0 : stepLen;
-        stride = min(stride, tExit - t);
+        float stride = min(stepLen, tExit - t);
 
-        float sampleT = t + stride * 0.5;
-
-        vec3 samplePos = camLocal + viewDirWorld * sampleT;
+        vec3 samplePos = camLocal + viewDirWorld * t;
         float alt = length(samplePos) - uPlanetRadius;
 
-        if (alt <= uCloudBaseAltitude || alt >= uCloudBaseAltitude + uCloudThickness)
+        if (alt > uCloudBaseAltitude && alt < uCloudBaseAltitude + uCloudThickness)
         {
-            emptyStreak++;
-            t += stride;
-            continue;
-        }
+            float h = (alt - uCloudBaseAltitude) / max(uCloudThickness, 0.0001);
+            float density = sampleDensity(samplePos, h, t, 1.0);
 
-        float h = (alt - uCloudBaseAltitude) / max(uCloudThickness, 0.0001);
-        float density = sampleDensity(samplePos, h, sampleT, 1.0);
-
-        if (density <= 0.001)
-        {
-            emptyStreak++;
-            t += stride;
-            continue;
-        }
-
-        if (emptyStreak >= 2)
-        {
-            stride = stepLen;
-            sampleT = t + stride * 0.5;
-            samplePos = camLocal + viewDirWorld * sampleT;
-            alt = length(samplePos) - uPlanetRadius;
-
-            if (alt <= uCloudBaseAltitude || alt >= uCloudBaseAltitude + uCloudThickness)
+            if (density > 0.005)
             {
-                emptyStreak = 0;
-                t += stride;
-                continue;
-            }
+                if (firstCloudT < 0.0)
+                    firstCloudT = t;
 
-            h = (alt - uCloudBaseAltitude) / max(uCloudThickness, 0.0001);
-            density = sampleDensity(samplePos, h, sampleT, 1.0);
+                float sunThickness = 0.0;
+                float sunProbeStep = max(uCloudThickness, 1.0) * 0.25;
 
-            if (density <= 0.001)
-            {
-                emptyStreak = 0;
-                t += stride;
-                continue;
+                for (int k = 1; k <= 3; k++)
+                {
+                    vec3 probePos = samplePos + sunDir * (float(k) * sunProbeStep);
+                    float probeAlt = length(probePos) - uPlanetRadius;
+                    float probeH = (probeAlt - uCloudBaseAltitude) / max(uCloudThickness, 0.0001);
+
+                    if (probeH <= 0.0 || probeH >= 1.0)
+                        break;
+
+                    sunThickness += sampleDensity(probePos, probeH, 0.0, 0.0);
+                }
+
+                sunThickness *= sunProbeStep;
+
+                float sunShadeAmount = 1.0 - exp(-sunThickness * extinct);
+                firstShade = floor(clamp(sunShadeAmount, 0.0, 1.0) * 3.0 + 0.001) / 3.0;
+
+                float sampleAlpha = 1.0 - exp(-density * 3.2 * (stepLen / max(uCloudThickness / 3.6, 1.0)));
+
+                float nightMul = mix(1.0, 0.03, 1.0 - smoothstep(-0.15, 0.05, cos(cloudSunAngle)));
+
+                vec3 litTint = uCloudLightColor * dayBlend
+                             + uCloudTwilightColor * twilightWeight
+                             + uCloudDarkTwilightColor * darkTwilightWeight;
+
+                vec3 shadeTint = uCloudShadeColor * dayBlend
+                               + uCloudTwilightColor * twilightWeight * 0.45
+                               + uCloudDarkTwilightColor * darkTwilightWeight;
+
+                vec3 colCloud = mix(litTint, shadeTint, firstShade) * nightMul;
+
+                cloudAccum += colCloud * sampleAlpha * transmittance;
+
+                transmittance *= (1.0 - sampleAlpha);
+
+                if (transmittance < 0.01)
+                    break;
             }
         }
 
-        emptyStreak = 0;
-
-        if (firstCloudT < 0.0)
-            firstCloudT = sampleT;
-
-        float cosIncident = max(dot(normalize(samplePos), sunDir), 0.1);
-        float sunProbeStep = max(uCloudThickness, 1.0) * 0.25 / cosIncident;
-        float sunThickness = 0.0;
-        for (int k = 1; k <= 4; k++)
-        {
-            vec3 probePos = samplePos + sunDir * (float(k) * sunProbeStep);
-            float probeAlt = length(probePos) - uPlanetRadius;
-            float probeH = (probeAlt - uCloudBaseAltitude) / max(uCloudThickness, 0.0001);
-            if (probeH <= 0.0 || probeH >= 1.0)
-                break;
-            sunThickness += sampleDensity(probePos, probeH, 0.0, 0.0);
-        }
-        sunThickness *= sunProbeStep;
-
-        float sunShadeAmount = 1.0 - exp(-sunThickness * extinct);
-        firstShade = floor(clamp(sunShadeAmount, 0.0, 1.0) * 3.0 + 0.001) / 3.0;
-        float nightMul = mix(1.0, 0.03, 1.0 - smoothstep(-0.15, 0.05, cos(cloudSunAngle)));
-        cloudCol = mix(uCloudLightColor * dayBlend + uCloudTwilightColor * twilightWeight + uCloudDarkTwilightColor * darkTwilightWeight + uCloudShadeColor * nightBlend, uCloudShadeColor, firstShade) * nightMul;
-
-        transmittance *= exp(-density * stride * extinct);
-
-        if (transmittance < 0.02)
-            break;
-
-        t += stride;
+        t += stepLen;
     }
+
+    vec3 cloudLit = cloudAccum + cloudCol * transmittance;
+
+    cloudCol = cloudLit * nightMulOuter;
+
+    float lum = dot(cloudCol, vec3(0.299, 0.587, 0.114));
+    float lumLo = dot(uCloudShadeColor, vec3(0.299, 0.587, 0.114));
+    float lumHi = dot(uCloudLightColor, vec3(0.299, 0.587, 0.114));
+    float lumT = clamp((lum - lumLo) / max(lumHi - lumLo, 0.0001), 0.0, 1.0);
+    float lumQ;
+    if (lumT >= 0.62) lumQ = lumHi;
+    else if (lumT >= 0.40) lumQ = lumLo + 0.6667 * (lumHi - lumLo);
+    else if (lumT >= 0.18) lumQ = lumLo + 0.3333 * (lumHi - lumLo);
+    else lumQ = lumLo;
+    lumQ *= nightMulOuter;
+    cloudCol *= lumQ / max(lum, 0.0001);
 
     float alpha = 1.0 - transmittance;
     alpha = smoothstep(uCloudAlphaMin, uCloudAlphaMax, alpha);

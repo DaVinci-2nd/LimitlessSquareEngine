@@ -132,11 +132,27 @@ namespace LimitlessSquareEngine.Engine
             v = (dir.X * f.U.X + dir.Y * f.U.Y + dir.Z * f.U.Z) / dn;
         }
 
+        public static double LevelPerAxis = 1.0;
+
+        public static int FinestLevel = 0;
+
+        public static double TilesPerAxis(int level)
+        {
+            return TileCountPerAxis(level);
+        }
+
         public static int TileCountPerAxis(int level)
         {
-            if (level <= 0)
-                return 1;
-            return 1 << level;
+            int finest = Math.Max(1, (int)Math.Round(LevelPerAxis));
+
+            if (level >= FinestLevel)
+            {
+                int shift = level - FinestLevel;
+                return shift >= 31 ? int.MaxValue : finest << shift;
+            }
+
+            int back = FinestLevel - level;
+            return back >= 31 ? 1 : Math.Max(1, finest >> back);
         }
 
         public static int TileCount(int level)
@@ -148,15 +164,16 @@ namespace LimitlessSquareEngine.Engine
         // 返回指定级别区块的参数范围
         public static void GetTileRange(int level, int lx, int ly, out double u0, out double v0, out double u1, out double v1)
         {
-            int per = TileCountPerAxis(level);
-            if (lx < 0 || lx >= per || ly < 0 || ly >= per)
+            double per = TilesPerAxis(level);
+            int bound = TileCountPerAxis(level);
+            if (lx < 0 || lx >= bound || ly < 0 || ly >= bound)
                 throw new ArgumentOutOfRangeException(nameof(lx), $"Tile coords out of range at level {level}: ({lx},{ly})");
 
             double step = 2.0 / per;
-            u0 = -1.0 + lx * step;
-            v0 = -1.0 + ly * step;
-            u1 = u0 + step;
-            v1 = v0 + step;
+            u0 = Math.Max(-1.0, -1.0 + lx * step);
+            v0 = Math.Max(-1.0, -1.0 + ly * step);
+            u1 = Math.Min(1.0, u0 + step);
+            v1 = Math.Min(1.0, v0 + step);
         }
 
         public static Double3 TileCenterDir(in TileKey key)

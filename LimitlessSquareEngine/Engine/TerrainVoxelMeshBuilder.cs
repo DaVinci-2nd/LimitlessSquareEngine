@@ -27,16 +27,16 @@ namespace LimitlessSquareEngine.Engine
 
         public VoxelMeshResult Build(VoxelBlock block, double tilingPerFace, int atlasTilesX, int atlasTilesY)
         {
-            const int sampleSize = VoxelBlock.SampleSize;
-            const int cellCount = VoxelBlock.SampleSize - 1;
+            int sampleSize = VoxelBlock.SampleSize;
+            int cellCount = VoxelBlock.SampleSize - 1;
 
             float[] sdf = block.Sdf;
 
             var cellVertex = new int[cellCount * cellCount * cellCount];
             Array.Fill(cellVertex, -1);
 
-            var positions = new List<Double3>(8192);
-            var normals = new List<Double3>(8192);
+            var positions = new List<Double3>(512);
+            var normals = new List<Double3>(512);
 
             var cornerSdf = new double[8];
 
@@ -119,7 +119,7 @@ namespace LimitlessSquareEngine.Engine
                 }
             }
 
-            var floats = new List<float>(positions.Count * VertexStride * 6);
+            var floats = new List<float>(positions.Count * VertexStride * 2);
 
             for (int k = 1; k <= cellCount - 2; k++)
             {
@@ -141,7 +141,7 @@ namespace LimitlessSquareEngine.Engine
                         if (v0 < 0 || v1 < 0 || v2 < 0 || v3 < 0)
                             continue;
 
-                        AddQuad(floats, positions, normals, v0, v1, v2, v3, sb > 0.0,
+                        AddQuad(floats, block, positions, normals, v0, v1, v2, v3, sb > 0.0,
                             block.Origin, tilingPerFace, atlasTilesX, atlasTilesY);
                     }
                 }
@@ -167,7 +167,7 @@ namespace LimitlessSquareEngine.Engine
                         if (v0 < 0 || v1 < 0 || v2 < 0 || v3 < 0)
                             continue;
 
-                        AddQuad(floats, positions, normals, v0, v1, v2, v3, sa > 0.0,
+                        AddQuad(floats, block, positions, normals, v0, v1, v2, v3, sa > 0.0,
                             block.Origin, tilingPerFace, atlasTilesX, atlasTilesY);
                     }
                 }
@@ -193,7 +193,7 @@ namespace LimitlessSquareEngine.Engine
                         if (v0 < 0 || v1 < 0 || v2 < 0 || v3 < 0)
                             continue;
 
-                        AddQuad(floats, positions, normals, v0, v1, v2, v3, sb > 0.0,
+                        AddQuad(floats, block, positions, normals, v0, v1, v2, v3, sb > 0.0,
                             block.Origin, tilingPerFace, atlasTilesX, atlasTilesY);
                     }
                 }
@@ -209,6 +209,7 @@ namespace LimitlessSquareEngine.Engine
 
         private static void AddQuad(
             List<float> floats,
+            VoxelBlock block,
             List<Double3> positions,
             List<Double3> normals,
             int v0, int v1, int v2, int v3,
@@ -225,28 +226,29 @@ namespace LimitlessSquareEngine.Engine
 
             if (reverse)
             {
-                WriteVertex(floats, p0, normals[v0], origin, tilingPerFace, atlasTilesX, atlasTilesY);
-                WriteVertex(floats, p2, normals[v2], origin, tilingPerFace, atlasTilesX, atlasTilesY);
-                WriteVertex(floats, p1, normals[v1], origin, tilingPerFace, atlasTilesX, atlasTilesY);
+                WriteVertex(floats, block, p0, normals[v0], origin, tilingPerFace, atlasTilesX, atlasTilesY);
+                WriteVertex(floats, block, p2, normals[v2], origin, tilingPerFace, atlasTilesX, atlasTilesY);
+                WriteVertex(floats, block, p1, normals[v1], origin, tilingPerFace, atlasTilesX, atlasTilesY);
 
-                WriteVertex(floats, p0, normals[v0], origin, tilingPerFace, atlasTilesX, atlasTilesY);
-                WriteVertex(floats, p3, normals[v3], origin, tilingPerFace, atlasTilesX, atlasTilesY);
-                WriteVertex(floats, p2, normals[v2], origin, tilingPerFace, atlasTilesX, atlasTilesY);
+                WriteVertex(floats, block, p0, normals[v0], origin, tilingPerFace, atlasTilesX, atlasTilesY);
+                WriteVertex(floats, block, p3, normals[v3], origin, tilingPerFace, atlasTilesX, atlasTilesY);
+                WriteVertex(floats, block, p2, normals[v2], origin, tilingPerFace, atlasTilesX, atlasTilesY);
             }
             else
             {
-                WriteVertex(floats, p0, normals[v0], origin, tilingPerFace, atlasTilesX, atlasTilesY);
-                WriteVertex(floats, p1, normals[v1], origin, tilingPerFace, atlasTilesX, atlasTilesY);
-                WriteVertex(floats, p2, normals[v2], origin, tilingPerFace, atlasTilesX, atlasTilesY);
+                WriteVertex(floats, block, p0, normals[v0], origin, tilingPerFace, atlasTilesX, atlasTilesY);
+                WriteVertex(floats, block, p1, normals[v1], origin, tilingPerFace, atlasTilesX, atlasTilesY);
+                WriteVertex(floats, block, p2, normals[v2], origin, tilingPerFace, atlasTilesX, atlasTilesY);
 
-                WriteVertex(floats, p0, normals[v0], origin, tilingPerFace, atlasTilesX, atlasTilesY);
-                WriteVertex(floats, p2, normals[v2], origin, tilingPerFace, atlasTilesX, atlasTilesY);
-                WriteVertex(floats, p3, normals[v3], origin, tilingPerFace, atlasTilesX, atlasTilesY);
+                WriteVertex(floats, block, p0, normals[v0], origin, tilingPerFace, atlasTilesX, atlasTilesY);
+                WriteVertex(floats, block, p2, normals[v2], origin, tilingPerFace, atlasTilesX, atlasTilesY);
+                WriteVertex(floats, block, p3, normals[v3], origin, tilingPerFace, atlasTilesX, atlasTilesY);
             }
         }
 
         private static void WriteVertex(
             List<float> floats,
+            VoxelBlock block,
             in Double3 pos,
             in Double3 normal,
             in Double3 origin,
@@ -258,8 +260,10 @@ namespace LimitlessSquareEngine.Engine
             double localY = pos.Y - origin.Y;
             double localZ = -(pos.Z - origin.Z);
 
-            double tileU = localX / VoxelBlock.CellSize;
-            double tileV = localZ / VoxelBlock.CellSize;
+            block.BlockUV(pos, out double tileU, out double tileV);
+
+            tileU *= 1.0 / Math.Max(1, atlasTilesX);
+            tileV *= 1.0 / Math.Max(1, atlasTilesY);
 
             floats.Add((float)localX);
             floats.Add((float)localY);

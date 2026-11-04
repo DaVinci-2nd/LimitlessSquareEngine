@@ -19,10 +19,12 @@ namespace LimitlessSquareEngine.Engine
         }
     }
 
-    // 3D多层柏林噪声高度规则
+    // 多尺度地形高度规则
     public sealed class PerlinHeightRule : ITerrainHeightRule
     {
         private readonly Noise3D _noise;
+        private readonly Noise3D _detailNoise;
+        private readonly Noise3D _ridgeNoise;
         private readonly double[] _frequencies;
         private readonly double[] _amplitudes;
         private readonly int _octaves;
@@ -30,6 +32,8 @@ namespace LimitlessSquareEngine.Engine
         public PerlinHeightRule(uint seed, double[] frequencies, double[] amplitudes, int octaves = 4)
         {
             _noise = new Noise3D(seed);
+            _detailNoise = new Noise3D(seed ^ 0x9E3779B9u);
+            _ridgeNoise = new Noise3D(seed ^ 0x85EBCA6Bu);
             _frequencies = frequencies;
             _amplitudes = amplitudes;
             _octaves = octaves;
@@ -38,11 +42,51 @@ namespace LimitlessSquareEngine.Engine
         public double SampleHeight(in Double3 direction)
         {
             double h = 0.0;
+
             for (int i = 0; i < _frequencies.Length; i++)
             {
                 double f = _frequencies[i];
                 h += _noise.Fbm(direction.X * f, direction.Y * f, direction.Z * f, _octaves) * _amplitudes[i];
             }
+
+            double mass = _noise.Fbm(direction.X * 3.0, direction.Y * 3.0, direction.Z * 3.0, 3);
+            double mountain = Math.Clamp(mass * 1.8 + 0.35, 0.0, 1.0);
+            double plain = 1.0 - mountain;
+
+            double ridge = 0.0;
+            double ridgeAmp = 1.0;
+            double ridgeFreq = 64.0;
+
+            for (int i = 0; i < 4; i++)
+            {
+                double n = _ridgeNoise.Fbm(
+                    direction.X * ridgeFreq,
+                    direction.Y * ridgeFreq,
+                    direction.Z * ridgeFreq,
+                    2);
+
+                ridge += (1.0 - Math.Abs(n)) * ridgeAmp;
+                ridgeAmp *= 0.5;
+                ridgeFreq *= 2.0;
+            }
+
+            h += ridge * mountain * 2200.0;
+
+            double detailFreq = 8192.0;
+
+            for (int i = 0; i < 3; i++)
+            {
+                double n = _detailNoise.Fbm(
+                    direction.X * detailFreq,
+                    direction.Y * detailFreq,
+                    direction.Z * detailFreq,
+                    2);
+
+                double steepness = mountain * 9.0 + plain * 1.0;
+                h += n * steepness;
+                detailFreq *= 2.0;
+            }
+
             return h;
         }
     }

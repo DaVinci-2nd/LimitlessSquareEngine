@@ -15,6 +15,9 @@ namespace LimitlessSquareEngine.Engine
     // 主线程卸载委托
     public delegate void TerrainUnloadDelegate(TerrainTile tile);
 
+    // 体素就绪查询委托
+    public delegate bool TerrainVoxelReadyDelegate(in Double3 worldPos);
+
     internal sealed class BuildJob
     {
         public TerrainTile Tile = null!;
@@ -59,6 +62,10 @@ namespace LimitlessSquareEngine.Engine
         public TerrainBuildDelegate? PhysicsBuilder;
         public TerrainCommitDelegate? PhysicsCommitter;
         public TerrainUnloadDelegate? PhysicsUnloader;
+
+        public TerrainVoxelReadyDelegate? VoxelReadyAt;
+
+        public Func<int, int, int, int, bool>? VoxelTileReady;
 
         private readonly Dictionary<TileKey, TerrainTile> _tiles = new();
         private readonly ConcurrentQueue<BuildJob> _pendingRender = new();
@@ -231,9 +238,9 @@ namespace LimitlessSquareEngine.Engine
         private void CollectRequiredTiles(TerrainInterest interest, HashSet<TileKey> required, bool isPhysics)
         {
             Double3 interestPos = interest.PlanetLocalPos;
-            int maxLevel = Math.Min(
-                interest.MaxLod,
-                isPhysics ? Profile.PhysicsMaxLevel : Profile.RenderMaxLevel);
+            int maxLevel = isPhysics
+                ? Math.Min(interest.MaxLod, Profile.PhysicsMaxLevel)
+                : Math.Min(interest.MaxLod, Profile.RenderMaxLevel);
 
             Double3 camDir = Normalize(interestPos);
             double camDist = Length(interestPos);
@@ -283,6 +290,10 @@ namespace LimitlessSquareEngine.Engine
 
                 if (node.Level >= maxLevel || node.Level >= targetLod)
                 {
+                    if (!isPhysics && VoxelTileReady != null &&
+                        VoxelTileReady(node.Face, node.Level, node.LX, node.LY))
+                        continue;
+
                     required.Add(node);
                     continue;
                 }
@@ -315,6 +326,11 @@ namespace LimitlessSquareEngine.Engine
         private static double Length(in Double3 v)
         {
             return Math.Sqrt(v.X * v.X + v.Y * v.Y + v.Z * v.Z);
+        }
+
+        private static Double3 ScaleDir(in Double3 dir, double radius)
+        {
+            return new Double3(dir.X * radius, dir.Y * radius, dir.Z * radius);
         }
 
         private void EnqueueRenderBuild(TerrainTile tile, int[] neighborLevels)
@@ -356,14 +372,6 @@ namespace LimitlessSquareEngine.Engine
 
             if (required.Contains(neighbor))
                 return neighbor.Level;
-
-            TileKey ancestor = neighbor;
-            while (ancestor.Level > 0)
-            {
-                ancestor = QuadSphere.GetParent(ancestor);
-                if (required.Contains(ancestor))
-                    return ancestor.Level;
-            }
 
             return key.Level;
         }

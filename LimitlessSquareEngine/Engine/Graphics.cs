@@ -8340,9 +8340,9 @@ namespace LimitlessSquareEngine
                             cache.Commands.Add(new MaterialDefaultCommand(
                                 MaterialDefaultCommandKind.Float3,
                                 uniform.Location,
-                                x: 1f,
-                                y: 0.99f,
-                                z: 0.97f));
+                                x: 1.06f,
+                                y: 1.05f,
+                                z: 1.03f));
                         }
                         else if (string.Equals(uniform.Name, "uCloudShadeColor", StringComparison.Ordinal))
                         {
@@ -8422,7 +8422,7 @@ namespace LimitlessSquareEngine
                             cache.Commands.Add(new MaterialDefaultCommand(
                                 MaterialDefaultCommandKind.Int1,
                                 uniform.Location,
-                                ix: 64));
+                                ix: 24));
                         }
                         else
                         {
