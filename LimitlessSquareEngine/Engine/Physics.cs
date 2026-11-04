@@ -736,13 +736,13 @@ namespace LimitlessSquareEngine.Engine
                     current.Y * direction.Y +
                     current.Z * direction.Z;
 
+                if (currentAlong < 0.0)
+                    continue;
+
                 double delta = targetLength - currentAlong;
 
                 if (delta < 0.0)
                     delta = 0.0;
-
-                if (delta > targetLength)
-                    delta = targetLength;
 
                 if (Math.Abs(delta) <= 1e-12)
                     continue;
