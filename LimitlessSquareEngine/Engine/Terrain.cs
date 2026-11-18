@@ -64,6 +64,7 @@ namespace LimitlessSquareEngine.Engine
             Streamer.Profile = Profile;
             Streamer.PlanetRadius = Radius;
             Streamer.VoxelCoverRadius = Profile.VoxelCoverRadius;
+            Streamer.HeightSource = Height;
             Streamer.RenderInterestSources.Add(_cameraInterest);
             Streamer.RenderInterestSources.Add(_manualRenderInterest);
             Streamer.PhysicsInterestSources.Add(_manualPhysicsInterest);

@@ -51,6 +51,8 @@ namespace LimitlessSquareEngine.Engine
 
         public double PlanetRadius = 6371000.0;
 
+        public IHeightSource? HeightSource;
+
         public double VoxelCoverRadius = 0.0;
 
         public double UnloadGraceSeconds = 0.5;
@@ -83,6 +85,8 @@ namespace LimitlessSquareEngine.Engine
 
         public int MaxRequiredProcessedPerTick = 2000;
         private const int MaxRequiredTilesPerTick = 50000;
+
+        private const double SurfaceAwareDistance = 16384.0;
 
         private long _jobSequence = 0;
         private double _time = 0.0;
@@ -263,10 +267,17 @@ namespace LimitlessSquareEngine.Engine
                     continue;
 
                 Double3 centerDir = QuadSphere.TileCenterDir(node);
-                double centerDist = DistanceToTile(interestPos, centerDir);
+                double centerDist = DistanceToTile(interestPos, centerDir, PlanetRadius);
                 double nodeAngle = QuadSphere.TileMaxAngularRadius(node);
                 double nodeRadius = nodeAngle * PlanetRadius;
                 double dMin = Math.Max(0.0, centerDist - nodeRadius);
+
+                if (HeightSource != null && dMin < SurfaceAwareDistance)
+                {
+                    double surfaceRadius = PlanetRadius + HeightSource.SampleDirection(centerDir);
+                    double surfaceDist = DistanceToTile(interestPos, centerDir, surfaceRadius);
+                    dMin = Math.Min(dMin, Math.Max(0.0, surfaceDist - nodeRadius));
+                }
 
                 // 行星背侧剔除
                 if (horizonCos > -0.5)
@@ -304,11 +315,11 @@ namespace LimitlessSquareEngine.Engine
             }
         }
 
-        private double DistanceToTile(in Double3 interestPos, in Double3 dir)
+        private double DistanceToTile(in Double3 interestPos, in Double3 dir, double radius)
         {
-            double px = dir.X * PlanetRadius;
-            double py = dir.Y * PlanetRadius;
-            double pz = dir.Z * PlanetRadius;
+            double px = dir.X * radius;
+            double py = dir.Y * radius;
+            double pz = dir.Z * radius;
             double dx = interestPos.X - px;
             double dy = interestPos.Y - py;
             double dz = interestPos.Z - pz;
@@ -521,7 +532,7 @@ namespace LimitlessSquareEngine.Engine
             {
                 TerrainTile tile = pair.Value;
                 Double3 centerDir = QuadSphere.TileCenterDir(pair.Key);
-                double dist = DistanceToTile(planetLocalCenter, centerDir);
+                double dist = DistanceToTile(planetLocalCenter, centerDir, PlanetRadius);
                 double nodeRadius = QuadSphere.TileAngularRadius(pair.Key) * PlanetRadius;
                 if (dist > radiusMeters + nodeRadius)
                     continue;

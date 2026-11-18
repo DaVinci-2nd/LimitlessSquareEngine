@@ -39,6 +39,7 @@ namespace LimitlessSquareEngine.Engine
             var normals = new List<Double3>(512);
 
             var cornerSdf = new double[8];
+            var cornerPos = new Double3[8];
 
             for (int k = 0; k < cellCount; k++)
             {
@@ -97,6 +98,14 @@ namespace LimitlessSquareEngine.Engine
 
                         var vertex = new Double3(sumX / crossings, sumY / crossings, sumZ / crossings);
 
+                        for (int c = 0; c < 8; c++)
+                        {
+                            cornerPos[c] = block.BlockPoint(
+                                i + (c & 1) + VoxelBlock.SampleOrigin,
+                                j + ((c >> 1) & 1) + VoxelBlock.SampleOrigin,
+                                k + ((c >> 2) & 1) + VoxelBlock.SampleOrigin);
+                        }
+
                         double gx =
                             (cornerSdf[1] + cornerSdf[3] + cornerSdf[5] + cornerSdf[7]) -
                             (cornerSdf[0] + cornerSdf[2] + cornerSdf[4] + cornerSdf[6]);
@@ -107,7 +116,27 @@ namespace LimitlessSquareEngine.Engine
                             (cornerSdf[4] + cornerSdf[5] + cornerSdf[6] + cornerSdf[7]) -
                             (cornerSdf[0] + cornerSdf[1] + cornerSdf[2] + cornerSdf[3]);
 
-                        Double3 normal = Normalize(new Double3(gx, gy, gz));
+                        Double3 ti = new Double3(
+                            cornerPos[1].X + cornerPos[3].X + cornerPos[5].X + cornerPos[7].X - cornerPos[0].X - cornerPos[2].X - cornerPos[4].X - cornerPos[6].X,
+                            cornerPos[1].Y + cornerPos[3].Y + cornerPos[5].Y + cornerPos[7].Y - cornerPos[0].Y - cornerPos[2].Y - cornerPos[4].Y - cornerPos[6].Y,
+                            cornerPos[1].Z + cornerPos[3].Z + cornerPos[5].Z + cornerPos[7].Z - cornerPos[0].Z - cornerPos[2].Z - cornerPos[4].Z - cornerPos[6].Z);
+                        Double3 tj = new Double3(
+                            cornerPos[2].X + cornerPos[3].X + cornerPos[6].X + cornerPos[7].X - cornerPos[0].X - cornerPos[1].X - cornerPos[4].X - cornerPos[5].X,
+                            cornerPos[2].Y + cornerPos[3].Y + cornerPos[6].Y + cornerPos[7].Y - cornerPos[0].Y - cornerPos[1].Y - cornerPos[4].Y - cornerPos[5].Y,
+                            cornerPos[2].Z + cornerPos[3].Z + cornerPos[6].Z + cornerPos[7].Z - cornerPos[0].Z - cornerPos[1].Z - cornerPos[4].Z - cornerPos[5].Z);
+                        Double3 tk = new Double3(
+                            cornerPos[4].X + cornerPos[5].X + cornerPos[6].X + cornerPos[7].X - cornerPos[0].X - cornerPos[1].X - cornerPos[2].X - cornerPos[3].X,
+                            cornerPos[4].Y + cornerPos[5].Y + cornerPos[6].Y + cornerPos[7].Y - cornerPos[0].Y - cornerPos[1].Y - cornerPos[2].Y - cornerPos[3].Y,
+                            cornerPos[4].Z + cornerPos[5].Z + cornerPos[6].Z + cornerPos[7].Z - cornerPos[0].Z - cornerPos[1].Z - cornerPos[2].Z - cornerPos[3].Z);
+
+                        double tiSq = Math.Max(1e-300, ti.X * ti.X + ti.Y * ti.Y + ti.Z * ti.Z);
+                        double tjSq = Math.Max(1e-300, tj.X * tj.X + tj.Y * tj.Y + tj.Z * tj.Z);
+                        double tkSq = Math.Max(1e-300, tk.X * tk.X + tk.Y * tk.Y + tk.Z * tk.Z);
+
+                        Double3 normal = Normalize(new Double3(
+                            gx * ti.X / tiSq + gy * tj.X / tjSq + gz * tk.X / tkSq,
+                            gx * ti.Y / tiSq + gy * tj.Y / tjSq + gz * tk.Y / tkSq,
+                            gx * ti.Z / tiSq + gy * tj.Z / tjSq + gz * tk.Z / tkSq));
 
                         if (normal.X == 0.0 && normal.Y == 0.0 && normal.Z == 0.0)
                             normal = Normalize(vertex - block.Origin);

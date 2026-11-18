@@ -242,7 +242,8 @@ namespace LimitlessSquareEngine.Engine
 
                             var node = new TileKey(face, finestLevel, lx, ly);
                             Double3 centerDir = QuadSphere.TileCenterDir(node);
-                            double centerDist = DistanceToTile(_center, centerDir);
+                            double surfaceRadius = _terrain.Radius + _terrain.Height.SampleDirection(centerDir);
+                            double centerDist = DistanceToTile(_center, centerDir, surfaceRadius);
 
                             if (centerDist > CoverRadius)
                                 continue;
@@ -370,7 +371,8 @@ namespace LimitlessSquareEngine.Engine
             {
                 Double3 centerDir = QuadSphere.TileCenterDir(
                     new TileKey(block.Key.Face, block.Key.Level, block.Key.LX, block.Key.LY));
-                double dist = DistanceToTile(center, centerDir);
+                double surfaceRadius = _terrain.Radius + _terrain.Height.SampleDirection(centerDir);
+                double dist = DistanceToTile(center, centerDir, surfaceRadius);
 
                 if (dist > radius + VoxelBlock.ShellHeight)
                     continue;
@@ -380,12 +382,11 @@ namespace LimitlessSquareEngine.Engine
             }
         }
 
-        private static double DistanceToTile(in Double3 point, in Double3 dir)
+        private static double DistanceToTile(in Double3 point, in Double3 dir, double radius)
         {
-            double len = Math.Sqrt(point.X * point.X + point.Y * point.Y + point.Z * point.Z);
-            double px = dir.X * len;
-            double py = dir.Y * len;
-            double pz = dir.Z * len;
+            double px = dir.X * radius;
+            double py = dir.Y * radius;
+            double pz = dir.Z * radius;
             double dx = point.X - px;
             double dy = point.Y - py;
             double dz = point.Z - pz;
