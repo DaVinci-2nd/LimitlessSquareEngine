@@ -1189,6 +1189,122 @@ namespace LimitlessSquareEngine.Engine
             return true;
         }
 
+        internal static string? InstantiatePrefab(string sceneId, string prefabKey, string? parentId, string? nameOverride)
+        {
+            if (string.IsNullOrWhiteSpace(sceneId) || string.IsNullOrWhiteSpace(prefabKey))
+                return null;
+
+            if (!_runtimeScenes.TryGetValue(sceneId, out SceneRuntimeData? runtime))
+                return null;
+
+            string? trimmedParentId = string.IsNullOrWhiteSpace(parentId) ? null : parentId.Trim();
+
+            if (trimmedParentId != null && !runtime.Nodes.ContainsKey(trimmedParentId))
+            {
+                Console.WriteLine($"[!] InstantiatePrefab parent object not found: {sceneId}::{trimmedParentId}");
+                return null;
+            }
+
+            if (!Prefab.TryGetPrefab(prefabKey.Trim(), out PrefabData prefab))
+            {
+                Console.WriteLine($"[!] Prefab not found or invalid: '{prefabKey}'");
+                return null;
+            }
+
+            string? rootId = Prefab.Instantiate(prefab, runtime.Scene, trimmedParentId, nameOverride, out List<SceneObject> instances);
+
+            if (string.IsNullOrWhiteSpace(rootId) || instances.Count == 0)
+                return null;
+
+            bool containsCamera = false;
+            bool containsAvatar = false;
+            bool containsPhysics = false;
+
+            foreach (SceneObject source in instances)
+            {
+                SceneTransform tr = source.Transform ?? new SceneTransform();
+
+                runtime.Nodes[source.Id] = new SceneRuntimeNode
+                {
+                    Source = source,
+                    LocalPosition = tr.LocalPosition,
+                    LocalRotation = DQuaternion.FromEulerDegrees(tr.LocalRotation),
+                    LocalScale = tr.LocalScale,
+                    World = new SceneWorldState(Double3.Zero, DQuaternion.Identity, Double3.One),
+                    Dirty = true
+                };
+
+                runtime.DirtyNodes.Add(source.Id);
+
+                if (string.Equals(source.Type, "Camera", StringComparison.Ordinal))
+                    containsCamera = true;
+
+                if (string.Equals(source.Type, "Avatar", StringComparison.Ordinal))
+                    containsAvatar = true;
+
+                if (source.Physics != null && source.Physics.Enabled)
+                    containsPhysics = true;
+            }
+
+            foreach (SceneObject source in instances)
+            {
+                string? parentObjectId = source.Transform?.ParentId;
+
+                if (string.IsNullOrWhiteSpace(parentObjectId))
+                    continue;
+
+                if (!runtime.Nodes.TryGetValue(parentObjectId, out SceneRuntimeNode? parent))
+                    continue;
+
+                if (!runtime.Nodes.TryGetValue(source.Id, out SceneRuntimeNode? node))
+                    continue;
+
+                node.Parent = parent;
+                parent.Children.Add(node);
+            }
+
+            void SetDepth(SceneRuntimeNode node, int depth)
+            {
+                node.Depth = depth;
+
+                foreach (SceneRuntimeNode child in node.Children)
+                    SetDepth(child, depth + 1);
+            }
+
+            if (runtime.Nodes.TryGetValue(rootId, out SceneRuntimeNode? rootNode))
+            {
+                int baseDepth = rootNode.Parent == null ? 0 : rootNode.Parent.Depth + 1;
+                SetDepth(rootNode, baseDepth);
+                MarkSubtreeDirty(runtime, rootNode);
+            }
+
+            if (containsCamera)
+                RebuildCameraQueue(sceneId);
+
+            if (containsAvatar)
+                Console.WriteLine("[!] Prefab instance contains an Avatar object; runtime bones are not materialized until the scene is reloaded.");
+
+            if (containsPhysics)
+                Physics.RegisterScene(sceneId, runtime);
+
+            foreach (SceneObject source in instances)
+            {
+                if (string.IsNullOrWhiteSpace(source.Controller))
+                    continue;
+
+                Animator.Attach(sceneId, source.Id, source.Controller);
+            }
+
+            foreach (SceneObject source in instances)
+            {
+                Program.AttachObjectScripts(sceneId, source);
+            }
+
+            Console.WriteLine($"[i] Instantiated prefab '{prefabKey.Trim()}' into scene '{sceneId}' ({instances.Count} objects, root '{rootId}')");
+
+            return rootId;
+        }
+
         internal static void ApplyAnimatedLocalTransform(
             string sceneId,
             string objectId,
@@ -3153,7 +3269,7 @@ namespace LimitlessSquareEngine.Engine
             return null;
         }
 
-        private class Double3JsonConverter : JsonConverter<Double3>
+        internal class Double3JsonConverter : JsonConverter<Double3>
         {
             public override Double3 Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
             {

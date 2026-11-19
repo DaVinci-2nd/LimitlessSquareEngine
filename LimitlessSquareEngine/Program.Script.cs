@@ -1363,6 +1363,48 @@ namespace LimitlessSquareEngine
             RunComponentInits(attached);
         }
 
+        internal static void AttachObjectScripts(string sceneId, SceneObject obj)
+        {
+            if (obj == null || obj.Scripts == null)
+                return;
+
+            List<LuaScriptInstance> attached = new List<LuaScriptInstance>();
+
+            foreach (SceneScriptAttachment attachment in obj.Scripts)
+            {
+                LuaScriptInstance? instance = CreateComponentScript(sceneId, obj.Id, attachment);
+
+                if (instance != null)
+                    attached.Add(instance);
+            }
+
+            if (attached.Count == 0)
+                return;
+
+            if (!_sceneScriptsByScene.TryGetValue(sceneId, out List<LuaScriptInstance>? list))
+            {
+                list = new List<LuaScriptInstance>();
+                _sceneScriptsByScene[sceneId] = list;
+            }
+
+            foreach (LuaScriptInstance instance in attached)
+            {
+                list.Add(instance);
+                _sceneScriptInstances.Add(instance);
+            }
+
+            if (!_sceneScriptOrder.Contains(sceneId))
+                _sceneScriptOrder.Add(sceneId);
+
+            if (_isBusScriptPhase)
+            {
+                _pendingComponentInits.AddRange(attached);
+                return;
+            }
+
+            RunComponentInits(attached);
+        }
+
         internal static void RemoveSceneScripts(string sceneId)
         {
             if (!_sceneScriptsByScene.TryGetValue(sceneId, out List<LuaScriptInstance>? list))
@@ -2023,6 +2065,23 @@ namespace LimitlessSquareEngine
                 return null;
 
             return new LuaObjectProxy(_script, _sceneId, created.Id);
+        }
+
+        public LuaObjectProxy? InstantiatePrefab(string prefabKey, string? parentId, string? nameOverride)
+        {
+            if (string.IsNullOrWhiteSpace(_sceneId) || string.IsNullOrWhiteSpace(prefabKey))
+                return null;
+
+            string? rootId = Scene.InstantiatePrefab(
+                _sceneId,
+                prefabKey.Trim(),
+                string.IsNullOrWhiteSpace(parentId) ? null : parentId.Trim(),
+                string.IsNullOrWhiteSpace(nameOverride) ? null : nameOverride.Trim());
+
+            if (rootId == null)
+                return null;
+
+            return new LuaObjectProxy(_script, _sceneId, rootId);
         }
 
         public bool RemoveObject(string objectId)

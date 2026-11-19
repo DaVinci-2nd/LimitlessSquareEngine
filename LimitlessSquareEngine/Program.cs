@@ -291,6 +291,8 @@ namespace LimitlessSquareEngine
         internal static Dictionary<string, string> _audioFileRegistry = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         // 噪声定义注册表
         internal static Dictionary<string, string> _noiseFieldFileRegistry = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        // 预制体文件注册表
+        internal static Dictionary<string, string> _prefabFileRegistry = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         static readonly HashSet<string> _lazyNoiseFieldKeyDiscoveryCompleted = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         static readonly HashSet<string> _lazyAnimationKeyDiscoveryCompleted = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         static readonly HashSet<string> _lazyVrmaKeyDiscoveryCompleted = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -458,6 +460,36 @@ namespace LimitlessSquareEngine
                 _materialFileRegistry[key] = candidate;
                 filePath = candidate;
                 Console.WriteLine($"[i] Lazily registered material: {key} -> {candidate}");
+                return true;
+            }
+        }
+
+        internal static bool EnsurePrefabRegistered(string prefabKey, out string filePath)
+        {
+            filePath = string.Empty;
+
+            string key = NormalizeAssetLookupKey(prefabKey, removeExtension: true);
+            if (string.IsNullOrWhiteSpace(key))
+                return false;
+
+            if (_prefabFileRegistry.TryGetValue(key, out filePath))
+                return File.Exists(filePath);
+
+            lock (_assetDiscoveryLock)
+            {
+                if (_prefabFileRegistry.TryGetValue(key, out filePath))
+                    return File.Exists(filePath);
+
+                string candidate = GetAssetPathFromKey(key, ".json");
+                if (!File.Exists(candidate))
+                    return false;
+
+                if (!Prefab.TryValidatePrefabFile(candidate, out _, out _))
+                    return false;
+
+                _prefabFileRegistry[key] = candidate;
+                filePath = candidate;
+                Console.WriteLine($"[i] Lazily registered prefab: {key} -> {candidate}");
                 return true;
             }
         }
@@ -1646,7 +1678,18 @@ namespace LimitlessSquareEngine
                 },
                 Scene.GetAvatarMorphKeys,
                 Scene.GetAvatarMorphWeight,
-                Scene.SetAvatarMorphWeight);
+                Scene.SetAvatarMorphWeight,
+                LoadPrefabFileCore,
+                filePath =>
+                {
+                    if (Prefab.TryValidatePrefabFile(filePath, out _, out string reason))
+                        return string.Empty;
+
+                    return reason;
+                },
+                (scene, rootObjectId, prefabId, name) => Prefab.ExtractPrefabData(scene, rootObjectId, prefabId, name),
+                objects => Prefab.CollectPrefabObjects(objects),
+                (prefab, targetScene, parentId, nameOverride) => Prefab.Instantiate(prefab, targetScene, parentId, nameOverride, out _));
         }
 
         static void UnbindEditorHostBridge()
@@ -1665,6 +1708,24 @@ namespace LimitlessSquareEngine
                     return null;
 
                 return Scene.ParseSceneFile(filePath);
+            }
+            catch (Exception)
+            {
+                return null;
+            }
+        }
+
+        static PrefabData? LoadPrefabFileCore(string filePath)
+        {
+            if (string.IsNullOrWhiteSpace(filePath) || !File.Exists(filePath))
+                return null;
+
+            try
+            {
+                if (!Prefab.TryValidatePrefabFile(filePath, out _, out _))
+                    return null;
+
+                return Prefab.ParsePrefabFile(filePath);
             }
             catch (Exception)
             {
@@ -1720,6 +1781,7 @@ namespace LimitlessSquareEngine
             _audio?.ClearFileRegistry();
             _uiLayouts.Clear();
             _noiseFieldFileRegistry.Clear();
+            _prefabFileRegistry.Clear();
             _lazyNoiseFieldKeyDiscoveryCompleted.Clear();
             _shaderVertexFiles.Clear();
             _lazyTextureKeyDiscoveryCompleted.Clear();

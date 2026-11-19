@@ -50,6 +50,11 @@ namespace LimitlessSquareEngine
         private static Func<string, string, string[]>? _getAvatarMorphKeys;
         private static Func<string, string, string, float>? _getAvatarMorphWeight;
         private static Action<string, string, string, float>? _setAvatarMorphWeight;
+        private static Func<string, PrefabData?>? _loadPrefabFile;
+        private static Func<string, string?>? _validatePrefabFile;
+        private static Func<SceneData, string, string, string, PrefabData?>? _extractPrefabData;
+        private static Func<List<SceneObject>, List<SceneObject>>? _collectPrefabObjects;
+        private static Func<PrefabData, SceneData, string?, string?, string?>? _instantiatePrefab;
 
         internal static void Bind(
             Func<EditorHostBootstrapInfo> bootstrapInfoProvider,
@@ -91,7 +96,12 @@ namespace LimitlessSquareEngine
             Func<double, double, double, double, double[]> quaternionToEulerDegrees,
             Func<string, string, string[]> getAvatarMorphKeys,
             Func<string, string, string, float> getAvatarMorphWeight,
-            Action<string, string, string, float> setAvatarMorphWeight)
+            Action<string, string, string, float> setAvatarMorphWeight,
+            Func<string, PrefabData?> loadPrefabFile,
+            Func<string, string?> validatePrefabFile,
+            Func<SceneData, string, string, string, PrefabData?> extractPrefabData,
+            Func<List<SceneObject>, List<SceneObject>> collectPrefabObjects,
+            Func<PrefabData, SceneData, string?, string?, string?> instantiatePrefab)
         {
             _bootstrapInfoProvider = bootstrapInfoProvider;
             _setRenderWindowVisible = setRenderWindowVisible;
@@ -133,6 +143,11 @@ namespace LimitlessSquareEngine
             _getAvatarMorphKeys = getAvatarMorphKeys;
             _getAvatarMorphWeight = getAvatarMorphWeight;
             _setAvatarMorphWeight = setAvatarMorphWeight;
+            _loadPrefabFile = loadPrefabFile;
+            _validatePrefabFile = validatePrefabFile;
+            _extractPrefabData = extractPrefabData;
+            _collectPrefabObjects = collectPrefabObjects;
+            _instantiatePrefab = instantiatePrefab;
         }
 
         internal static void Unbind()
@@ -177,6 +192,11 @@ namespace LimitlessSquareEngine
             _getAvatarMorphKeys = null;
             _getAvatarMorphWeight = null;
             _setAvatarMorphWeight = null;
+            _loadPrefabFile = null;
+            _validatePrefabFile = null;
+            _extractPrefabData = null;
+            _collectPrefabObjects = null;
+            _instantiatePrefab = null;
         }
 
         public static void SetSceneObjectLocalPosition(string sceneId, string objectId, Double3 value)
@@ -495,6 +515,70 @@ namespace LimitlessSquareEngine
                 throw new InvalidOperationException("[X] Editor host bridge is not bound.");
 
             return _loadSceneFile(filePath);
+        }
+
+        public static PrefabData? LoadPrefabFile(string filePath)
+        {
+            if (string.IsNullOrWhiteSpace(filePath))
+                throw new ArgumentException("[X] Prefab file path cannot be null or empty.", nameof(filePath));
+
+            if (_loadPrefabFile == null)
+                throw new InvalidOperationException("[X] Editor host bridge is not bound.");
+
+            return _loadPrefabFile(filePath);
+        }
+
+        public static string? ValidatePrefabFile(string filePath)
+        {
+            if (string.IsNullOrWhiteSpace(filePath))
+                throw new ArgumentException("[X] Prefab file path cannot be null or empty.", nameof(filePath));
+
+            if (_validatePrefabFile == null)
+                throw new InvalidOperationException("[X] Editor host bridge is not bound.");
+
+            return _validatePrefabFile(filePath);
+        }
+
+        public static PrefabData? ExtractPrefabData(SceneData scene, string rootObjectId, string prefabId, string name)
+        {
+            if (scene == null)
+                throw new ArgumentNullException(nameof(scene));
+
+            if (string.IsNullOrWhiteSpace(rootObjectId))
+                throw new ArgumentException("[X] Prefab root object ID cannot be null or empty.", nameof(rootObjectId));
+
+            if (string.IsNullOrWhiteSpace(prefabId))
+                throw new ArgumentException("[X] Prefab ID cannot be null or empty.", nameof(prefabId));
+
+            if (_extractPrefabData == null)
+                throw new InvalidOperationException("[X] Editor host bridge is not bound.");
+
+            return _extractPrefabData(scene, rootObjectId, prefabId, name);
+        }
+
+        public static List<SceneObject> CollectPrefabObjects(List<SceneObject> sourceObjects)
+        {
+            if (sourceObjects == null)
+                throw new ArgumentNullException(nameof(sourceObjects));
+
+            if (_collectPrefabObjects == null)
+                throw new InvalidOperationException("[X] Editor host bridge is not bound.");
+
+            return _collectPrefabObjects(sourceObjects);
+        }
+
+        public static string? InstantiatePrefab(PrefabData prefab, SceneData targetScene, string? parentId, string? nameOverride)
+        {
+            if (prefab == null)
+                throw new ArgumentNullException(nameof(prefab));
+
+            if (targetScene == null)
+                throw new ArgumentNullException(nameof(targetScene));
+
+            if (_instantiatePrefab == null)
+                throw new InvalidOperationException("[X] Editor host bridge is not bound.");
+
+            return _instantiatePrefab(prefab, targetScene, parentId, nameOverride);
         }
 
         public static AnimationClipData? LoadAnimationClip(string filePath)

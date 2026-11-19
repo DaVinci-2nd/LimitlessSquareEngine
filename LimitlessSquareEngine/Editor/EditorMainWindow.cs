@@ -376,6 +376,7 @@ namespace LimitlessSquareEngine.Editor
             MaterialJsonFile,
             AnimationClipJsonFile,
             AnimatorControllerJsonFile,
+            PrefabJsonFile,
             VrmaFile,
             ImageFile,
             FragFile,
@@ -1963,6 +1964,7 @@ namespace LimitlessSquareEngine.Editor
             private static readonly IBrush MaterialBrush = new SolidColorBrush(Color.Parse("#226622"));
             private static readonly IBrush AnimationClipBrush = new SolidColorBrush(Color.Parse("#8A5A1F"));
             private static readonly IBrush AnimatorControllerBrush = new SolidColorBrush(Color.Parse("#5A1F6A"));
+            private static readonly IBrush PrefabBrush = new SolidColorBrush(Color.Parse("#2A6A6A"));
             private static readonly IBrush VrmaBrush = new SolidColorBrush(Color.Parse("#1F5A6A"));
             private static readonly IBrush ImageBrush = new SolidColorBrush(Color.Parse("#66C8FF"));
             private static readonly IBrush AudioBrush = new SolidColorBrush(Color.Parse("#7B1FA2"));
@@ -2031,6 +2033,11 @@ namespace LimitlessSquareEngine.Editor
                     case ResourceIconKind.AnimatorControllerJsonFile:
                         DrawFileBase(context, bounds, AnimatorControllerBrush, true);
                         DrawAnimatorStateNodes(context, bounds);
+                        break;
+
+                    case ResourceIconKind.PrefabJsonFile:
+                        DrawFileBase(context, bounds, PrefabBrush, true);
+                        DrawCenteredLabel(context, bounds, "Pre", ScaleFromBoundsY(bounds, 14.0), FontWeight.Bold);
                         break;
 
                     case ResourceIconKind.VrmaFile:
@@ -5758,6 +5765,20 @@ void main()
                     File.WriteAllText(createdPath, content, Encoding.UTF8);
                     break;
 
+                case "预制体":
+                    baseName = "NewPrefab";
+                    fileName = GetUniqueResourceName(directoryPath, baseName, ".json");
+                    createdPath = Path.Combine(directoryPath, fileName);
+                    content = JsonSerializer.Serialize(new PrefabData
+                    {
+                        PrefabId = Guid.NewGuid().ToString("N"),
+                        Name = Path.GetFileNameWithoutExtension(fileName),
+                        RootObjectId = "",
+                        Objects = new List<SceneObject>()
+                    }, SceneJsonWriteOptions);
+                    File.WriteAllText(createdPath, content, Encoding.UTF8);
+                    break;
+
                 case "画布":
                     baseName = "NewCanvas";
                     fileName = GetUniqueResourceName(directoryPath, baseName, ".json");
@@ -5850,6 +5871,28 @@ void main()
                 !state.IsDirectory &&
                 string.Equals(Path.GetExtension(state.Path), ".vrma", StringComparison.OrdinalIgnoreCase);
 
+            bool isPrefab = false;
+
+            if (!state.IsDirectory &&
+                string.Equals(Path.GetExtension(state.Path), ".json", StringComparison.OrdinalIgnoreCase))
+            {
+                try
+                {
+                    using JsonDocument doc = JsonDocument.Parse(File.ReadAllText(state.Path));
+
+                    if (doc.RootElement.ValueKind == JsonValueKind.Object &&
+                        doc.RootElement.TryGetProperty("assetType", out JsonElement assetTypeElement) &&
+                        assetTypeElement.ValueKind == JsonValueKind.String &&
+                        string.Equals(assetTypeElement.GetString(), "Prefab", StringComparison.Ordinal))
+                    {
+                        isPrefab = true;
+                    }
+                }
+                catch
+                {
+                }
+            }
+
             List<object> items = new List<object> { openItem };
 
             if (isVrma)
@@ -5863,6 +5906,19 @@ void main()
                 };
 
                 items.Add(convertItem);
+            }
+
+            if (isPrefab)
+            {
+                MenuItem instantiateItem = new MenuItem { Header = "实例化到当前场景" };
+
+                instantiateItem.Click += (_, _) =>
+                {
+                    SelectResourceItem(state);
+                    TryInstantiatePrefabFileToCurrentScene(state.Path);
+                };
+
+                items.Add(instantiateItem);
             }
 
             items.Add(revealItem);
@@ -5892,6 +5948,7 @@ void main()
             };
             MenuItem newMaterialItem = new MenuItem { Header = "材质" };
             MenuItem newSceneItem = new MenuItem { Header = "场景" };
+            MenuItem newPrefabItem = new MenuItem { Header = "预制体" };
             MenuItem newCanvasItem = new MenuItem { Header = "画布" };
             MenuItem newAnimationClipItem = new MenuItem { Header = "动画" };
             MenuItem newAnimatorControllerItem = new MenuItem { Header = "动画器" };
@@ -5905,6 +5962,7 @@ void main()
                     newShaderItem,
                     newMaterialItem,
                     newSceneItem,
+                    newPrefabItem,
                     newCanvasItem,
                     newAnimationClipItem,
                     newAnimatorControllerItem
@@ -5918,6 +5976,7 @@ void main()
             newFragmentShaderItem.Click += async (_, _) => await CreateNewResourceAsync("片元着色器");
             newMaterialItem.Click += async (_, _) => await CreateNewResourceAsync("材质");
             newSceneItem.Click += async (_, _) => await CreateNewResourceAsync("场景");
+            newPrefabItem.Click += async (_, _) => await CreateNewResourceAsync("预制体");
             newCanvasItem.Click += async (_, _) => await CreateNewResourceAsync("画布");
             newAnimationClipItem.Click += async (_, _) => await CreateNewResourceAsync("动画");
             newAnimatorControllerItem.Click += async (_, _) => await CreateNewResourceAsync("动画器");
@@ -6146,6 +6205,9 @@ void main()
 
                     if (string.Equals(assetType, "AnimatorController", StringComparison.OrdinalIgnoreCase))
                         return ResourceIconKind.AnimatorControllerJsonFile;
+
+                    if (string.Equals(assetType, "Prefab", StringComparison.OrdinalIgnoreCase))
+                        return ResourceIconKind.PrefabJsonFile;
                 }
 
                 return ResourceIconKind.JsonFile;
@@ -6181,6 +6243,12 @@ void main()
             if (string.Equals(assetType, "AnimatorController", StringComparison.OrdinalIgnoreCase))
             {
                 ShowAnimatorControllerWindow(filePath);
+                return true;
+            }
+
+            if (string.Equals(assetType, "Prefab", StringComparison.OrdinalIgnoreCase))
+            {
+                TryOpenPrefabJson(filePath);
                 return true;
             }
 
@@ -6246,6 +6314,8 @@ void main()
                 _currentTreeCopyPath = treeCopyPath;
                 _currentPreviewScenePath = previewScenePath;
                 _currentTreeScene = scene;
+                _isCurrentDocumentPrefab = false;
+                _currentPrefabFilePath = null;
                 ClearSelectedSceneObjectState();
                 _sceneUndoStack.Clear();
                 _sceneRedoStack.Clear();
@@ -6428,6 +6498,9 @@ void main()
 
         private bool TrySaveCurrentSceneToOriginalFile()
         {
+            if (_isCurrentDocumentPrefab)
+                return TrySaveCurrentPrefabToOriginalFile();
+
             if (string.IsNullOrWhiteSpace(_currentSceneOriginalPath) ||
                 string.IsNullOrWhiteSpace(_currentTreeCopyPath))
                 return false;
@@ -6471,6 +6544,9 @@ void main()
                 string.IsNullOrWhiteSpace(_currentTreeCopyPath) ||
                 string.IsNullOrWhiteSpace(_currentPreviewScenePath))
                 return false;
+
+            if (_isCurrentDocumentPrefab)
+                _sceneHasUnsavedChanges = true;
 
             SaveSceneData(_currentTreeCopyPath, _currentTreeScene);
 
@@ -7051,6 +7127,14 @@ void main()
                 Tag = obj,
                 MinHeight = InspectorTextBoxHeight,
                 Padding = new Thickness(0)
+            };
+
+            MenuItem createPrefabItem = new MenuItem { Header = "创建为预制体" };
+            createPrefabItem.Click += (_, _) => TryCreatePrefabFromSceneObject(obj);
+
+            item.ContextMenu = new ContextMenu
+            {
+                ItemsSource = new object[] { createPrefabItem }
             };
 
             if (childrenMap.TryGetValue(obj.Id, out List<SceneObject>? children) && children.Count > 0)
@@ -12170,6 +12254,9 @@ void main()
 
                             if (string.Equals(assetType, "Material", StringComparison.OrdinalIgnoreCase))
                                 return CreateMaterialAssetViewer(path);
+
+                            if (string.Equals(assetType, "Prefab", StringComparison.OrdinalIgnoreCase))
+                                return CreatePrefabAssetViewer(path);
 
                             if (string.Equals(assetType, "AnimationClip", StringComparison.OrdinalIgnoreCase) ||
                                 string.Equals(assetType, "AnimatorController", StringComparison.OrdinalIgnoreCase))
