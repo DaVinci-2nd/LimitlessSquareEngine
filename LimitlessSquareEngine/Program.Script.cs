@@ -254,6 +254,178 @@ namespace LimitlessSquareEngine
             });
             RecordLuaApi("audio_get_clip_duration", "audio_get_clip_duration(clipId) -> duration", "获取音频剪辑时长", "Audio");
 
+            // 注入时间状态线系统
+            instance.LuaScript.Globals["time_track_register"] = (Func<string, Table, DynValue>)((trackId, def) =>
+            {
+                TimeStateTrackData? track = ParseTimeStateTrackTable(def);
+
+                if (track == null)
+                    return DynValue.Nil;
+
+                if (!TimeStateTrackManager.TryRegisterTrack(trackId, track, out string reason))
+                {
+                    Console.WriteLine($"[!] {reason}");
+                    return DynValue.Nil;
+                }
+
+                return DynValue.NewBoolean(true);
+            });
+            RecordLuaApi("time_track_register", "time_track_register(trackId, defTable)", "注册时间状态线", "TimeState");
+            instance.LuaScript.Globals["time_track_unregister"] = (Func<string, DynValue>)((trackId) =>
+            {
+                TimeStateTrackManager.UnregisterTrack(trackId);
+                return DynValue.Nil;
+            });
+            RecordLuaApi("time_track_unregister", "time_track_unregister(trackId)", "注销时间状态线", "TimeState");
+            instance.LuaScript.Globals["time_track_attach"] = (Func<string, Table, DynValue>)((trackId, opts) =>
+            {
+                uint seed = 0u;
+                float rate = 1f;
+                double startOverride = double.NaN;
+
+                if (opts != null)
+                {
+                    DynValue seedValue = opts.Get("seed");
+                    if (seedValue.Type == DataType.Number)
+                        seed = (uint)seedValue.Number;
+                    DynValue rateValue = opts.Get("rate");
+                    if (rateValue.Type == DataType.Number)
+                        rate = (float)rateValue.Number;
+                    DynValue startValue = opts.Get("start_value");
+                    if (startValue.Type == DataType.Number)
+                        startOverride = startValue.Number;
+                }
+
+                if (!TimeStateTrackManager.TryAttachAnchor(trackId, GameClock.Now, seed, rate, startOverride, out long anchorId, out string reason))
+                {
+                    Console.WriteLine($"[!] {reason}");
+                    return DynValue.Nil;
+                }
+
+                return DynValue.NewNumber(anchorId);
+            });
+            RecordLuaApi("time_track_attach", "time_track_attach(trackId, opts?) -> [anchorId]", "挂载一个时间状态锚点", "TimeState");
+            instance.LuaScript.Globals["time_state_detach"] = (Func<long, DynValue>)((anchorId) =>
+            {
+                if (!TimeStateTrackManager.TryRemoveAnchor(anchorId, out string reason))
+                    Console.WriteLine($"[!] {reason}");
+                return DynValue.Nil;
+            });
+            RecordLuaApi("time_state_detach", "time_state_detach(anchorId)", "卸载时间状态锚点", "TimeState");
+            instance.LuaScript.Globals["time_state_sample"] = (Func<long, DynValue>)((anchorId) =>
+            {
+                if (!TimeStateTrackManager.TrySample(anchorId, out double value, out byte phase, out bool completed, out string reason))
+                {
+                    Console.WriteLine($"[!] {reason}");
+                    return DynValue.Nil;
+                }
+
+                return DynValue.NewTuple(DynValue.NewNumber(value), DynValue.NewNumber(phase), DynValue.NewBoolean(completed));
+            });
+            RecordLuaApi("time_state_sample", "time_state_sample(anchorId) -> [value, phase, completed]", "提取锚点当前状态", "TimeState");
+            instance.LuaScript.Globals["time_state_sample_at"] = (Func<long, double, DynValue>)((anchorId, sampleTime) =>
+            {
+                if (!TimeStateTrackManager.TrySampleAt(anchorId, sampleTime, out double value, out byte phase, out bool completed, out string reason))
+                {
+                    Console.WriteLine($"[!] {reason}");
+                    return DynValue.Nil;
+                }
+
+                return DynValue.NewTuple(DynValue.NewNumber(value), DynValue.NewNumber(phase), DynValue.NewBoolean(completed));
+            });
+            RecordLuaApi("time_state_sample_at", "time_state_sample_at(anchorId, seconds) -> [value, phase, completed]", "提取锚点在指定时刻的状态", "TimeState");
+            instance.LuaScript.Globals["time_state_reanchor"] = (Func<long, string, Table, DynValue>)((anchorId, newTrackId, opts) =>
+            {
+                bool preserveValue = true;
+                double? explicitValue = null;
+                uint? newSeed = null;
+                float? newRate = null;
+
+                if (opts != null)
+                {
+                    DynValue keepValue = opts.Get("keep_value");
+                    if (keepValue.Type == DataType.Boolean && !keepValue.Boolean)
+                        preserveValue = false;
+                    DynValue valueItem = opts.Get("value");
+                    if (valueItem.Type == DataType.Number)
+                        explicitValue = valueItem.Number;
+                    DynValue seedItem = opts.Get("seed");
+                    if (seedItem.Type == DataType.Number)
+                        newSeed = (uint)seedItem.Number;
+                    DynValue rateItem = opts.Get("rate");
+                    if (rateItem.Type == DataType.Number)
+                        newRate = (float)rateItem.Number;
+                }
+
+                if (!TimeStateTrackManager.TryReanchor(anchorId, newTrackId, preserveValue && explicitValue == null, explicitValue, newSeed, newRate, out string reason))
+                {
+                    Console.WriteLine($"[!] {reason}");
+                    return DynValue.Nil;
+                }
+
+                return DynValue.NewBoolean(true);
+            });
+            RecordLuaApi("time_state_reanchor", "time_state_reanchor(anchorId, newTrackId, opts?)", "将锚点重挂到另一条时间状态线", "TimeState");
+            instance.LuaScript.Globals["time_state_set_rate"] = (Func<long, float, DynValue>)((anchorId, rate) =>
+            {
+                if (!TimeStateTrackManager.TrySetRate(anchorId, rate, out string reason))
+                {
+                    Console.WriteLine($"[!] {reason}");
+                    return DynValue.Nil;
+                }
+
+                return DynValue.NewBoolean(true);
+            });
+            RecordLuaApi("time_state_set_rate", "time_state_set_rate(anchorId, rate)", "设置锚点时间倍速", "TimeState");
+            instance.LuaScript.Globals["time_state_subscribe"] = (Func<Table, string, Table, DynValue>)((anchorIds, callbackName, opts) =>
+            {
+                if (anchorIds == null)
+                {
+                    Console.WriteLine("[!] time_state_subscribe requires an anchor id table.");
+                    return DynValue.Nil;
+                }
+
+                double interval = 0.25;
+
+                if (opts != null)
+                {
+                    DynValue intervalValue = opts.Get("interval");
+                    if (intervalValue.Type == DataType.Number && intervalValue.Number >= 0.0)
+                        interval = intervalValue.Number;
+                }
+
+                List<long> ids = new List<long>();
+
+                foreach (DynValue entry in anchorIds.Values)
+                {
+                    if (entry.Type == DataType.Number)
+                        ids.Add((long)entry.Number);
+                }
+
+                if (!TimeStateTrackManager.TrySubscribe(instance, ids, callbackName, interval, out long subscriptionId, out string reason))
+                {
+                    Console.WriteLine($"[!] {reason}");
+                    return DynValue.Nil;
+                }
+
+                return DynValue.NewNumber(subscriptionId);
+            });
+            RecordLuaApi("time_state_subscribe", "time_state_subscribe(anchorIds, callbackName, opts?) -> [subscriptionId]", "订阅一批锚点的持续采样推送", "TimeState");
+            instance.LuaScript.Globals["time_state_unsubscribe"] = (Func<long, DynValue>)((subscriptionId) =>
+            {
+                if (!TimeStateTrackManager.TryUnsubscribe(subscriptionId, out string reason))
+                    Console.WriteLine($"[!] {reason}");
+                return DynValue.Nil;
+            });
+            RecordLuaApi("time_state_unsubscribe", "time_state_unsubscribe(subscriptionId)", "取消时间状态采样订阅", "TimeState");
+            instance.LuaScript.Globals["time_state_stats"] = (Func<DynValue>)(() =>
+            {
+                return DynValue.NewTuple(
+                    DynValue.NewNumber(TimeStateTrackManager.AnchorCount),
+                    DynValue.NewNumber(TimeStateTrackManager.SubscriptionCount));
+            });
+            RecordLuaApi("time_state_stats", "time_state_stats() -> [anchorCount, subscriptionCount]", "获取时间状态统计", "TimeState");
+
             // 注入场景加载函数
             instance.LuaScript.Globals["load_scene"] = (Func<string, SceneData>)((sceneId) =>
             {
@@ -1339,6 +1511,7 @@ namespace LimitlessSquareEngine
                     {
                         instance.LuaScript.Globals["deltaTime"] = deltaTime;
                         instance.LuaScript.Globals["fixedDeltaTime"] = fixedDeltaTime;
+                        instance.LuaScript.Globals["gameTime"] = GameClock.Now;
                         instance.LoopFunction.Function.Call();
                     }
                     catch (ScriptRuntimeException ex)
@@ -1533,6 +1706,154 @@ namespace LimitlessSquareEngine
             string key = NormalizeAssetLookupKey(name, removeExtension: true);
 
             return _busScriptByName.TryGetValue(key, out instance);
+        }
+
+        internal static TimeStateTrackData? ParseTimeStateTrackTable(Table def)
+        {
+            if (def == null)
+            {
+                Console.WriteLine("[!] Time track definition table is null.");
+                return null;
+            }
+
+            TimeStateTrackData track = new TimeStateTrackData();
+            DynValue kindValue = def.Get("kind");
+            string kind = kindValue.Type == DataType.String ? kindValue.String : "linear";
+
+            switch (kind)
+            {
+                case "keyframes":
+                    track.Kind = TimeStateEvaluatorKind.Keyframes;
+                    break;
+                case "probability":
+                    track.Kind = TimeStateEvaluatorKind.Probability;
+                    break;
+                case "noise":
+                    track.Kind = TimeStateEvaluatorKind.Noise;
+                    break;
+                default:
+                    if (kindValue.Type == DataType.String)
+                        Console.WriteLine($"[!] Unknown time track kind '{kindValue.String}'; using linear.");
+                    track.Kind = TimeStateEvaluatorKind.Linear;
+                    break;
+            }
+
+            DynValue startValue = def.Get("start_state");
+            if (startValue.Type == DataType.Number)
+                track.StartState = startValue.Number;
+            DynValue endValue = def.Get("end_state");
+            if (endValue.Type == DataType.Number)
+                track.EndState = endValue.Number;
+            DynValue openValue = def.Get("open");
+            if (openValue.Type == DataType.Boolean)
+                track.OpenEnded = openValue.Boolean;
+            DynValue durationValue = def.Get("duration");
+            if (durationValue.Type == DataType.Number)
+                track.DurationSeconds = durationValue.Number;
+            DynValue slopeValue = def.Get("slope");
+            if (slopeValue.Type == DataType.Number)
+                track.Slope = slopeValue.Number;
+            DynValue seedValue = def.Get("seed");
+            if (seedValue.Type == DataType.Number)
+                track.Seed = (uint)seedValue.Number;
+            DynValue noiseAmplitudeValue = def.Get("noise_amp");
+            if (noiseAmplitudeValue.Type == DataType.Number)
+                track.NoiseAmplitude = noiseAmplitudeValue.Number;
+            DynValue noiseScaleValue = def.Get("noise_scale");
+            if (noiseScaleValue.Type == DataType.Number)
+                track.NoiseScale = noiseScaleValue.Number;
+            DynValue chainValue = def.Get("chain_to");
+            if (chainValue.Type == DataType.String)
+                track.ChainToTrackId = chainValue.String;
+            DynValue postEndValue = def.Get("post_end");
+            string postEnd = postEndValue.Type == DataType.String ? postEndValue.String : "clamp";
+
+            switch (postEnd)
+            {
+                case "loop":
+                    track.PostEnd = TimeStatePostEnd.Loop;
+                    break;
+                case "chain":
+                    track.PostEnd = TimeStatePostEnd.Chain;
+                    break;
+                default:
+                    if (postEndValue.Type == DataType.String && postEnd != "clamp")
+                        Console.WriteLine($"[!] Unknown time track post_end '{postEndValue.String}'; using clamp.");
+                    track.PostEnd = TimeStatePostEnd.Clamp;
+                    break;
+            }
+
+            DynValue keysValue = def.Get("keys");
+
+            if (keysValue.Type == DataType.Table && keysValue.Table != null)
+            {
+                foreach (DynValue entry in keysValue.Table.Values)
+                {
+                    if (entry.Type != DataType.Table || entry.Table == null)
+                        continue;
+
+                    TimeStateKeyframe key = new TimeStateKeyframe();
+                    DynValue timeValue = entry.Table.Get("time");
+                    if (timeValue.Type == DataType.Number)
+                        key.Time = timeValue.Number;
+                    DynValue keyValue = entry.Table.Get("value");
+                    if (keyValue.Type == DataType.Number)
+                        key.Value = keyValue.Number;
+                    DynValue steppedValue = entry.Table.Get("stepped");
+                    if (steppedValue.Type == DataType.Boolean)
+                        key.Stepped = steppedValue.Boolean;
+                    track.Keys.Add(key);
+                }
+
+                track.Keys.Sort((a, b) => a.Time.CompareTo(b.Time));
+            }
+
+            DynValue phasesValue = def.Get("phases");
+
+            if (phasesValue.Type == DataType.Table && phasesValue.Table != null)
+            {
+                foreach (DynValue entry in phasesValue.Table.Values)
+                {
+                    if (entry.Type != DataType.Table || entry.Table == null)
+                        continue;
+
+                    TimeStatePhaseBand band = new TimeStatePhaseBand();
+                    DynValue thresholdValue = entry.Table.Get("threshold");
+                    if (thresholdValue.Type == DataType.Number)
+                        band.Threshold = thresholdValue.Number;
+                    DynValue phaseValue = entry.Table.Get("phase");
+                    if (phaseValue.Type == DataType.Number)
+                        band.Phase = (byte)phaseValue.Number;
+                    track.Phases.Add(band);
+                }
+
+                track.Phases.Sort((a, b) => a.Threshold.CompareTo(b.Threshold));
+            }
+
+            DynValue bandsValue = def.Get("prob_bands");
+
+            if (bandsValue.Type == DataType.Table && bandsValue.Table != null)
+            {
+                foreach (DynValue entry in bandsValue.Table.Values)
+                {
+                    if (entry.Type != DataType.Table || entry.Table == null)
+                        continue;
+
+                    TimeStateProbBand band = new TimeStateProbBand();
+                    DynValue minValue = entry.Table.Get("min_d");
+                    if (minValue.Type == DataType.Number)
+                        band.MinDuration = minValue.Number;
+                    DynValue maxValue = entry.Table.Get("max_d");
+                    if (maxValue.Type == DataType.Number)
+                        band.MaxDuration = maxValue.Number;
+                    DynValue bandValue = entry.Table.Get("value");
+                    if (bandValue.Type == DataType.Number)
+                        band.Value = bandValue.Number;
+                    track.ProbBands.Add(band);
+                }
+            }
+
+            return track;
         }
 
         internal static DynValue CallScriptFunction(LuaScriptInstance target, string methodName, DynValue[] args)

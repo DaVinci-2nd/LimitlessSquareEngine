@@ -2363,6 +2363,7 @@ namespace LimitlessSquareEngine
             _audio?.Update(deltaTime);
             if (shouldAdvanceSimulation)
             {
+                GameClock.Advance(deltaTime);
                 // 动画求解
                 Animator.TickAll(deltaTime);
                 Scene.MarkAvatarBonesDirty();
@@ -2377,6 +2378,7 @@ namespace LimitlessSquareEngine
                         {
                             instance.LuaScript.Globals["deltaTime"] = deltaTime;
                             instance.LuaScript.Globals["fixedDeltaTime"] = fixedDeltaTime;
+                            instance.LuaScript.Globals["gameTime"] = GameClock.Now;
                             instance.LoopFunction.Function.Call();
                         }
                         catch (ScriptRuntimeException ex)
@@ -2396,6 +2398,7 @@ namespace LimitlessSquareEngine
                 // 地形分帧流式生成
                 TerrainManager.TickAll();
                 WaterManager.TickAll();
+                TimeStateTrackManager.TickAll();
             }
             // 提交场景相机渲染
             _graphics?.QueueLoadedSceneRender();
