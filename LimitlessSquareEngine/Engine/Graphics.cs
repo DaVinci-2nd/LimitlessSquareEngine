@@ -1151,6 +1151,7 @@ namespace LimitlessSquareEngine
             public bool Visible { get; init; }
             public string? Mesh { get; init; }
             public List<string>? Materials { get; init; }
+            public SceneObjectLodSettings? LodSettings { get; init; }
             public string RenderTag { get; init; } = "";
 
             public Double3 WorldPosition { get; init; }
@@ -1198,6 +1199,10 @@ namespace LimitlessSquareEngine
 
         private readonly Dictionary<string, Dictionary<string, SceneRenderObjectSnapshot>> _sceneObjectCache
             = new(StringComparer.Ordinal);
+
+        private readonly Dictionary<(string SceneId, string CameraId, string ObjectId), int> _sceneObjectLodLevels = new();
+
+        private readonly HashSet<string> _lodMeshLoadFailedCache = new(StringComparer.Ordinal);
 
         private readonly Dictionary<string, List<SceneRenderCameraSnapshot>> _sceneCameraCache
             = new(StringComparer.Ordinal);
@@ -1263,7 +1268,7 @@ namespace LimitlessSquareEngine
             public List<StaticSceneSurfaceCommandTemplate> Surfaces { get; } = new();
         }
 
-        private readonly Dictionary<string, StaticSceneObjectRenderCache> _staticSceneObjectRenderCache
+        private readonly Dictionary<string, Dictionary<int, StaticSceneObjectRenderCache>> _staticSceneObjectRenderCache
             = new(StringComparer.Ordinal);
 
         private enum LightKind
@@ -1405,6 +1410,16 @@ namespace LimitlessSquareEngine
                 foreach (string key in keys)
                     _staticSceneObjectRenderCache.Remove(key);
             }
+
+            if (!string.IsNullOrWhiteSpace(sceneId) && !string.IsNullOrWhiteSpace(objectId))
+            {
+                List<(string, string, string)> lodKeys = _sceneObjectLodLevels.Keys
+                    .Where(k => k.SceneId == sceneId && k.ObjectId == objectId)
+                    .ToList();
+
+                foreach ((string, string, string) lodKey in lodKeys)
+                    _sceneObjectLodLevels.Remove(lodKey);
+            }
         }
 
         [MoonSharpHidden]
@@ -1448,6 +1463,34 @@ namespace LimitlessSquareEngine
 
             foreach (string key in keys)
                 _staticSceneObjectRenderCache.Remove(key);
+
+            List<(string, string, string)> lodKeys = _sceneObjectLodLevels.Keys
+                .Where(k => k.SceneId == sceneId)
+                .ToList();
+
+            foreach ((string, string, string) lodKey in lodKeys)
+                _sceneObjectLodLevels.Remove(lodKey);
+        }
+
+        [MoonSharpHidden]
+        public int GetObjectRenderLodLevel(string sceneId, string objectId)
+        {
+            if (string.IsNullOrWhiteSpace(sceneId) || string.IsNullOrWhiteSpace(objectId))
+                return 0;
+
+            string mainCameraId = ResolveMainScreenCameraId();
+
+            if (!string.IsNullOrEmpty(mainCameraId) &&
+                _sceneObjectLodLevels.TryGetValue((sceneId, mainCameraId, objectId), out int mainLevel))
+                return mainLevel;
+
+            foreach (var pair in _sceneObjectLodLevels)
+            {
+                if (pair.Key.SceneId == sceneId && pair.Key.ObjectId == objectId)
+                    return pair.Value;
+            }
+
+            return 0;
         }
 
         private bool TryGetActiveUniformExact(uint program, string uniformName, out ActiveUniformInfo uniform)
@@ -1538,7 +1581,18 @@ namespace LimitlessSquareEngine
             public bool SkinEnabled;
             public int BoneBaseIndex;
         }
+        private struct CameraVisibleObjectEntry
+        {
+            public SceneRenderObjectSnapshot Obj;
+            public MeshData Mesh;
+            public string ActiveMeshKey;
+            public Double3 RelativePosition;
+            public Matrix4x4 Model;
+            public StaticSceneObjectRenderCache? StaticRenderCache;
+            public MaterialData? CloudMaterial;
+        }
         private readonly List<RenderCommand> _renderQueue = new();
+        private readonly List<CameraVisibleObjectEntry> _cameraVisibleObjectsScratch = new();
         private long _submissionCounter = 0;
         private readonly List<RenderCommand> _shadowCasterScratch = new();
         private readonly List<RenderCommand> _visibleShadowReceiverScratch = new();
@@ -1743,11 +1797,12 @@ namespace LimitlessSquareEngine
 
         private StaticSceneObjectRenderCache BuildStaticSceneObjectRenderCache(
             SceneRenderObjectSnapshot obj,
-            MeshData mesh)
+            MeshData mesh,
+            string activeMeshKey)
         {
             StaticSceneObjectRenderCache cache = new StaticSceneObjectRenderCache
             {
-                MeshId = obj.Mesh ?? "",
+                MeshId = activeMeshKey,
                 MeshRevision = mesh.Revision,
                 MaterialSignature = BuildSceneObjectMaterialSignature(obj),
                 TransformRevision = obj.TransformRevision,
@@ -1788,7 +1843,9 @@ namespace LimitlessSquareEngine
 
         private StaticSceneObjectRenderCache? TryGetStaticSceneObjectRenderCache(
             SceneRenderObjectSnapshot obj,
-            MeshData mesh)
+            MeshData mesh,
+            string activeMeshKey,
+            int lodLevel)
         {
             if (!obj.StaticRenderEligible)
                 return null;
@@ -1799,17 +1856,23 @@ namespace LimitlessSquareEngine
             string key = BuildSceneObjectRenderCacheKey(obj.SceneId, obj.ObjectId);
             string materialSignature = BuildSceneObjectMaterialSignature(obj);
 
-            if (_staticSceneObjectRenderCache.TryGetValue(key, out StaticSceneObjectRenderCache? cached) &&
+            if (!_staticSceneObjectRenderCache.TryGetValue(key, out Dictionary<int, StaticSceneObjectRenderCache>? perLevel))
+            {
+                perLevel = new Dictionary<int, StaticSceneObjectRenderCache>();
+                _staticSceneObjectRenderCache[key] = perLevel;
+            }
+
+            if (perLevel.TryGetValue(lodLevel, out StaticSceneObjectRenderCache? cached) &&
                 cached.TransformRevision == obj.TransformRevision &&
                 cached.MeshRevision == mesh.Revision &&
-                string.Equals(cached.MeshId, obj.Mesh, StringComparison.Ordinal) &&
+                string.Equals(cached.MeshId, activeMeshKey, StringComparison.Ordinal) &&
                 string.Equals(cached.MaterialSignature, materialSignature, StringComparison.Ordinal))
             {
                 return cached;
             }
 
-            StaticSceneObjectRenderCache created = BuildStaticSceneObjectRenderCache(obj, mesh);
-            _staticSceneObjectRenderCache[key] = created;
+            StaticSceneObjectRenderCache created = BuildStaticSceneObjectRenderCache(obj, mesh, activeMeshKey);
+            perLevel[lodLevel] = created;
             return created;
         }
 
@@ -1818,12 +1881,23 @@ namespace LimitlessSquareEngine
             if (string.IsNullOrWhiteSpace(meshId))
                 return;
 
-            List<string> keys = _staticSceneObjectRenderCache
-                .Where(pair => string.Equals(pair.Value.MeshId, meshId, StringComparison.Ordinal))
-                .Select(pair => pair.Key)
-                .ToList();
+            List<string> emptyKeys = new();
 
-            foreach (string key in keys)
+            foreach (var pair in _staticSceneObjectRenderCache)
+            {
+                List<int> levels = pair.Value
+                    .Where(l => string.Equals(l.Value.MeshId, meshId, StringComparison.Ordinal))
+                    .Select(l => l.Key)
+                    .ToList();
+
+                foreach (int level in levels)
+                    pair.Value.Remove(level);
+
+                if (pair.Value.Count == 0)
+                    emptyKeys.Add(pair.Key);
+            }
+
+            foreach (string key in emptyKeys)
                 _staticSceneObjectRenderCache.Remove(key);
         }
 
@@ -9720,6 +9794,179 @@ namespace LimitlessSquareEngine
                 QueueCelestialBodyCommands(sceneId, cameraItem, view, viewport, cameraNearClip, layerCount, backgroundLayerBatchId);
             }
 
+            _cameraVisibleObjectsScratch.Clear();
+
+            foreach (var obj in objects)
+            {
+                if (!obj.Active || !obj.Visible)
+                    continue;
+                if (obj.ObjectId == cameraItem.ObjectId)
+                    continue;
+                if (string.Equals(obj.Type, "Camera", StringComparison.Ordinal))
+                    continue;
+                if (string.Equals(obj.Type, "Light", StringComparison.Ordinal))
+                    continue;
+                if (string.IsNullOrWhiteSpace(obj.Mesh))
+                    continue;
+                if (!_meshes.TryGetValue(obj.Mesh, out MeshData mesh))
+                {
+                    if (obj.Mesh.EndsWith(".vrm", StringComparison.OrdinalIgnoreCase))
+                        Program.EnsureVrmRegistered(obj.Mesh, this);
+                    else
+                        Program.EnsureObjMeshRegistered(obj.Mesh, this);
+                }
+                if (!_meshes.TryGetValue(obj.Mesh, out mesh))
+                {
+                    Console.WriteLine($"[!] Mesh '{obj.Mesh}' not found for object '{obj.ObjectId}'.");
+                    continue;
+                }
+
+                Double3 relativePosition = obj.WorldPosition - cameraWorld.Position;
+
+                int lodLevel = 0;
+                string activeMeshKey = obj.Mesh!;
+
+                SceneObjectLodSettings? lodSettings = obj.LodSettings;
+                if (lodSettings != null && lodSettings.Enabled && lodSettings.Levels.Count > 0 &&
+                    string.Equals(obj.Type, "Object", StringComparison.Ordinal))
+                {
+                    (string, string, string) lodKey = (obj.SceneId, cameraItem.ObjectId, obj.ObjectId);
+                    bool hasPrevLevel = _sceneObjectLodLevels.TryGetValue(lodKey, out int prevLevel);
+                    if (!hasPrevLevel)
+                        prevLevel = 0;
+
+                    double maxScale = Math.Max(
+                        Math.Abs(obj.WorldScale.X),
+                        Math.Max(Math.Abs(obj.WorldScale.Y), Math.Abs(obj.WorldScale.Z)));
+                    double worldRadius = mesh.BoundingSphereRadius * maxScale;
+                    double distance = Math.Sqrt(
+                        relativePosition.X * relativePosition.X +
+                        relativePosition.Y * relativePosition.Y +
+                        relativePosition.Z * relativePosition.Z);
+                    if (distance < 1e-6)
+                        distance = 1e-6;
+
+                    double hysteresis = lodSettings.Hysteresis;
+                    if (hysteresis < 0.0)
+                        hysteresis = 0.0;
+
+                    bool distanceMode = string.Equals(lodSettings.Mode, "distance", StringComparison.OrdinalIgnoreCase);
+                    int levelCount = lodSettings.Levels.Count;
+
+                    double metric;
+                    if (distanceMode)
+                    {
+                        metric = distance;
+                    }
+                    else
+                    {
+                        double tanHalfFov = Math.Tan(fovRadians * 0.5);
+                        if (tanHalfFov < 1e-6)
+                            tanHalfFov = 1e-6;
+                        metric = worldRadius * 2.0 / (distance * tanHalfFov) * 100.0;
+                    }
+
+                    int level = prevLevel;
+                    if (distanceMode)
+                    {
+                        while (level > 0 && metric <= lodSettings.Levels[level - 1].Distance * (1.0 - hysteresis))
+                            level--;
+                        while (level < levelCount && metric > lodSettings.Levels[level].Distance * (1.0 + hysteresis))
+                            level++;
+                    }
+                    else
+                    {
+                        while (level > 0 && metric >= lodSettings.Levels[level - 1].ScreenHeight * (1.0 + hysteresis))
+                            level--;
+                        while (level < levelCount && metric < lodSettings.Levels[level].ScreenHeight * (1.0 - hysteresis))
+                            level++;
+                    }
+
+                    if (level != prevLevel || !hasPrevLevel)
+                        _sceneObjectLodLevels[lodKey] = level;
+
+                    bool cull = false;
+                    if (lodSettings.LastLevelCull)
+                    {
+                        if (distanceMode)
+                            cull = metric > lodSettings.Levels[levelCount - 1].Distance * (1.0 + hysteresis);
+                        else
+                            cull = metric < lodSettings.Levels[levelCount - 1].ScreenHeight * (1.0 - hysteresis);
+                    }
+
+                    if (cull)
+                        continue;
+
+                    while (level > 0)
+                    {
+                        string targetKey = lodSettings.Levels[level - 1].Mesh ?? "";
+                        if (string.IsNullOrWhiteSpace(targetKey))
+                        {
+                            if (_lodMeshLoadFailedCache.Add(targetKey))
+                                Console.WriteLine($"[!] LOD mesh '{targetKey}' is empty for object '{obj.ObjectId}', falling back to level {level - 1}.");
+                            level--;
+                            continue;
+                        }
+
+                        if (!_meshes.TryGetValue(targetKey, out MeshData targetMesh) &&
+                            !_lodMeshLoadFailedCache.Contains(targetKey))
+                        {
+                            if (targetKey.EndsWith(".vrm", StringComparison.OrdinalIgnoreCase))
+                                Program.EnsureVrmRegistered(targetKey, this);
+                            else
+                                Program.EnsureObjMeshRegistered(targetKey, this);
+                        }
+
+                        if (_meshes.TryGetValue(targetKey, out targetMesh))
+                        {
+                            mesh = targetMesh;
+                            activeMeshKey = targetKey;
+                            lodLevel = level;
+                            break;
+                        }
+
+                        _lodMeshLoadFailedCache.Add(targetKey);
+                        Console.WriteLine($"[!] LOD mesh '{targetKey}' not found for object '{obj.ObjectId}', falling back to level {level - 1}.");
+                        level--;
+                    }
+                }
+
+                StaticSceneObjectRenderCache? staticRenderCache = TryGetStaticSceneObjectRenderCache(obj, mesh, activeMeshKey, lodLevel);
+
+                Matrix4x4 scaleRotation = staticRenderCache != null
+                    ? staticRenderCache.ScaleRotation
+                    : CreateSceneObjectScaleRotationMatrix(obj);
+
+                Matrix4x4 model =
+                    scaleRotation *
+                    Matrix4x4.CreateTranslation(
+                        (float)relativePosition.X,
+                        (float)relativePosition.Y,
+                        (float)(-relativePosition.Z));
+
+                MaterialData? cloudMaterial = null;
+                foreach (MeshSurfaceData surface in mesh.Surfaces)
+                {
+                    MaterialData surfaceMaterial = ResolveSceneMaterial(obj, surface);
+                    if (surfaceMaterial.IsCloud)
+                    {
+                        cloudMaterial = surfaceMaterial;
+                        break;
+                    }
+                }
+
+                _cameraVisibleObjectsScratch.Add(new CameraVisibleObjectEntry
+                {
+                    Obj = obj,
+                    Mesh = mesh,
+                    ActiveMeshKey = activeMeshKey,
+                    RelativePosition = relativePosition,
+                    Model = model,
+                    StaticRenderCache = staticRenderCache,
+                    CloudMaterial = cloudMaterial
+                });
+            }
+
             for (int layerIdx = layerCount - 1; layerIdx >= 0; layerIdx--)
             {
                 double layerFar = _depthLayerFars[layerIdx];
@@ -9736,51 +9983,17 @@ namespace LimitlessSquareEngine
 
                 long batchId = ++_sceneBatchCounter;
 
-                foreach (var obj in objects)
+                for (int entryIndex = 0; entryIndex < _cameraVisibleObjectsScratch.Count; entryIndex++)
                 {
-                    if (!obj.Active || !obj.Visible)
-                        continue;
-                    if (obj.ObjectId == cameraItem.ObjectId)
-                        continue;
-                    if (string.Equals(obj.Type, "Camera", StringComparison.Ordinal))
-                        continue;
-                    if (string.Equals(obj.Type, "Light", StringComparison.Ordinal))
-                        continue;
-                    if (string.IsNullOrWhiteSpace(obj.Mesh))
-                        continue;
-                    if (!_meshes.TryGetValue(obj.Mesh, out MeshData mesh))
-                    {
-                        if (obj.Mesh.EndsWith(".vrm", StringComparison.OrdinalIgnoreCase))
-                            Program.EnsureVrmRegistered(obj.Mesh, this);
-                        else
-                            Program.EnsureObjMeshRegistered(obj.Mesh, this);
-                    }
-                    if (!_meshes.TryGetValue(obj.Mesh, out mesh))
-                    {
-                        Console.WriteLine($"[!] Mesh '{obj.Mesh}' not found for object '{obj.ObjectId}'.");
-                        continue;
-                    }
-
-                    StaticSceneObjectRenderCache? staticRenderCache = TryGetStaticSceneObjectRenderCache(obj, mesh);
-                    Double3 relativePosition = obj.WorldPosition - cameraWorld.Position;
-
-                    Matrix4x4 scaleRotation = staticRenderCache != null
-                        ? staticRenderCache.ScaleRotation
-                        : CreateSceneObjectScaleRotationMatrix(obj);
-
-                    Matrix4x4 model =
-                        scaleRotation *
-                        Matrix4x4.CreateTranslation(
-                            (float)relativePosition.X,
-                            (float)relativePosition.Y,
-                            (float)(-relativePosition.Z));
+                    CameraVisibleObjectEntry entry = _cameraVisibleObjectsScratch[entryIndex];
+                    SceneRenderObjectSnapshot obj = entry.Obj;
 
                     if (string.Equals(obj.Type, "Avatar", StringComparison.Ordinal))
                     {
                         BuildAvatarSceneCommands(
                             obj,
-                            mesh,
-                            model,
+                            entry.Mesh,
+                            entry.Model,
                             sceneId,
                             cameraItem,
                             viewport,
@@ -9798,23 +10011,13 @@ namespace LimitlessSquareEngine
                         continue;
                     }
 
-                    MaterialData? cloudMaterial = null;
-                    foreach (MeshSurfaceData surface in mesh.Surfaces)
+                    if (entry.CloudMaterial != null)
                     {
-                        MaterialData surfaceMaterial = ResolveSceneMaterial(obj, surface);
-                        if (surfaceMaterial.IsCloud)
-                        {
-                            cloudMaterial = surfaceMaterial;
-                            break;
-                        }
-                    }
-
-                    if (cloudMaterial != null)
-                    {
+                        MaterialData cloudMaterial = entry.CloudMaterial;
                         Vector3 planetCenterCameraRelative = new Vector3(
-                            (float)relativePosition.X,
-                            (float)relativePosition.Y,
-                            (float)(-relativePosition.Z));
+                            (float)entry.RelativePosition.X,
+                            (float)entry.RelativePosition.Y,
+                            (float)(-entry.RelativePosition.Z));
 
                         _renderQueue.Add(new RenderCommand
                         {
@@ -9867,8 +10070,9 @@ namespace LimitlessSquareEngine
                         continue;
                     }
 
-                    if (staticRenderCache != null)
+                    if (entry.StaticRenderCache != null)
                     {
+                        StaticSceneObjectRenderCache staticRenderCache = entry.StaticRenderCache;
                         foreach (StaticSceneSurfaceCommandTemplate surface in staticRenderCache.Surfaces)
                         {
                             RenderCommand cmd = new RenderCommand
@@ -9886,12 +10090,12 @@ namespace LimitlessSquareEngine
                                 ObjectId = obj.ObjectId,
                                 CameraWorldPosition = cameraWorld.Position,
                                 RenderSpace = RenderSpace.Camera,
-                                Model = model,
+                                Model = entry.Model,
                                 View = view,
                                 Projection = projection,
                                 QueueType = (surface.TransparentByColorAlpha || surface.Material.IsAlphaBlend) ? RenderQueueType.Transparent : RenderQueueType.Opaque,
                                 UsePremultipliedTransparentBlend = surface.TransparentByColorAlpha,
-                                SortDepth = ComputeSortDepth(surface.LocalCenter, model, view, RenderSpace.Camera),
+                                SortDepth = ComputeSortDepth(surface.LocalCenter, entry.Model, view, RenderSpace.Camera),
                                 SubmissionIndex = _submissionCounter++,
                                 Pass = RenderPass.Scene,
                                 BatchId = batchId,
@@ -9906,7 +10110,7 @@ namespace LimitlessSquareEngine
                                 ForceWhiteVertexColor = true,
                                 IsSkybox = false,
                                 CullMode = surface.CullMode,
-                                MeshId = obj.Mesh ?? "",
+                                MeshId = entry.ActiveMeshKey,
                                 MeshSurfaceId = surface.SurfaceId,
                                 CameraObjectId = cameraItem.ObjectId,
                                 MeshVertexColorsAreWhite = surface.MeshVertexColorsAreWhite,
@@ -9924,7 +10128,7 @@ namespace LimitlessSquareEngine
                         continue;
                     }
 
-                    foreach (MeshSurfaceData surface in mesh.Surfaces)
+                    foreach (MeshSurfaceData surface in entry.Mesh.Surfaces)
                     {
                         MaterialData material = ResolveSceneMaterial(obj, surface);
                         float materialAlpha = ReadMaterialColorAlpha(material);
@@ -9945,12 +10149,12 @@ namespace LimitlessSquareEngine
                             ObjectId = obj.ObjectId,
                             CameraWorldPosition = cameraWorld.Position,
                             RenderSpace = RenderSpace.Camera,
-                            Model = model,
+                            Model = entry.Model,
                             View = view,
                             Projection = projection,
                             QueueType = (transparentByColorAlpha || material.IsAlphaBlend) ? RenderQueueType.Transparent : RenderQueueType.Opaque,
                             UsePremultipliedTransparentBlend = transparentByColorAlpha,
-                            SortDepth = ComputeSortDepth(surface.LocalCenter, model, view, RenderSpace.Camera),
+                            SortDepth = ComputeSortDepth(surface.LocalCenter, entry.Model, view, RenderSpace.Camera),
                             SubmissionIndex = _submissionCounter++,
                             Pass = RenderPass.Scene,
                             BatchId = batchId,
@@ -9965,7 +10169,7 @@ namespace LimitlessSquareEngine
                             ForceWhiteVertexColor = true,
                             IsSkybox = false,
                             CullMode = material.CullMode,
-                            MeshId = obj.Mesh ?? "",
+                            MeshId = entry.ActiveMeshKey,
                             MeshSurfaceId = surface.Id,
                             CameraObjectId = cameraItem.ObjectId,
                             MeshVertexColorsAreWhite = surface.VertexColorsAreWhite,

@@ -78,6 +78,8 @@ namespace LimitlessSquareEngine
             public PrimitiveType PrimitiveType { get; }
             public int VertexStrideFloats { get; }
             public MeshSurfaceData[] Surfaces { get; }
+            public Vector3 BoundingSphereCenter { get; }
+            public float BoundingSphereRadius { get; }
 
             public MeshData(string id, float[] vertices, PrimitiveType primitiveType, int vertexStrideFloats, int revision)
             {
@@ -90,6 +92,9 @@ namespace LimitlessSquareEngine
                 Vector3 localCenter = Graphics.ComputeMeshLocalCenter(vertices, vertexStrideFloats);
                 Graphics.ComputeMeshLocalBounds(vertices, vertexStrideFloats, out Vector3 localBoundsMin, out Vector3 localBoundsMax);
                 bool vertexColorsAreWhite = Graphics.AreMeshVertexColorsWhite(vertices, vertexStrideFloats);
+
+                BoundingSphereCenter = (localBoundsMin + localBoundsMax) * 0.5f;
+                BoundingSphereRadius = (localBoundsMax - localBoundsMin).Length() * 0.5f;
 
                 Surfaces = new[]
                 {
@@ -119,6 +124,18 @@ namespace LimitlessSquareEngine
                 Vertices = surfaces[0].Vertices;
                 PrimitiveType = surfaces[0].PrimitiveType;
                 VertexStrideFloats = surfaces[0].VertexStrideFloats;
+
+                Vector3 boundsMin = new Vector3(float.MaxValue, float.MaxValue, float.MaxValue);
+                Vector3 boundsMax = new Vector3(float.MinValue, float.MinValue, float.MinValue);
+
+                foreach (MeshSurfaceData surface in surfaces)
+                {
+                    boundsMin = Vector3.Min(boundsMin, surface.LocalBoundsMin);
+                    boundsMax = Vector3.Max(boundsMax, surface.LocalBoundsMax);
+                }
+
+                BoundingSphereCenter = (boundsMin + boundsMax) * 0.5f;
+                BoundingSphereRadius = (boundsMax - boundsMin).Length() * 0.5f;
             }
 
             public MeshData WithUpdatedSurfaceVertices(int surfaceIndex, float[] vertices)

@@ -2189,6 +2189,96 @@ namespace LimitlessSquareEngine
                 source.RenderTag = value ?? string.Empty;
         }
 
+        public Table GetLod()
+        {
+            Table table = new Table(_script);
+            SceneObjectLodSettings? settings = Scene.GetSceneObject(_sceneId, _objectId)?.Lod;
+
+            if (settings == null)
+                return table;
+
+            table.Set("enabled", DynValue.NewBoolean(settings.Enabled));
+            table.Set("mode", DynValue.NewString(settings.Mode));
+            table.Set("hysteresis", DynValue.NewNumber(settings.Hysteresis));
+            table.Set("lastLevelCull", DynValue.NewBoolean(settings.LastLevelCull));
+
+            Table levels = new Table(_script);
+
+            foreach (SceneObjectLodLevel level in settings.Levels)
+            {
+                Table levelTable = new Table(_script);
+                levelTable.Set("mesh", DynValue.NewString(level.Mesh));
+                levelTable.Set("screenHeight", DynValue.NewNumber(level.ScreenHeight));
+                levelTable.Set("distance", DynValue.NewNumber(level.Distance));
+                levels.Append(DynValue.NewTable(levelTable));
+            }
+
+            table.Set("levels", DynValue.NewTable(levels));
+
+            return table;
+        }
+
+        public void SetLod(Table lod)
+        {
+            if (lod == null)
+            {
+                Scene.SetObjectLod(_sceneId, _objectId, null);
+                return;
+            }
+
+            SceneObjectLodSettings settings = new SceneObjectLodSettings();
+
+            DynValue enabled = lod.Get("enabled");
+            if (!enabled.IsNil())
+                settings.Enabled = enabled.Boolean;
+
+            DynValue mode = lod.Get("mode");
+            if (!mode.IsNil() && !string.IsNullOrWhiteSpace(mode.String))
+                settings.Mode = mode.String;
+
+            DynValue hysteresis = lod.Get("hysteresis");
+            if (hysteresis.Type == DataType.Number)
+                settings.Hysteresis = hysteresis.Number;
+
+            DynValue lastLevelCull = lod.Get("lastLevelCull");
+            if (!lastLevelCull.IsNil())
+                settings.LastLevelCull = lastLevelCull.Boolean;
+
+            DynValue levels = lod.Get("levels");
+            if (levels.Type == DataType.Table)
+            {
+                foreach (DynValue value in levels.Table.Values)
+                {
+                    if (value.Type != DataType.Table)
+                        continue;
+
+                    Table levelTable = value.Table;
+                    SceneObjectLodLevel level = new SceneObjectLodLevel();
+
+                    DynValue mesh = levelTable.Get("mesh");
+                    if (!mesh.IsNil())
+                        level.Mesh = mesh.String ?? "";
+
+                    DynValue screenHeight = levelTable.Get("screenHeight");
+                    if (screenHeight.Type == DataType.Number)
+                        level.ScreenHeight = screenHeight.Number;
+
+                    DynValue distance = levelTable.Get("distance");
+                    if (distance.Type == DataType.Number)
+                        level.Distance = distance.Number;
+
+                    settings.Levels.Add(level);
+                }
+            }
+
+            Scene.SetObjectLod(_sceneId, _objectId, settings);
+        }
+
+        public int GetCurrentLod()
+        {
+            return Scene.GetObjectRenderLodLevel(_sceneId, _objectId);
+        }
+
         public Table GetTags()
         {
             Table table = new Table(_script);

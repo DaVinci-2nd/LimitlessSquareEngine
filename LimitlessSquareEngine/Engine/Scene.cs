@@ -433,6 +433,22 @@ namespace LimitlessSquareEngine.Engine
         public List<ScenePropertiesSphereAmbientLight>? SphereAmbientLights { get; set; }
     }
 
+    public class SceneObjectLodLevel
+    {
+        public string Mesh { get; set; } = "";
+        public double ScreenHeight { get; set; } = 0.0;
+        public double Distance { get; set; } = 0.0;
+    }
+
+    public class SceneObjectLodSettings
+    {
+        public bool Enabled { get; set; } = true;
+        public string Mode { get; set; } = "screenHeight";
+        public double Hysteresis { get; set; } = 0.1;
+        public bool LastLevelCull { get; set; } = false;
+        public List<SceneObjectLodLevel> Levels { get; set; } = new();
+    }
+
     public class SceneObject
     {
         public string Id { get; set; } = "";
@@ -448,6 +464,7 @@ namespace LimitlessSquareEngine.Engine
         public string RenderTag { get; set; } = "";
         public PhysicsBody? Physics { get; set; }
         public List<string>? Materials { get; set; }
+        public SceneObjectLodSettings? Lod { get; set; }
         public List<SceneScriptAttachment>? Scripts { get; set; }
     }
 
@@ -1111,6 +1128,21 @@ namespace LimitlessSquareEngine.Engine
             MarkSubtreeDirty(runtime, node);
         }
 
+        public static void SetObjectLod(string sceneId, string objectId, SceneObjectLodSettings? lod)
+        {
+            if (!TryGetNode(sceneId, objectId, out var runtime, out var node))
+                return;
+
+            node.Source.Lod = lod;
+
+            MarkSubtreeDirty(runtime, node);
+        }
+
+        public static int GetObjectRenderLodLevel(string sceneId, string objectId)
+        {
+            return _boundGraphics?.GetObjectRenderLodLevel(sceneId, objectId) ?? 0;
+        }
+
         internal static SceneObject? AddObject(string sceneId, string objectId, string name, string type)
         {
             if (!_runtimeScenes.TryGetValue(sceneId, out SceneRuntimeData? runtime))
@@ -1686,6 +1718,7 @@ namespace LimitlessSquareEngine.Engine
                         Visible = node.Source.Visible,
                         Mesh = node.Source.Mesh,
                         Materials = node.Source.Materials,
+                        LodSettings = node.Source.Lod,
                         RenderTag = node.Source.RenderTag,
                         WorldPosition = node.World.Position,
                         WorldRotation = node.World.Rotation,
