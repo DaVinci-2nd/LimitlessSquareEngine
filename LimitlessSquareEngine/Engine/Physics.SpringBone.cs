@@ -56,6 +56,8 @@ namespace LimitlessSquareEngine.Engine
 
     internal partial class Physics
     {
+        private const double SpringBoneReferenceDeltaTime = 1.0 / 60.0;
+
         private static int[] BuildBoneOrder(AvatarSkeleton skeleton)
         {
             int count = skeleton.Bones.Count;
@@ -264,16 +266,19 @@ namespace LimitlessSquareEngine.Engine
 
                 DQuaternion parentEvalRotation = (centerInverse * parentModelRotation).Normalized();
 
-                Double3 inertia = (joint.CurrentTail - joint.PrevTail) * (1.0 - joint.DragForce)
+                Double3 inertia = (joint.CurrentTail - joint.PrevTail)
+                    * Math.Pow(1.0 - joint.DragForce, deltaTime / SpringBoneReferenceDeltaTime)
                     - runtime.WorldDeltaModel * joint.DragForce;
 
                 Double3 stiffness = parentEvalRotation.Rotate(
-                    joint.InitialLocalRotation.Rotate(joint.BoneAxis)) * (deltaTime * joint.Stiffness);
+                    joint.InitialLocalRotation.Rotate(joint.BoneAxis))
+                        * (deltaTime * deltaTime / SpringBoneReferenceDeltaTime * joint.Stiffness);
 
                 Double3 gravityLocal = NormalizeVector(joint.GravityDir);
                 Double3 gravityEval = centerInverse.Rotate(avatarWorldInverse.Rotate(gravityLocal));
 
-                Double3 external = gravityEval * (deltaTime * joint.GravityPower);
+                Double3 external = gravityEval
+                    * (deltaTime * deltaTime / SpringBoneReferenceDeltaTime * joint.GravityPower);
 
                 if (runtime.PendingImpulses.TryGetValue(boneIndex, out Double3 pendingImpulse))
                     external += pendingImpulse * deltaTime;

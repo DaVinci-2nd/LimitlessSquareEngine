@@ -179,6 +179,8 @@ namespace LimitlessSquareEngine.Engine
             if (physics.Avatars.Count == 0)
                 return;
 
+            double springDeltaTime = deltaTime * SpringBoneRateScale;
+
             foreach (AvatarPhysicsRuntime runtime in physics.Avatars.Values)
             {
                 SceneWorldState nodeWorld = ResolveWorld(runtime.Node);
@@ -197,13 +199,13 @@ namespace LimitlessSquareEngine.Engine
                 ResolveModelTransforms(runtime, false);
                 SyncAvatarProxies(runtime, nodeWorld);
 
-                if (runtime.Chains.Count == 0)
+                if (runtime.Chains.Count == 0 || springDeltaTime <= 0.0)
                     continue;
 
                 runtime.SolvedCount = 0;
 
                 foreach (SpringBoneChainRuntime chain in runtime.Chains)
-                    StepSpringBoneChain(runtime, chain, deltaTime, nodeWorld.Rotation);
+                    StepSpringBoneChain(runtime, chain, springDeltaTime, nodeWorld.Rotation);
 
                 WriteSolvedSpringBoneRotations(runtime);
             }

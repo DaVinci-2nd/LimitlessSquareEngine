@@ -13,6 +13,12 @@ using System.Threading.Tasks;
 
 namespace LimitlessSquareEngine.Engine
 {
+    public enum AvatarSpringBoneStepMode
+    {
+        PerFrame = 0,
+        FixedRate = 1
+    }
+
     internal partial class Physics
     {
         internal delegate bool MeshColliderTriangleResolver(
@@ -20,6 +26,11 @@ namespace LimitlessSquareEngine.Engine
             out List<Graphics.MeshColliderTriangle> triangles);
 
         private static MeshColliderTriangleResolver? _meshColliderTriangleResolver;
+
+        public static AvatarSpringBoneStepMode SpringBoneStepMode { get; set; } =
+            AvatarSpringBoneStepMode.PerFrame;
+
+        public static double SpringBoneRateScale { get; set; } = 1.0;
 
         internal static void SetMeshColliderTriangleResolver(
             MeshColliderTriangleResolver resolver)
@@ -48,7 +59,6 @@ namespace LimitlessSquareEngine.Engine
 
             public double FixedDeltaAccumulator;
             public bool SkipFirstPhysicsStep = true;
-            public bool VariableTimestep;
 
             public void Dispose()
             {
@@ -93,9 +103,6 @@ namespace LimitlessSquareEngine.Engine
 
                 if (config.IgnoreColliders != null && config.IgnoreColliders.Count > 0)
                     physics.ColliderIgnores[node.Source.Id] = config.IgnoreColliders;
-
-                if (config.VariableTimestep ?? config.CharacterController)
-                    physics.VariableTimestep = true;
 
                 int lockedAxes = ResolveLockedAxes(config);
 
@@ -183,22 +190,12 @@ namespace LimitlessSquareEngine.Engine
                     continue;
                 }
 
-                if (physics.VariableTimestep)
-                {
-                    if (deltaTime > 0.0)
-                    {
-                        PushDirtySceneTransformsToPhysics(physics);
-                        WakeBodiesUnderForce(physics);
-                        StepAvatarPhysics(physics, deltaTime);
-                        ApplyRootMotionBoost(physics, deltaTime);
-                        physics.World.Step(deltaTime, false);
-                        RestoreLockedPositions(physics);
-                        CollectAvatarContacts(physics);
-                        PullPhysicsTransformsToScene(physics);
-                    }
+                bool springBonesPerFrame =
+                    physics.Avatars.Count > 0 &&
+                    SpringBoneStepMode == AvatarSpringBoneStepMode.PerFrame;
 
-                    continue;
-                }
+                if (springBonesPerFrame && deltaTime > 0.0)
+                    StepAvatarPhysics(physics, deltaTime);
 
                 physics.FixedDeltaAccumulator += deltaTime;
 
@@ -210,7 +207,8 @@ namespace LimitlessSquareEngine.Engine
                 {
                     PushDirtySceneTransformsToPhysics(physics);
                     WakeBodiesUnderForce(physics);
-                    StepAvatarPhysics(physics, fixedDeltaTime);
+                    if (!springBonesPerFrame)
+                        StepAvatarPhysics(physics, fixedDeltaTime);
                     ApplyRootMotionBoost(physics, fixedDeltaTime);
                     physics.World.Step(fixedDeltaTime, false);
                     RestoreLockedPositions(physics);

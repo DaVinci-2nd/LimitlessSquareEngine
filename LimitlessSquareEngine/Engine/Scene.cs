@@ -342,8 +342,6 @@ namespace LimitlessSquareEngine.Engine
         public List<string>? IgnoreColliders { get; set; }
 
         public List<string>? Constraints { get; set; }
-
-        public bool? VariableTimestep { get; set; }
     }
 
     public sealed class PhysicsRaycastHit

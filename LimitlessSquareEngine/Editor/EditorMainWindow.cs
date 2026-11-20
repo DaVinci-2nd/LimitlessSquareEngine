@@ -14585,19 +14585,6 @@ void main()
                 0.0,
                 2.0));
 
-            panel.Children.Add(CreateCheckPropertyEditor(
-                "variableTimestep",
-                () => body.VariableTimestep ?? false,
-                value =>
-                {
-                    if (body.VariableTimestep == value)
-                        return true;
-
-                    BeginSceneParameterChange();
-                    body.VariableTimestep = value;
-                    return PersistSceneObjectChanges(obj, false);
-                }));
-
             Button removeButton = CreateTextCommandButton("移除物理", 96);
             removeButton.Margin = new Thickness(12, 2, 12, 2);
             removeButton.HorizontalAlignment = HorizontalAlignment.Left;
