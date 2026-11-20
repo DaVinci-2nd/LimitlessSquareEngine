@@ -28,6 +28,15 @@ layout(std430, binding = 0) readonly buffer AvatarBoneMatrices
     mat4 uBoneMatrices[];
 };
 
+layout(std430, binding = 5) readonly buffer InstanceModelMatrices
+{
+    vec4 iModel[];
+};
+
+uniform int uInstanceEnabled;
+uniform int uInstanceBase;
+uniform vec3 uInstanceWorldOffset;
+
 uniform int uSkinEnabled;
 uniform int uBoneBaseIndex;
 
@@ -74,12 +83,22 @@ void main()
     }
 
     vec4 worldPos4 = uModel * vec4(localPos, 1.0);
+
+    mat4 instanceModelMatrix = uModel;
+    if (uInstanceEnabled == 1)
+    {
+        int i = (uInstanceBase + gl_InstanceID) * 4;
+        instanceModelMatrix = mat4(iModel[i], iModel[i + 1], iModel[i + 2], iModel[i + 3]);
+        worldPos4 = instanceModelMatrix * vec4(localPos, 1.0);
+        worldPos4.xyz += uInstanceWorldOffset;
+    }
+
     vec4 viewPos4 = uView * worldPos4;
 
     vWorldPos = worldPos4.xyz;
     vViewPos = viewPos4.xyz;
 
-    mat3 normalMatrix = transpose(inverse(mat3(uModel)));
+    mat3 normalMatrix = transpose(inverse(mat3(instanceModelMatrix)));
 
     vec3 worldNormal = normalize(normalMatrix * localNormal);
     vec3 worldTangent = normalize(normalMatrix * localTangent);

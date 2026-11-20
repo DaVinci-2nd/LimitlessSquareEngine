@@ -496,6 +496,58 @@ namespace LimitlessSquareEngine.Engine
             Converters = { new Double3JsonConverter() }
         };
 
+        private static readonly Dictionary<string, string> _internedSceneStrings = new(StringComparer.Ordinal);
+
+        internal static void InternSceneObjectStrings(List<SceneObject> objects)
+        {
+            if (objects == null || objects.Count == 0)
+                return;
+
+            string Intern(string value)
+            {
+                if (!_internedSceneStrings.TryGetValue(value, out string? interned))
+                {
+                    interned = value;
+                    _internedSceneStrings[value] = value;
+                }
+
+                return interned;
+            }
+
+            foreach (SceneObject obj in objects)
+            {
+                if (!string.IsNullOrEmpty(obj.Mesh))
+                    obj.Mesh = Intern(obj.Mesh);
+
+                if (!string.IsNullOrEmpty(obj.Type))
+                    obj.Type = Intern(obj.Type);
+
+                if (!string.IsNullOrEmpty(obj.Controller))
+                    obj.Controller = Intern(obj.Controller);
+
+                if (!string.IsNullOrEmpty(obj.RenderTag))
+                    obj.RenderTag = Intern(obj.RenderTag);
+
+                if (obj.Tags != null)
+                {
+                    for (int i = 0; i < obj.Tags.Count; i++)
+                    {
+                        if (!string.IsNullOrEmpty(obj.Tags[i]))
+                            obj.Tags[i] = Intern(obj.Tags[i]);
+                    }
+                }
+
+                if (obj.Materials != null)
+                {
+                    for (int i = 0; i < obj.Materials.Count; i++)
+                    {
+                        if (!string.IsNullOrEmpty(obj.Materials[i]))
+                            obj.Materials[i] = Intern(obj.Materials[i]);
+                    }
+                }
+            }
+        }
+
         internal static SceneData? ParseSceneFile(string filePath)
         {
             try
@@ -513,6 +565,7 @@ namespace LimitlessSquareEngine.Engine
 
                 EnsureAvatarBonesPersisted(scene, filePath);
                 ApplyAvatarMorphWeights(scene);
+                InternSceneObjectStrings(scene.Objects);
 
                 return scene;
             }
@@ -546,6 +599,7 @@ namespace LimitlessSquareEngine.Engine
 
             EnsureAvatarBonesPersisted(scene, filePath);
             ApplyAvatarMorphWeights(scene);
+            InternSceneObjectStrings(scene.Objects);
 
             _loadedScenes[sceneId] = scene;
 
@@ -765,6 +819,7 @@ namespace LimitlessSquareEngine.Engine
             public SceneData Scene { get; init; } = null!;
             public Dictionary<string, SceneRuntimeNode> Nodes { get; } = new(StringComparer.Ordinal);
             public HashSet<string> DirtyNodes { get; } = new(StringComparer.Ordinal);
+            public HashSet<string> ActiveStabilityNodeIds { get; } = new(StringComparer.Ordinal);
             public bool CameraCacheDirty { get; set; } = true;
         }
 
@@ -1206,6 +1261,7 @@ namespace LimitlessSquareEngine.Engine
 
             runtime.Nodes.Remove(objectId);
             runtime.DirtyNodes.Remove(objectId);
+            runtime.ActiveStabilityNodeIds.Remove(objectId);
             runtime.Scene.Objects.Remove(node.Source);
 
             Physics.RemoveObject(sceneId, objectId);
@@ -1648,8 +1704,14 @@ namespace LimitlessSquareEngine.Engine
 
         private static void UpdateStaticRenderStability(SceneRuntimeData runtime)
         {
-            foreach (SceneRuntimeNode node in runtime.Nodes.Values)
+            if (runtime.ActiveStabilityNodeIds.Count == 0)
+                return;
+
+            foreach (string id in runtime.ActiveStabilityNodeIds)
             {
+                if (!runtime.Nodes.TryGetValue(id, out SceneRuntimeNode? node))
+                    continue;
+
                 if (node.Dirty || HasNonStaticPhysics(node))
                 {
                     node.StillFramesSinceLastTransform = 0;
@@ -1661,7 +1723,10 @@ namespace LimitlessSquareEngine.Engine
                     node.StillFramesSinceLastTransform++;
 
                     if (node.StillFramesSinceLastTransform == StaticRenderStillFrameThreshold)
+                    {
                         runtime.DirtyNodes.Add(node.Source.Id);
+                        runtime.ActiveStabilityNodeIds.Remove(node.Source.Id);
+                    }
                 }
             }
         }
@@ -1779,6 +1844,9 @@ namespace LimitlessSquareEngine.Engine
                             }
                         }
                     }
+
+                    if (string.Equals(node.Source.Type, "Object", StringComparison.Ordinal))
+                        runtime.ActiveStabilityNodeIds.Add(node.Source.Id);
                 }
 
                 if (runtime.CameraCacheDirty)

@@ -21,6 +21,8 @@ namespace LimitlessSquareEngine
 
         private int _meshRevisionCounter = 0;
 
+        private readonly Dictionary<string, List<MeshColliderTriangle>> _meshColliderTriangleCache = new(StringComparer.Ordinal);
+
         private sealed class MeshSurfaceGpuResource
         {
             public uint Vao { get; init; }
@@ -345,6 +347,8 @@ namespace LimitlessSquareEngine
                 _meshSurfaceGpuCache.Remove(key);
             }
 
+            _meshColliderTriangleCache.Remove(meshId);
+
             InvalidateStaticSceneObjectRenderCachesForMesh(meshId);
         }
 
@@ -415,6 +419,7 @@ namespace LimitlessSquareEngine
             _gl.BindBuffer(BufferTargetARB.ArrayBuffer, 0);
 
             _meshes[meshId] = mesh.WithUpdatedSurfaceVertices(surfaceIndex, vertices);
+            _meshColliderTriangleCache.Remove(meshId);
         }
 
         /// <summary>
@@ -812,6 +817,12 @@ namespace LimitlessSquareEngine
             if (string.IsNullOrWhiteSpace(meshId))
                 return false;
 
+            if (_meshColliderTriangleCache.TryGetValue(meshId, out List<MeshColliderTriangle>? cached))
+            {
+                triangles = cached;
+                return true;
+            }
+
             if (!_meshes.TryGetValue(meshId, out MeshData mesh))
             {
                 Program.EnsureObjMeshRegistered(meshId, this);
@@ -819,6 +830,8 @@ namespace LimitlessSquareEngine
 
             if (!_meshes.TryGetValue(meshId, out mesh))
                 return false;
+
+            List<MeshColliderTriangle> built = new List<MeshColliderTriangle>();
 
             foreach (MeshSurfaceData surface in mesh.Surfaces)
             {
@@ -871,11 +884,17 @@ namespace LimitlessSquareEngine
                         vertices[i2 + 1],
                         vertices[i2 + 2]);
 
-                    triangles.Add(new MeshColliderTriangle(a, b, c));
+                    built.Add(new MeshColliderTriangle(a, b, c));
                 }
             }
 
-            return triangles.Count > 0;
+            if (built.Count == 0)
+                return false;
+
+            _meshColliderTriangleCache[meshId] = built;
+            triangles = built;
+
+            return true;
         }
 
         private List<MeshSurfaceData> BuildObjSurfacesFromAssimpScene(

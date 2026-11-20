@@ -421,6 +421,7 @@ namespace LimitlessSquareEngine.Engine
             }
 
             targetScene.Objects.AddRange(prefabObjects);
+            Scene.InternSceneObjectStrings(prefabObjects);
             instances = prefabObjects;
 
             return rootId;

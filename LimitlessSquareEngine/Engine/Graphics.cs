@@ -175,6 +175,31 @@ namespace LimitlessSquareEngine
 
         private const uint _directionalShadowCascadeBufferBinding = 4;
 
+        private const uint _instanceModelBufferBinding = 5;
+        private const int _instanceBatchMinCount = 8;
+        private const double _spatialBucketSize = 128.0;
+
+        private uint _instanceModelBuffer = 0;
+        private int _instanceModelBufferFloatCapacity = 0;
+        private float[] _instanceModelUploadScratch = Array.Empty<float>();
+        private readonly List<float> _frameInstanceModelFloats = new(1 << 16);
+        private readonly List<string> _frameInstanceSceneIds = new(1 << 12);
+        private readonly List<string> _frameInstanceObjectIds = new(1 << 12);
+        private readonly Dictionary<(string MeshKey, string SurfaceId, string MaterialId), InstanceBatchBucket> _instanceBatchBuckets = new();
+
+        private readonly Dictionary<(string SceneId, long TileX, long TileZ), SpatialBucket> _spatialBuckets = new();
+        private readonly Dictionary<(string SceneId, string ObjectId), SpatialBucket> _spatialBucketByObject = new();
+        private readonly Dictionary<string, HashSet<string>> _dynamicSceneObjects = new(StringComparer.Ordinal);
+        private readonly List<InstanceSegment?> _instanceSegmentRegistry = new();
+        private readonly List<(int Offset, int Capacity)> _instanceSegmentFreeGpu = new();
+        private int _instanceSegmentAllocatedInstances = 0;
+        private readonly Dictionary<(string SceneId, long TileX, long TileZ, string CameraId, string LodConfigKey), int> _bucketLodLevels = new();
+        private readonly List<SpatialBucket> _visibleBucketScratch = new();
+        private readonly List<InstanceSegment> _visibleSegmentScratch = new();
+        private readonly List<SpatialBucket> _bucketsToRebuildScratch = new();
+        private readonly Dictionary<string, int> _bucketLodEvalScratch = new(StringComparer.Ordinal);
+        private readonly Dictionary<string, string> _bucketLodMeshScratch = new(StringComparer.Ordinal);
+
         private const int _directionalShadowCascadeTileSize = 1024;
         private const int _maxDirectionalShadowLights = 1;
         private const int _gpuDirectionalShadowCascadeStrideFloats = 24;
@@ -197,6 +222,9 @@ namespace LimitlessSquareEngine
         private int _shadowDepthModelLoc = -1;
         private int _shadowDepthSkinEnabledLoc = -1;
         private int _shadowDepthBoneBaseIndexLoc = -1;
+        private int _shadowDepthInstanceEnabledLoc = -1;
+        private int _shadowDepthInstanceBaseLoc = -1;
+        private int _shadowDepthInstanceWorldOffsetLoc = -1;
 
         private readonly List<float> _gpuDirectionalShadowCascadeUploadScratch = new(256);
 
@@ -800,6 +828,14 @@ namespace LimitlessSquareEngine
             mat4 uBoneMatrices[];
         };
 
+        layout(std430, binding = 5) readonly buffer InstanceModelMatrices
+        {
+            vec4 iModel[];
+        };
+
+        uniform int uInstanceEnabled;
+        uniform int uInstanceBase;
+        uniform vec3 uInstanceWorldOffset;
         uniform int uSkinEnabled;
         uniform int uBoneBaseIndex;
         uniform mat4 uModel;
@@ -826,7 +862,20 @@ namespace LimitlessSquareEngine
                 localPos = skinPos;
             }
 
-            gl_Position = uLightViewProjection * uModel * vec4(localPos, 1.0);
+            vec4 worldPos4;
+            if (uInstanceEnabled == 1)
+            {
+                int i = (uInstanceBase + gl_InstanceID) * 4;
+                mat4 instanceModelMatrix = mat4(iModel[i], iModel[i + 1], iModel[i + 2], iModel[i + 3]);
+                worldPos4 = instanceModelMatrix * vec4(localPos, 1.0);
+                worldPos4.xyz += uInstanceWorldOffset;
+            }
+            else
+            {
+                worldPos4 = uModel * vec4(localPos, 1.0);
+            }
+
+            gl_Position = uLightViewProjection * worldPos4;
         }";
 
             string fragmentSource = @"
@@ -869,6 +918,9 @@ namespace LimitlessSquareEngine
                 _shadowDepthModelLoc = _gl.GetUniformLocation(_shadowDepthProgram, "uModel");
                 _shadowDepthSkinEnabledLoc = _gl.GetUniformLocation(_shadowDepthProgram, "uSkinEnabled");
                 _shadowDepthBoneBaseIndexLoc = _gl.GetUniformLocation(_shadowDepthProgram, "uBoneBaseIndex");
+                _shadowDepthInstanceEnabledLoc = _gl.GetUniformLocation(_shadowDepthProgram, "uInstanceEnabled");
+                _shadowDepthInstanceBaseLoc = _gl.GetUniformLocation(_shadowDepthProgram, "uInstanceBase");
+                _shadowDepthInstanceWorldOffsetLoc = _gl.GetUniformLocation(_shadowDepthProgram, "uInstanceWorldOffset");
             }
 
             if (_directionalShadowCascadeBuffer == 0)
@@ -1027,6 +1079,10 @@ namespace LimitlessSquareEngine
 
             public int SkinEnabled = -1;
             public int BoneBaseIndex = -1;
+
+            public int InstanceEnabled = -1;
+            public int InstanceBase = -1;
+            public int InstanceWorldOffset = -1;
 
             public int FogEnabled = -1;
             public int FogMode = -1;
@@ -1351,8 +1407,211 @@ namespace LimitlessSquareEngine
 
             map[snapshot.ObjectId] = snapshot;
 
+            if (snapshot.StaticRenderEligible &&
+                snapshot.Active &&
+                snapshot.Visible &&
+                !string.IsNullOrWhiteSpace(snapshot.Mesh))
+            {
+                RegisterSpatialBucketObject(snapshot);
+            }
+            else
+            {
+                UnregisterSpatialBucketObject(snapshot.SceneId, snapshot.ObjectId);
+            }
+
             if (!snapshot.StaticRenderEligible)
                 _staticSceneObjectRenderCache.Remove(BuildSceneObjectRenderCacheKey(snapshot.SceneId, snapshot.ObjectId));
+        }
+
+        private static string BuildLodConfigKey(SceneObjectLodSettings? settings)
+        {
+            if (settings == null || !settings.Enabled || settings.Levels.Count == 0)
+                return "";
+
+            List<string> parts = new List<string>
+            {
+                settings.Mode ?? "",
+                settings.Hysteresis.ToString(CultureInfo.InvariantCulture),
+                settings.LastLevelCull ? "1" : "0"
+            };
+
+            foreach (SceneObjectLodLevel level in settings.Levels)
+            {
+                parts.Add((level.Mesh ?? "") + "|" +
+                    level.Distance.ToString(CultureInfo.InvariantCulture) + "|" +
+                    level.ScreenHeight.ToString(CultureInfo.InvariantCulture));
+            }
+
+            return string.Join("|", parts);
+        }
+
+        private void RegisterSpatialBucketObject(SceneRenderObjectSnapshot snapshot)
+        {
+            (string, string) objectKey = (snapshot.SceneId, snapshot.ObjectId);
+
+            if (_dynamicSceneObjects.TryGetValue(snapshot.SceneId, out HashSet<string>? dynamicSet))
+                dynamicSet.Remove(snapshot.ObjectId);
+
+            long tileX = (long)Math.Floor(snapshot.WorldPosition.X / _spatialBucketSize);
+            long tileZ = (long)Math.Floor(snapshot.WorldPosition.Z / _spatialBucketSize);
+
+            SpatialBucket? bucket = null;
+            SpatialBucketObjectEntry? entry = null;
+
+            if (_spatialBucketByObject.TryGetValue(objectKey, out SpatialBucket? existingBucket))
+            {
+                if (existingBucket.TileX == tileX && existingBucket.TileZ == tileZ)
+                {
+                    bucket = existingBucket;
+
+                    for (int i = 0; i < bucket.Objects.Count; i++)
+                    {
+                        if (string.Equals(bucket.Objects[i].Snapshot.ObjectId, snapshot.ObjectId, StringComparison.Ordinal))
+                        {
+                            entry = bucket.Objects[i];
+                            break;
+                        }
+                    }
+                }
+                else
+                {
+                    RemoveObjectFromSpatialBucket(objectKey, existingBucket);
+                }
+            }
+
+            if (bucket == null)
+            {
+                (string, long, long) bucketKey = (snapshot.SceneId, tileX, tileZ);
+
+                if (!_spatialBuckets.TryGetValue(bucketKey, out bucket))
+                {
+                    bucket = new SpatialBucket
+                    {
+                        TileX = tileX,
+                        TileZ = tileZ,
+                        Anchor = new Double3(
+                            (tileX + 0.5) * _spatialBucketSize,
+                            snapshot.WorldPosition.Y,
+                            (tileZ + 0.5) * _spatialBucketSize),
+                        BoundsMin = new Double3(double.MaxValue, double.MaxValue, double.MaxValue),
+                        BoundsMax = new Double3(double.MinValue, double.MinValue, double.MinValue)
+                    };
+                    _spatialBuckets[bucketKey] = bucket;
+                }
+            }
+
+            Matrix4x4 scaleRotation = CreateSceneObjectScaleRotationMatrix(snapshot);
+
+            Matrix4x4 anchorModel =
+                scaleRotation *
+                Matrix4x4.CreateTranslation(
+                    (float)(snapshot.WorldPosition.X - bucket.Anchor.X),
+                    (float)(snapshot.WorldPosition.Y - bucket.Anchor.Y),
+                    (float)(bucket.Anchor.Z - snapshot.WorldPosition.Z));
+
+            if (entry == null)
+            {
+                entry = new SpatialBucketObjectEntry();
+                bucket.Objects.Add(entry);
+                _spatialBucketByObject[objectKey] = bucket;
+            }
+
+            entry.Snapshot = snapshot;
+            entry.AnchorModel = anchorModel;
+            entry.MaxScale = Math.Max(
+                Math.Abs(snapshot.WorldScale.X),
+                Math.Max(Math.Abs(snapshot.WorldScale.Y), Math.Abs(snapshot.WorldScale.Z)));
+
+            if (!string.IsNullOrWhiteSpace(snapshot.Mesh) &&
+                _meshes.TryGetValue(snapshot.Mesh, out MeshData mesh))
+            {
+                entry.Mesh = mesh;
+                entry.ActiveMeshKey = snapshot.Mesh;
+                entry.BoundsRadius = mesh.BoundingSphereRadius * Math.Max(entry.MaxScale, 1e-6);
+                entry.BoundsRadiusExact = true;
+            }
+            else
+            {
+                entry.Mesh = null;
+                entry.ActiveMeshKey = snapshot.Mesh ?? "";
+                entry.BoundsRadius = Math.Max(entry.MaxScale, 0.5);
+                entry.BoundsRadiusExact = false;
+            }
+
+            entry.LodSettings = snapshot.LodSettings;
+            entry.LodConfigKey = BuildLodConfigKey(snapshot.LodSettings);
+            entry.StaticRenderCache = null;
+            entry.CloudMaterial = null;
+
+            bucket.BoundsMin = new Double3(
+                Math.Min(bucket.BoundsMin.X, snapshot.WorldPosition.X - entry.BoundsRadius),
+                Math.Min(bucket.BoundsMin.Y, snapshot.WorldPosition.Y - entry.BoundsRadius),
+                Math.Min(bucket.BoundsMin.Z, snapshot.WorldPosition.Z - entry.BoundsRadius));
+            bucket.BoundsMax = new Double3(
+                Math.Max(bucket.BoundsMax.X, snapshot.WorldPosition.X + entry.BoundsRadius),
+                Math.Max(bucket.BoundsMax.Y, snapshot.WorldPosition.Y + entry.BoundsRadius),
+                Math.Max(bucket.BoundsMax.Z, snapshot.WorldPosition.Z + entry.BoundsRadius));
+            bucket.HasBounds = true;
+            bucket.SegmentsDirty = true;
+        }
+
+        private void RemoveObjectFromSpatialBucket((string SceneId, string ObjectId) objectKey, SpatialBucket bucket)
+        {
+            for (int i = 0; i < bucket.Objects.Count; i++)
+            {
+                if (string.Equals(bucket.Objects[i].Snapshot.ObjectId, objectKey.ObjectId, StringComparison.Ordinal))
+                {
+                    bucket.Objects.RemoveAt(i);
+                    break;
+                }
+            }
+
+            _spatialBucketByObject.Remove(objectKey);
+            bucket.SegmentsDirty = true;
+
+            if (bucket.Objects.Count == 0)
+            {
+                ReleaseBucketSegments(bucket);
+                bucket.Unbatchables.Clear();
+                bucket.LodConfigKeys.Clear();
+                bucket.LodConfigSettings.Clear();
+                bucket.LodConfigMaxRadius.Clear();
+                bucket.HasBounds = false;
+                bucket.BoundsMin = new Double3(double.MaxValue, double.MaxValue, double.MaxValue);
+                bucket.BoundsMax = new Double3(double.MinValue, double.MinValue, double.MinValue);
+            }
+        }
+
+        private void ReleaseBucketSegments(SpatialBucket bucket)
+        {
+            foreach (InstanceSegment segment in bucket.Segments)
+            {
+                if (segment.RegistryIndex >= 0 && segment.RegistryIndex < _instanceSegmentRegistry.Count)
+                    _instanceSegmentRegistry[segment.RegistryIndex] = null;
+
+                _instanceSegmentFreeGpu.Add((segment.GpuOffset, segment.GpuCapacity));
+            }
+
+            bucket.Segments.Clear();
+        }
+
+        private void UnregisterSpatialBucketObject(string sceneId, string objectId)
+        {
+            (string, string) objectKey = (sceneId, objectId);
+
+            if (_spatialBucketByObject.TryGetValue(objectKey, out SpatialBucket? bucket))
+                RemoveObjectFromSpatialBucket(objectKey, bucket);
+
+            if (!string.IsNullOrWhiteSpace(sceneId))
+            {
+                if (!_dynamicSceneObjects.TryGetValue(sceneId, out HashSet<string>? set))
+                {
+                    set = new HashSet<string>(StringComparer.Ordinal);
+                    _dynamicSceneObjects[sceneId] = set;
+                }
+
+                set.Add(objectId);
+            }
         }
 
         private void EnsureAvatarInstanceFromSnapshot(SceneRenderObjectSnapshot snapshot)
@@ -1398,6 +1657,12 @@ namespace LimitlessSquareEngine
             {
                 map.Remove(objectId);
             }
+
+            if (_spatialBucketByObject.TryGetValue((sceneId, objectId), out SpatialBucket? bucket))
+                RemoveObjectFromSpatialBucket((sceneId, objectId), bucket);
+
+            if (_dynamicSceneObjects.TryGetValue(sceneId, out HashSet<string>? dynamicSet))
+                dynamicSet.Remove(objectId);
 
             if (!string.IsNullOrWhiteSpace(sceneId) && !string.IsNullOrWhiteSpace(objectId))
             {
@@ -1450,6 +1715,32 @@ namespace LimitlessSquareEngine
             _sceneLightCache.Remove(sceneId);
             _sceneSphereAmbientLights.Remove(sceneId);
 
+            List<(string, long, long)> bucketKeys = _spatialBuckets.Keys
+                .Where(k => k.SceneId == sceneId)
+                .ToList();
+
+            foreach ((string, long, long) bucketKey in bucketKeys)
+            {
+                if (_spatialBuckets.TryGetValue(bucketKey, out SpatialBucket? removedBucket))
+                {
+                    foreach (SpatialBucketObjectEntry entry in removedBucket.Objects)
+                        _spatialBucketByObject.Remove((sceneId, entry.Snapshot.ObjectId));
+
+                    ReleaseBucketSegments(removedBucket);
+                }
+
+                _spatialBuckets.Remove(bucketKey);
+            }
+
+            _dynamicSceneObjects.Remove(sceneId);
+
+            List<(string, long, long, string, string)> bucketLodKeys = _bucketLodLevels.Keys
+                .Where(k => k.SceneId == sceneId)
+                .ToList();
+
+            foreach ((string, long, long, string, string) bucketLodKey in bucketLodKeys)
+                _bucketLodLevels.Remove(bucketLodKey);
+
             foreach (Avatar avatar in AvatarRegistry.GetAll())
             {
                 if (string.Equals(avatar.SceneId, sceneId, StringComparison.Ordinal))
@@ -1480,9 +1771,41 @@ namespace LimitlessSquareEngine
 
             string mainCameraId = ResolveMainScreenCameraId();
 
+            if (_spatialBucketByObject.TryGetValue((sceneId, objectId), out SpatialBucket? bucket))
+            {
+                SpatialBucketObjectEntry? entry = null;
+
+                for (int i = 0; i < bucket.Objects.Count; i++)
+                {
+                    if (string.Equals(bucket.Objects[i].Snapshot.ObjectId, objectId, StringComparison.Ordinal))
+                    {
+                        entry = bucket.Objects[i];
+                        break;
+                    }
+                }
+
+                if (entry == null || string.IsNullOrEmpty(entry.LodConfigKey))
+                    return 0;
+
+                if (!string.IsNullOrEmpty(mainCameraId) &&
+                    _bucketLodLevels.TryGetValue((sceneId, bucket.TileX, bucket.TileZ, mainCameraId, entry.LodConfigKey), out int mainLevel))
+                    return mainLevel;
+
+                foreach (var pair in _bucketLodLevels)
+                {
+                    if (pair.Key.SceneId == sceneId &&
+                        pair.Key.TileX == bucket.TileX &&
+                        pair.Key.TileZ == bucket.TileZ &&
+                        string.Equals(pair.Key.LodConfigKey, entry.LodConfigKey, StringComparison.Ordinal))
+                        return pair.Value;
+                }
+
+                return 0;
+            }
+
             if (!string.IsNullOrEmpty(mainCameraId) &&
-                _sceneObjectLodLevels.TryGetValue((sceneId, mainCameraId, objectId), out int mainLevel))
-                return mainLevel;
+                _sceneObjectLodLevels.TryGetValue((sceneId, mainCameraId, objectId), out int mainObjectLevel))
+                return mainObjectLevel;
 
             foreach (var pair in _sceneObjectLodLevels)
             {
@@ -1580,6 +1903,13 @@ namespace LimitlessSquareEngine
 
             public bool SkinEnabled;
             public int BoneBaseIndex;
+
+            public bool IsInstanceBatch;
+            public int InstanceFirst;
+            public int InstanceCount;
+            public int InstanceUploadFirst;
+            public int InstanceSegmentIndex;
+            public Vector3 InstanceWorldOffset;
         }
         private struct CameraVisibleObjectEntry
         {
@@ -1590,6 +1920,74 @@ namespace LimitlessSquareEngine
             public Matrix4x4 Model;
             public StaticSceneObjectRenderCache? StaticRenderCache;
             public MaterialData? CloudMaterial;
+        }
+
+        private struct InstanceBatchCommandItem
+        {
+            public RenderCommand Command;
+            public Vector3 BoundsCenter;
+            public float BoundsRadius;
+        }
+
+        private sealed class InstanceBatchBucket
+        {
+            public List<InstanceBatchCommandItem> Items { get; } = new();
+        }
+
+        private sealed class SpatialBucketObjectEntry
+        {
+            public SceneRenderObjectSnapshot Snapshot = null!;
+            public Matrix4x4 AnchorModel;
+            public double BoundsRadius;
+            public bool BoundsRadiusExact;
+            public MeshData? Mesh;
+            public string ActiveMeshKey = "";
+            public SceneObjectLodSettings? LodSettings;
+            public string LodConfigKey = "";
+            public double MaxScale;
+            public StaticSceneObjectRenderCache? StaticRenderCache;
+            public MaterialData? CloudMaterial;
+        }
+
+        private sealed class InstanceSegment
+        {
+            public string SceneId = "";
+            public string MeshKey = "";
+            public string SurfaceId = "";
+            public string MaterialId = "";
+            public MaterialData Material = null!;
+            public float[] Vertices = Array.Empty<float>();
+            public int VertexStrideFloats;
+            public PrimitiveType PrimitiveType;
+            public bool MeshVertexColorsAreWhite;
+            public RenderCullMode CullMode;
+            public float[] AnchorMatrices = Array.Empty<float>();
+            public int AnchorMatrixCount;
+            public string[] ObjectIds = Array.Empty<string>();
+            public Double3 Anchor;
+            public Double3 WorldBoundsMin;
+            public Double3 WorldBoundsMax;
+            public int GpuOffset;
+            public int GpuCapacity;
+            public bool GpuDirty;
+            public int RegistryIndex = -1;
+        }
+
+        private sealed class SpatialBucket
+        {
+            public long TileX;
+            public long TileZ;
+            public Double3 Anchor;
+            public Double3 BoundsMin;
+            public Double3 BoundsMax;
+            public bool HasBounds;
+            public List<SpatialBucketObjectEntry> Objects { get; } = new();
+            public List<InstanceSegment> Segments { get; } = new();
+            public List<SpatialBucketObjectEntry> Unbatchables { get; } = new();
+            public List<string> LodConfigKeys { get; } = new();
+            public List<SceneObjectLodSettings> LodConfigSettings { get; } = new();
+            public List<double> LodConfigMaxRadius { get; } = new();
+            public bool SegmentsDirty;
         }
         private readonly List<RenderCommand> _renderQueue = new();
         private readonly List<CameraVisibleObjectEntry> _cameraVisibleObjectsScratch = new();
@@ -1614,6 +2012,10 @@ namespace LimitlessSquareEngine
         private int _meshPickViewLocation = -1;
         private int _meshPickProjectionLocation = -1;
         private int _meshPickColorLocation = -1;
+        private int _meshPickInstanceEnabledLocation = -1;
+        private int _meshPickInstanceBaseLocation = -1;
+        private int _meshPickInstanceWorldOffsetLocation = -1;
+        private int _meshPickBaseIdLocation = -1;
 
         private uint _contourFramebuffer = 0;
         private uint _contourMaskTexture = 0;
@@ -1663,6 +2065,22 @@ namespace LimitlessSquareEngine
         {
             public Vector3 Color { get; set; } = Vector3.One;
             public int ThicknessPixels { get; set; } = 1;
+        }
+
+        private sealed class MeshPickBatchRange
+        {
+            public uint BaseId;
+            public int Count;
+            public int SegmentIndex;
+            public int FrameFirst;
+            public string SceneId = "";
+            public string MeshId = "";
+            public string MeshSurfaceId = "";
+            public string CameraObjectId = "";
+            public int ViewportX;
+            public int ViewportY;
+            public int ViewportWidth;
+            public int ViewportHeight;
         }
 
         private readonly struct MeshPickEntry
@@ -2167,6 +2585,147 @@ namespace LimitlessSquareEngine
             }
 
             _gl.DrawArrays((GLEnum)primitiveType, first, count);
+        }
+
+        private void SubmitDrawArraysInstanced(PrimitiveType primitiveType, int first, uint count, uint instanceCount)
+        {
+            if (_renderFrameDiagnosticsActive)
+            {
+                _frameDrawCalls++;
+                _frameDrawnVertices += count * instanceCount;
+                _frameDrawnTriangles += EstimateTriangleCount(primitiveType, count) * instanceCount;
+            }
+
+            _gl.DrawArraysInstanced((GLEnum)primitiveType, first, count, instanceCount);
+        }
+
+        private int AllocateSegmentGpu(int instanceCount)
+        {
+            for (int i = 0; i < _instanceSegmentFreeGpu.Count; i++)
+            {
+                if (_instanceSegmentFreeGpu[i].Capacity >= instanceCount)
+                {
+                    (int offset, int capacity) = _instanceSegmentFreeGpu[i];
+                    _instanceSegmentFreeGpu.RemoveAt(i);
+                    return offset;
+                }
+            }
+
+            int newOffset = _instanceSegmentAllocatedInstances;
+            _instanceSegmentAllocatedInstances += instanceCount;
+            EnsureInstanceModelBufferCapacity(_instanceSegmentAllocatedInstances * 16);
+            return newOffset;
+        }
+
+        private void EnsureInstanceModelBufferCapacity(int requiredFloats)
+        {
+            if (_instanceModelBuffer == 0)
+                _instanceModelBuffer = _gl.GenBuffer();
+
+            if (requiredFloats <= _instanceModelBufferFloatCapacity)
+                return;
+
+            int newCapacity = _instanceModelBufferFloatCapacity == 0
+                ? requiredFloats
+                : _instanceModelBufferFloatCapacity;
+
+            while (newCapacity < requiredFloats)
+                newCapacity *= 2;
+
+            _gl.BindBuffer(BufferTargetARB.ShaderStorageBuffer, _instanceModelBuffer);
+
+            float[] emptyCapacity = new float[newCapacity];
+            _gl.BufferData(
+                BufferTargetARB.ShaderStorageBuffer,
+                (ReadOnlySpan<float>)emptyCapacity,
+                BufferUsageARB.DynamicDraw);
+
+            _instanceModelBufferFloatCapacity = newCapacity;
+
+            for (int i = 0; i < _instanceSegmentRegistry.Count; i++)
+            {
+                InstanceSegment? segment = _instanceSegmentRegistry[i];
+                if (segment != null)
+                    segment.GpuDirty = true;
+            }
+        }
+
+        private void UploadDirtyInstanceSegments()
+        {
+            bool uploadedAny = false;
+
+            for (int i = 0; i < _instanceSegmentRegistry.Count; i++)
+            {
+                InstanceSegment? segment = _instanceSegmentRegistry[i];
+                if (segment == null || !segment.GpuDirty)
+                    continue;
+
+                int floatCount = segment.AnchorMatrixCount * 16;
+                if (floatCount == 0)
+                    continue;
+
+                EnsureInstanceModelBufferCapacity(segment.GpuOffset * 16 + floatCount);
+
+                _gl.BindBuffer(BufferTargetARB.ShaderStorageBuffer, _instanceModelBuffer);
+                _gl.BufferSubData(
+                    BufferTargetARB.ShaderStorageBuffer,
+                    segment.GpuOffset * 16 * sizeof(float),
+                    (ReadOnlySpan<float>)segment.AnchorMatrices.AsSpan(0, floatCount));
+
+                segment.GpuDirty = false;
+                uploadedAny = true;
+            }
+
+            if (uploadedAny)
+                _gl.BindBufferBase(BufferTargetARB.ShaderStorageBuffer, _instanceModelBufferBinding, _instanceModelBuffer);
+        }
+
+        private void UploadVisibleInstanceModelData(List<RenderCommand> commands)
+        {
+            int totalInstances = 0;
+            for (int i = 0; i < commands.Count; i++)
+            {
+                if (commands[i].IsInstanceBatch && commands[i].InstanceSegmentIndex < 0)
+                    totalInstances += commands[i].InstanceCount;
+            }
+
+            if (totalInstances == 0)
+                return;
+
+            int requiredFloats = totalInstances * 16;
+
+            int segmentBaseFloats = _instanceSegmentAllocatedInstances * 16;
+
+            EnsureInstanceModelBufferCapacity(segmentBaseFloats + requiredFloats);
+
+            if (_instanceModelUploadScratch.Length < requiredFloats)
+                _instanceModelUploadScratch = new float[requiredFloats];
+
+            int writeOffset = segmentBaseFloats;
+            for (int i = 0; i < commands.Count; i++)
+            {
+                RenderCommand cmd = commands[i];
+                if (!cmd.IsInstanceBatch || cmd.InstanceSegmentIndex >= 0)
+                    continue;
+
+                int sourceIndex = cmd.InstanceFirst * 16;
+                _frameInstanceModelFloats.CopyTo(
+                    sourceIndex,
+                    _instanceModelUploadScratch,
+                    writeOffset - segmentBaseFloats,
+                    cmd.InstanceCount * 16);
+
+                cmd.InstanceUploadFirst = writeOffset / 16;
+                commands[i] = cmd;
+                writeOffset += cmd.InstanceCount * 16;
+            }
+
+            _gl.BindBuffer(BufferTargetARB.ShaderStorageBuffer, _instanceModelBuffer);
+            _gl.BufferSubData(
+                BufferTargetARB.ShaderStorageBuffer,
+                segmentBaseFloats,
+                (ReadOnlySpan<float>)_instanceModelUploadScratch.AsSpan(0, requiredFloats));
+            _gl.BindBufferBase(BufferTargetARB.ShaderStorageBuffer, _instanceModelBufferBinding, _instanceModelBuffer);
         }
 
         private static long EstimateTriangleCount(PrimitiveType primitiveType, uint vertexCount)
@@ -3487,10 +4046,15 @@ namespace LimitlessSquareEngine
             EnsureAvatarBoneMatricesBufferCreated();
             _gl.BindBufferBase(BufferTargetARB.ShaderStorageBuffer, _avatarBoneMatricesBinding, _avatarBoneMatricesBuffer);
 
+            UploadVisibleInstanceModelData(_shadowCasterScratch);
+
             int lightViewProjectionLoc = _shadowDepthLightViewProjectionLoc;
             int modelLoc = _shadowDepthModelLoc;
             int skinEnabledLoc = _shadowDepthSkinEnabledLoc;
             int boneBaseIndexLoc = _shadowDepthBoneBaseIndexLoc;
+            int instanceEnabledLoc = _shadowDepthInstanceEnabledLoc;
+            int instanceBaseLoc = _shadowDepthInstanceBaseLoc;
+            int instanceWorldOffsetLoc = _shadowDepthInstanceWorldOffsetLoc;
 
             for (int lightIndex = 0; lightIndex < shadowLights.Count; lightIndex++)
             {
@@ -3557,6 +4121,42 @@ namespace LimitlessSquareEngine
 
                         if (ShouldCullShadowCasterForCascade(cmd, cascadeInfo))
                             continue;
+
+                        if (cmd.IsInstanceBatch)
+                        {
+                            if (instanceEnabledLoc != -1)
+                                _gl.Uniform1(instanceEnabledLoc, 1);
+
+                            if (instanceBaseLoc != -1)
+                            {
+                                int segmentBase = cmd.InstanceSegmentIndex >= 0 &&
+                                    cmd.InstanceSegmentIndex < _instanceSegmentRegistry.Count &&
+                                    _instanceSegmentRegistry[cmd.InstanceSegmentIndex] != null
+                                    ? _instanceSegmentRegistry[cmd.InstanceSegmentIndex]!.GpuOffset
+                                    : cmd.InstanceUploadFirst;
+                                _gl.Uniform1(instanceBaseLoc, segmentBase);
+                            }
+
+                            if (instanceWorldOffsetLoc != -1)
+                                _gl.Uniform3(
+                                    instanceWorldOffsetLoc,
+                                    cmd.InstanceWorldOffset.X,
+                                    cmd.InstanceWorldOffset.Y,
+                                    cmd.InstanceWorldOffset.Z);
+
+                            BindCommandGeometryForShadow(cmd);
+
+                            SubmitDrawArraysInstanced(
+                                cmd.PrimitiveType,
+                                0,
+                                (uint)(cmd.Vertices.Length / cmd.VertexStrideFloats),
+                                (uint)cmd.InstanceCount);
+
+                            if (instanceEnabledLoc != -1)
+                                _gl.Uniform1(instanceEnabledLoc, 0);
+
+                            continue;
+                        }
 
                         BindCommandGeometryForShadow(cmd);
 
@@ -8136,6 +8736,9 @@ namespace LimitlessSquareEngine
 
             cache.SkinEnabled = GetLoc("uSkinEnabled");
             cache.BoneBaseIndex = GetLoc("uBoneBaseIndex");
+            cache.InstanceEnabled = GetLoc("uInstanceEnabled");
+            cache.InstanceBase = GetLoc("uInstanceBase");
+            cache.InstanceWorldOffset = GetLoc("uInstanceWorldOffset");
 
             cache.FogEnabled = GetLoc(_uniformFogEnabled);
             cache.FogMode = GetLoc(_uniformFogMode);
@@ -9275,6 +9878,449 @@ namespace LimitlessSquareEngine
             return TryGetActiveUniformExact(cmd.Program, _uniformOutlinePass, out _);
         }
 
+        private bool IsInstanceBatchEligible(
+            string sceneId,
+            string objectId,
+            MaterialData material,
+            bool surfaceVertexColorsAreWhite,
+            bool surfaceIsSkinned)
+        {
+            if (material == null || material.IsCloud || material.IsAlphaBlend)
+                return false;
+
+            if (ReadMaterialColorAlpha(material) < 0.9999f)
+                return false;
+
+            if (MathF.Abs(material.TextureUV.X - 1f) > 0.0001f ||
+                MathF.Abs(material.TextureUV.Y - 1f) > 0.0001f)
+                return false;
+
+            if (surfaceIsSkinned || !surfaceVertexColorsAreWhite)
+                return false;
+
+            if (material.Parameters.ValueKind == JsonValueKind.Object &&
+                material.Parameters.TryGetProperty("uEnableOutline", out JsonElement outlineElement))
+            {
+                bool outlineEnabled = outlineElement.ValueKind switch
+                {
+                    JsonValueKind.True => true,
+                    JsonValueKind.Number => outlineElement.GetDouble() != 0.0,
+                    _ => false
+                };
+
+                if (outlineEnabled)
+                    return false;
+            }
+
+            if (_sceneObjectContours.ContainsKey(BuildSceneObjectContourKey(sceneId, objectId)))
+                return false;
+
+            if (GetProgramLocationCache(material.Program).InstanceEnabled == -1)
+                return false;
+
+            return true;
+        }
+
+        private bool TryCollectInstanceBatchCommand(
+            in CameraVisibleObjectEntry entry,
+            ref RenderCommand cmd,
+            bool surfaceVertexColorsAreWhite,
+            bool surfaceIsSkinned)
+        {
+            if (!IsInstanceBatchEligible(cmd.SceneId, cmd.ObjectId, cmd.Material, surfaceVertexColorsAreWhite, surfaceIsSkinned))
+                return false;
+
+            (string, string, string) bucketKey = (cmd.MeshId, cmd.MeshSurfaceId, cmd.Material!.Id);
+
+            if (!_instanceBatchBuckets.TryGetValue(bucketKey, out InstanceBatchBucket? bucket))
+            {
+                bucket = new InstanceBatchBucket();
+                _instanceBatchBuckets[bucketKey] = bucket;
+            }
+
+            float maxScale = Math.Max(
+                Math.Abs((float)entry.Obj.WorldScale.X),
+                Math.Max(Math.Abs((float)entry.Obj.WorldScale.Y), Math.Abs((float)entry.Obj.WorldScale.Z)));
+
+            InstanceBatchCommandItem item = new InstanceBatchCommandItem
+            {
+                Command = cmd,
+                BoundsCenter = new Vector3(cmd.Model.M41, cmd.Model.M42, cmd.Model.M43),
+                BoundsRadius = entry.Mesh.BoundingSphereRadius * maxScale
+            };
+
+            bucket.Items.Add(item);
+
+            return true;
+        }
+
+        private static double ComputeBucketNearestDistance(SpatialBucket bucket, Double3 position)
+        {
+            double dx = Math.Max(bucket.BoundsMin.X - position.X, Math.Max(0.0, position.X - bucket.BoundsMax.X));
+            double dy = Math.Max(bucket.BoundsMin.Y - position.Y, Math.Max(0.0, position.Y - bucket.BoundsMax.Y));
+            double dz = Math.Max(bucket.BoundsMin.Z - position.Z, Math.Max(0.0, position.Z - bucket.BoundsMax.Z));
+
+            double distance = Math.Sqrt(dx * dx + dy * dy + dz * dz);
+
+            return distance < 1e-6 ? 1e-6 : distance;
+        }
+
+        private void EvaluateBucketLodLevel(
+            string sceneId,
+            SpatialBucket bucket,
+            SceneRenderCameraSnapshot cameraItem,
+            Double3 cameraWorldPosition,
+            double fovRadians,
+            string configKey,
+            SceneObjectLodSettings lodSettings,
+            double maxWorldRadius,
+            double distance,
+            out int level,
+            out bool cull,
+            out string meshKey)
+        {
+            (string, long, long, string, string) lodKey =
+                (sceneId, bucket.TileX, bucket.TileZ, cameraItem.ObjectId, configKey);
+
+            bool hasPrevLevel = _bucketLodLevels.TryGetValue(lodKey, out int prevLevel);
+            if (!hasPrevLevel)
+                prevLevel = 0;
+
+            double hysteresis = lodSettings.Hysteresis;
+            if (hysteresis < 0.0)
+                hysteresis = 0.0;
+
+            bool distanceMode = string.Equals(lodSettings.Mode, "distance", StringComparison.OrdinalIgnoreCase);
+            int levelCount = lodSettings.Levels.Count;
+
+            double metric;
+            if (distanceMode)
+            {
+                metric = distance;
+            }
+            else
+            {
+                double tanHalfFov = Math.Tan(fovRadians * 0.5);
+                if (tanHalfFov < 1e-6)
+                    tanHalfFov = 1e-6;
+                metric = maxWorldRadius * 2.0 / (distance * tanHalfFov) * 100.0;
+            }
+
+            level = prevLevel;
+            if (distanceMode)
+            {
+                while (level > 0 && metric <= lodSettings.Levels[level - 1].Distance * (1.0 - hysteresis))
+                    level--;
+                while (level < levelCount && metric > lodSettings.Levels[level].Distance * (1.0 + hysteresis))
+                    level++;
+            }
+            else
+            {
+                while (level > 0 && metric >= lodSettings.Levels[level - 1].ScreenHeight * (1.0 + hysteresis))
+                    level--;
+                while (level < levelCount && metric < lodSettings.Levels[level].ScreenHeight * (1.0 - hysteresis))
+                    level++;
+            }
+
+            if (level != prevLevel || !hasPrevLevel)
+                _bucketLodLevels[lodKey] = level;
+
+            if (level != prevLevel)
+                bucket.SegmentsDirty = true;
+
+            cull = false;
+            if (lodSettings.LastLevelCull)
+            {
+                if (distanceMode)
+                    cull = metric > lodSettings.Levels[levelCount - 1].Distance * (1.0 + hysteresis);
+                else
+                    cull = metric < lodSettings.Levels[levelCount - 1].ScreenHeight * (1.0 - hysteresis);
+            }
+
+            meshKey = "";
+
+            while (level > 0)
+            {
+                string targetKey = lodSettings.Levels[level - 1].Mesh ?? "";
+                if (string.IsNullOrWhiteSpace(targetKey))
+                {
+                    if (_lodMeshLoadFailedCache.Add(targetKey))
+                        Console.WriteLine($"[!] LOD mesh '{targetKey}' is empty for bucket '{bucket.TileX},{bucket.TileZ}', falling back to level {level - 1}.");
+                    level--;
+                    continue;
+                }
+
+                if (!_meshes.TryGetValue(targetKey, out MeshData _) &&
+                    !_lodMeshLoadFailedCache.Contains(targetKey))
+                {
+                    if (targetKey.EndsWith(".vrm", StringComparison.OrdinalIgnoreCase))
+                        Program.EnsureVrmRegistered(targetKey, this);
+                    else
+                        Program.EnsureObjMeshRegistered(targetKey, this);
+                }
+
+                if (_meshes.TryGetValue(targetKey, out MeshData _))
+                {
+                    meshKey = targetKey;
+                    break;
+                }
+
+                _lodMeshLoadFailedCache.Add(targetKey);
+                Console.WriteLine($"[!] LOD mesh '{targetKey}' not found for bucket '{bucket.TileX},{bucket.TileZ}', falling back to level {level - 1}.");
+                level--;
+            }
+
+            if (level == 0)
+                meshKey = "";
+        }
+
+        private void RebuildBucketSegments(
+            string sceneId,
+            SpatialBucket bucket,
+            SceneRenderCameraSnapshot cameraItem,
+            SceneWorldState cameraWorld,
+            double fovRadians)
+        {
+            ReleaseBucketSegments(bucket);
+            bucket.Unbatchables.Clear();
+            bucket.LodConfigKeys.Clear();
+            bucket.LodConfigSettings.Clear();
+            bucket.LodConfigMaxRadius.Clear();
+
+            Dictionary<string, int> configIndexByKey = _bucketLodEvalScratch;
+            configIndexByKey.Clear();
+
+            Dictionary<string, string> configMeshByKey = _bucketLodMeshScratch;
+            configMeshByKey.Clear();
+
+            for (int i = 0; i < bucket.Objects.Count; i++)
+            {
+                SpatialBucketObjectEntry entry = bucket.Objects[i];
+
+                if (string.IsNullOrEmpty(entry.LodConfigKey))
+                    continue;
+
+                if (!configIndexByKey.TryGetValue(entry.LodConfigKey, out int configIndex))
+                {
+                    configIndex = bucket.LodConfigKeys.Count;
+                    configIndexByKey[entry.LodConfigKey] = configIndex;
+                    bucket.LodConfigKeys.Add(entry.LodConfigKey);
+                    bucket.LodConfigSettings.Add(entry.LodSettings!);
+                    bucket.LodConfigMaxRadius.Add(0.0);
+                }
+
+                if (entry.BoundsRadius > bucket.LodConfigMaxRadius[configIndex])
+                    bucket.LodConfigMaxRadius[configIndex] = entry.BoundsRadius;
+            }
+
+            bool[] configCullByIndex = new bool[bucket.LodConfigKeys.Count];
+            int[] configLevelByIndex = new int[bucket.LodConfigKeys.Count];
+
+            if (bucket.LodConfigKeys.Count > 0)
+            {
+                double bucketNearestDistance = ComputeBucketNearestDistance(bucket, cameraWorld.Position);
+
+                for (int i = 0; i < bucket.LodConfigKeys.Count; i++)
+                {
+                    string configKey = bucket.LodConfigKeys[i];
+
+                    EvaluateBucketLodLevel(
+                        sceneId,
+                        bucket,
+                        cameraItem,
+                        cameraWorld.Position,
+                        fovRadians,
+                        configKey,
+                        bucket.LodConfigSettings[i],
+                        bucket.LodConfigMaxRadius[i],
+                        bucketNearestDistance,
+                        out int level,
+                        out bool cull,
+                        out string meshKey);
+
+                    configCullByIndex[i] = cull;
+                    configLevelByIndex[i] = level;
+
+                    if (!cull)
+                        configMeshByKey[configKey] = meshKey;
+                }
+            }
+
+            Dictionary<(string MeshKey, string SurfaceId, string MaterialId), (InstanceSegment Segment, List<float> Matrices, List<string> Owners)> segmentByKey = new();
+
+            for (int i = 0; i < bucket.Objects.Count; i++)
+            {
+                SpatialBucketObjectEntry entry = bucket.Objects[i];
+                SceneRenderObjectSnapshot obj = entry.Snapshot;
+
+                if (entry.Mesh == null && !string.IsNullOrWhiteSpace(entry.ActiveMeshKey))
+                {
+                    if (entry.ActiveMeshKey.EndsWith(".vrm", StringComparison.OrdinalIgnoreCase))
+                        Program.EnsureVrmRegistered(entry.ActiveMeshKey, this);
+                    else
+                        Program.EnsureObjMeshRegistered(entry.ActiveMeshKey, this);
+
+                    if (_meshes.TryGetValue(entry.ActiveMeshKey, out MeshData loadedMesh))
+                    {
+                        entry.Mesh = loadedMesh;
+                        entry.BoundsRadius = loadedMesh.BoundingSphereRadius * Math.Max(entry.MaxScale, 1e-6);
+                        entry.BoundsRadiusExact = true;
+
+                        bucket.BoundsMin = new Double3(
+                            Math.Min(bucket.BoundsMin.X, obj.WorldPosition.X - entry.BoundsRadius),
+                            Math.Min(bucket.BoundsMin.Y, obj.WorldPosition.Y - entry.BoundsRadius),
+                            Math.Min(bucket.BoundsMin.Z, obj.WorldPosition.Z - entry.BoundsRadius));
+                        bucket.BoundsMax = new Double3(
+                            Math.Max(bucket.BoundsMax.X, obj.WorldPosition.X + entry.BoundsRadius),
+                            Math.Max(bucket.BoundsMax.Y, obj.WorldPosition.Y + entry.BoundsRadius),
+                            Math.Max(bucket.BoundsMax.Z, obj.WorldPosition.Z + entry.BoundsRadius));
+                    }
+                }
+
+                int configIndex = -1;
+                if (!string.IsNullOrEmpty(entry.LodConfigKey))
+                {
+                    if (!configIndexByKey.TryGetValue(entry.LodConfigKey, out configIndex))
+                        configIndex = -1;
+                }
+
+                if (configIndex >= 0 && configCullByIndex[configIndex])
+                    continue;
+
+                string activeMeshKey = entry.ActiveMeshKey;
+
+                if (configIndex >= 0 &&
+                    configMeshByKey.TryGetValue(entry.LodConfigKey, out string? lodMeshKey) &&
+                    !string.IsNullOrWhiteSpace(lodMeshKey))
+                {
+                    activeMeshKey = lodMeshKey;
+                }
+
+                if (!_meshes.TryGetValue(activeMeshKey, out MeshData mesh))
+                    continue;
+
+                entry.Mesh = mesh;
+                entry.ActiveMeshKey = activeMeshKey;
+                entry.CloudMaterial = null;
+
+                foreach (MeshSurfaceData surface in mesh.Surfaces)
+                {
+                    MaterialData surfaceMaterial = ResolveSceneMaterial(obj, surface);
+                    if (surfaceMaterial.IsCloud)
+                    {
+                        entry.CloudMaterial = surfaceMaterial;
+                        break;
+                    }
+                }
+
+                if (entry.CloudMaterial != null)
+                {
+                    entry.StaticRenderCache = TryGetStaticSceneObjectRenderCache(obj, mesh, activeMeshKey, configIndex >= 0 ? configLevelByIndex[configIndex] : 0);
+                    bucket.Unbatchables.Add(entry);
+                    continue;
+                }
+
+                bool objectUnbatchable = false;
+
+                foreach (MeshSurfaceData surface in mesh.Surfaces)
+                {
+                    MaterialData material = ResolveSceneMaterial(obj, surface);
+
+                    if (!IsInstanceBatchEligible(obj.SceneId, obj.ObjectId, material, surface.VertexColorsAreWhite, surface.IsSkinned))
+                    {
+                        objectUnbatchable = true;
+                        break;
+                    }
+                }
+
+                if (objectUnbatchable)
+                {
+                    entry.StaticRenderCache = TryGetStaticSceneObjectRenderCache(obj, mesh, activeMeshKey, configIndex >= 0 ? configLevelByIndex[configIndex] : 0);
+                    bucket.Unbatchables.Add(entry);
+                    continue;
+                }
+
+                foreach (MeshSurfaceData surface in mesh.Surfaces)
+                {
+                    MaterialData material = ResolveSceneMaterial(obj, surface);
+
+                    (string, string, string) segmentKey = (activeMeshKey, surface.Id, material.Id);
+
+                    if (!segmentByKey.TryGetValue(segmentKey, out (InstanceSegment Segment, List<float> Matrices, List<string> Owners) build))
+                    {
+                        build.Segment = new InstanceSegment
+                        {
+                            SceneId = sceneId,
+                            MeshKey = activeMeshKey,
+                            SurfaceId = surface.Id,
+                            MaterialId = material.Id,
+                            Material = material,
+                            Vertices = surface.Vertices,
+                            VertexStrideFloats = surface.VertexStrideFloats,
+                            PrimitiveType = surface.PrimitiveType,
+                            MeshVertexColorsAreWhite = surface.VertexColorsAreWhite,
+                            CullMode = material.CullMode,
+                            Anchor = bucket.Anchor,
+                            WorldBoundsMin = new Double3(double.MaxValue, double.MaxValue, double.MaxValue),
+                            WorldBoundsMax = new Double3(double.MinValue, double.MinValue, double.MinValue)
+                        };
+                        build.Matrices = new List<float>(64);
+                        build.Owners = new List<string>(64);
+                        segmentByKey[segmentKey] = build;
+                    }
+
+                    build.Matrices.Add(entry.AnchorModel.M11);
+                    build.Matrices.Add(entry.AnchorModel.M12);
+                    build.Matrices.Add(entry.AnchorModel.M13);
+                    build.Matrices.Add(entry.AnchorModel.M14);
+                    build.Matrices.Add(entry.AnchorModel.M21);
+                    build.Matrices.Add(entry.AnchorModel.M22);
+                    build.Matrices.Add(entry.AnchorModel.M23);
+                    build.Matrices.Add(entry.AnchorModel.M24);
+                    build.Matrices.Add(entry.AnchorModel.M31);
+                    build.Matrices.Add(entry.AnchorModel.M32);
+                    build.Matrices.Add(entry.AnchorModel.M33);
+                    build.Matrices.Add(entry.AnchorModel.M34);
+                    build.Matrices.Add(entry.AnchorModel.M41);
+                    build.Matrices.Add(entry.AnchorModel.M42);
+                    build.Matrices.Add(entry.AnchorModel.M43);
+                    build.Matrices.Add(entry.AnchorModel.M44);
+                    build.Owners.Add(obj.ObjectId);
+
+                    build.Segment.WorldBoundsMin = new Double3(
+                        Math.Min(build.Segment.WorldBoundsMin.X, obj.WorldPosition.X - entry.BoundsRadius),
+                        Math.Min(build.Segment.WorldBoundsMin.Y, obj.WorldPosition.Y - entry.BoundsRadius),
+                        Math.Min(build.Segment.WorldBoundsMin.Z, obj.WorldPosition.Z - entry.BoundsRadius));
+                    build.Segment.WorldBoundsMax = new Double3(
+                        Math.Max(build.Segment.WorldBoundsMax.X, obj.WorldPosition.X + entry.BoundsRadius),
+                        Math.Max(build.Segment.WorldBoundsMax.Y, obj.WorldPosition.Y + entry.BoundsRadius),
+                        Math.Max(build.Segment.WorldBoundsMax.Z, obj.WorldPosition.Z + entry.BoundsRadius));
+                }
+            }
+
+            foreach (KeyValuePair<(string MeshKey, string SurfaceId, string MaterialId), (InstanceSegment Segment, List<float> Matrices, List<string> Owners)> segmentPair in segmentByKey)
+            {
+                InstanceSegment segment = segmentPair.Value.Segment;
+
+                int matrixCount = segmentPair.Value.Owners.Count;
+                if (matrixCount == 0)
+                    continue;
+
+                segment.AnchorMatrices = segmentPair.Value.Matrices.ToArray();
+                segment.ObjectIds = segmentPair.Value.Owners.ToArray();
+                segment.AnchorMatrixCount = matrixCount;
+                segment.GpuOffset = AllocateSegmentGpu(matrixCount);
+                segment.GpuCapacity = matrixCount;
+                segment.GpuDirty = true;
+                segment.RegistryIndex = _instanceSegmentRegistry.Count;
+                _instanceSegmentRegistry.Add(segment);
+
+                bucket.Segments.Add(segment);
+            }
+
+            bucket.SegmentsDirty = false;
+        }
+
         private void SetOutlinePassUniform(uint program, int passValue)
         {
             int loc = GetProgramLocationCache(program).OutlinePass;
@@ -9646,6 +10692,10 @@ namespace LimitlessSquareEngine
 
             RegisterBuiltInMeshes();
 
+            _frameInstanceModelFloats.Clear();
+            _frameInstanceSceneIds.Clear();
+            _frameInstanceObjectIds.Clear();
+
             string mainScreenCameraId = ResolveMainScreenCameraId();
 
             foreach (var pair in _sceneCameraCache)
@@ -9657,14 +10707,16 @@ namespace LimitlessSquareEngine
 
                 foreach (var camera in pair.Value.OrderBy(c => c.SubmissionOrder))
                 {
-                    QueueSceneCamera(sceneId, objectMap.Values, camera, mainScreenCameraId);
+                    QueueSceneCamera(sceneId, objectMap, camera, mainScreenCameraId);
                 }
             }
+
+            UploadDirtyInstanceSegments();
         }
 
         private void QueueSceneCamera(
             string sceneId,
-            IEnumerable<SceneRenderObjectSnapshot> objects,
+            Dictionary<string, SceneRenderObjectSnapshot> objectMap,
             SceneRenderCameraSnapshot cameraItem,
             string mainScreenCameraId)
         {
@@ -9795,11 +10847,131 @@ namespace LimitlessSquareEngine
             }
 
             _cameraVisibleObjectsScratch.Clear();
+            _visibleBucketScratch.Clear();
+            _visibleSegmentScratch.Clear();
+            _bucketsToRebuildScratch.Clear();
 
-            foreach (var obj in objects)
+            Matrix4x4 fullFrustumProjection = CreatePerspectiveReverseZInfinite(fovRadians, viewport.Aspect, (float)cameraNearClip);
+            double fullFrustumFar = Math.Min(cameraFarClip, _depthLayerFars[_depthLayerFars.Length - 1]);
+
+            foreach (KeyValuePair<(string SceneId, long TileX, long TileZ), SpatialBucket> bucketPair in _spatialBuckets)
             {
-                if (!obj.Active || !obj.Visible)
+                if (!string.Equals(bucketPair.Key.SceneId, sceneId, StringComparison.Ordinal))
                     continue;
+
+                SpatialBucket bucket = bucketPair.Value;
+
+                if (!bucket.HasBounds || bucket.Objects.Count == 0)
+                    continue;
+
+                Vector3 relMin = new Vector3(
+                    (float)(bucket.BoundsMin.X - cameraWorld.Position.X),
+                    (float)(bucket.BoundsMin.Y - cameraWorld.Position.Y),
+                    (float)(cameraWorld.Position.Z - bucket.BoundsMax.Z));
+                Vector3 relMax = new Vector3(
+                    (float)(bucket.BoundsMax.X - cameraWorld.Position.X),
+                    (float)(bucket.BoundsMax.Y - cameraWorld.Position.Y),
+                    (float)(cameraWorld.Position.Z - bucket.BoundsMin.Z));
+
+                float bucketMargin = (float)_spatialBucketSize * 0.25f;
+                relMin -= new Vector3(bucketMargin);
+                relMax += new Vector3(bucketMargin);
+
+                if (ShouldCullLocalBoundsByCameraFrustum(
+                        Matrix4x4.Identity,
+                        view,
+                        fullFrustumProjection,
+                        (float)cameraNearClip,
+                        (float)fullFrustumFar,
+                        relMin,
+                        relMax))
+                {
+                    double shadowCasterKeepRadius =
+                        GetDirectionalShadowCascadeMaxDistance(Math.Max(0, _directionalShadowCascadeCount - 1)) * 2.0 +
+                        _spatialBucketSize * 1.5;
+
+                    if (ComputeBucketNearestDistance(bucket, cameraWorld.Position) > shadowCasterKeepRadius)
+                        continue;
+                }
+
+                _visibleBucketScratch.Add(bucket);
+
+                if (bucket.LodConfigKeys.Count > 0)
+                {
+                    double bucketNearestDistance = ComputeBucketNearestDistance(bucket, cameraWorld.Position);
+
+                    for (int i = 0; i < bucket.LodConfigKeys.Count; i++)
+                    {
+                        string configKey = bucket.LodConfigKeys[i];
+
+                        EvaluateBucketLodLevel(
+                            sceneId,
+                            bucket,
+                            cameraItem,
+                            cameraWorld.Position,
+                            fovRadians,
+                            configKey,
+                            bucket.LodConfigSettings[i],
+                            bucket.LodConfigMaxRadius[i],
+                            bucketNearestDistance,
+                            out int _,
+                            out bool _,
+                            out string _);
+                    }
+                }
+
+                if (bucket.SegmentsDirty)
+                    _bucketsToRebuildScratch.Add(bucket);
+            }
+
+            for (int i = 0; i < _bucketsToRebuildScratch.Count; i++)
+                RebuildBucketSegments(sceneId, _bucketsToRebuildScratch[i], cameraItem, cameraWorld, fovRadians);
+
+            for (int i = 0; i < _visibleBucketScratch.Count; i++)
+            {
+                SpatialBucket bucket = _visibleBucketScratch[i];
+
+                for (int s = 0; s < bucket.Segments.Count; s++)
+                    _visibleSegmentScratch.Add(bucket.Segments[s]);
+
+                for (int u = 0; u < bucket.Unbatchables.Count; u++)
+                {
+                    SpatialBucketObjectEntry entry = bucket.Unbatchables[u];
+                    SceneRenderObjectSnapshot obj = entry.Snapshot;
+
+                    Double3 relativePosition = obj.WorldPosition - cameraWorld.Position;
+
+                    if (entry.Mesh == null)
+                        continue;
+
+                    Matrix4x4 model =
+                        entry.AnchorModel *
+                        Matrix4x4.CreateTranslation(
+                            (float)(bucket.Anchor.X - cameraWorld.Position.X),
+                            (float)(bucket.Anchor.Y - cameraWorld.Position.Y),
+                            (float)(cameraWorld.Position.Z - bucket.Anchor.Z));
+
+                    _cameraVisibleObjectsScratch.Add(new CameraVisibleObjectEntry
+                    {
+                        Obj = obj,
+                        Mesh = entry.Mesh.Value,
+                        ActiveMeshKey = entry.ActiveMeshKey,
+                        RelativePosition = relativePosition,
+                        Model = model,
+                        StaticRenderCache = entry.StaticRenderCache,
+                        CloudMaterial = entry.CloudMaterial
+                    });
+                }
+            }
+
+            if (_dynamicSceneObjects.TryGetValue(sceneId, out HashSet<string>? dynamicObjects))
+            {
+                foreach (string dynamicObjectId in dynamicObjects)
+                {
+                    if (!objectMap.TryGetValue(dynamicObjectId, out SceneRenderObjectSnapshot? obj))
+                        continue;
+                    if (!obj.Active || !obj.Visible)
+                        continue;
                 if (obj.ObjectId == cameraItem.ObjectId)
                     continue;
                 if (string.Equals(obj.Type, "Camera", StringComparison.Ordinal))
@@ -9965,6 +11137,7 @@ namespace LimitlessSquareEngine
                     StaticRenderCache = staticRenderCache,
                     CloudMaterial = cloudMaterial
                 });
+                }
             }
 
             for (int layerIdx = layerCount - 1; layerIdx >= 0; layerIdx--)
@@ -9982,6 +11155,82 @@ namespace LimitlessSquareEngine
                     projection = CreatePerspectiveReverseZ(fovRadians, viewport.Aspect, (float)layerNear, (float)layerFar);
 
                 long batchId = ++_sceneBatchCounter;
+                _instanceBatchBuckets.Clear();
+
+                for (int segmentIndex = 0; segmentIndex < _visibleSegmentScratch.Count; segmentIndex++)
+                {
+                    InstanceSegment segment = _visibleSegmentScratch[segmentIndex];
+
+                    if (segment.AnchorMatrixCount == 0)
+                        continue;
+
+                    Vector3 segmentRelMin = new Vector3(
+                        (float)(segment.WorldBoundsMin.X - cameraWorld.Position.X),
+                        (float)(segment.WorldBoundsMin.Y - cameraWorld.Position.Y),
+                        (float)(cameraWorld.Position.Z - segment.WorldBoundsMax.Z));
+                    Vector3 segmentRelMax = new Vector3(
+                        (float)(segment.WorldBoundsMax.X - cameraWorld.Position.X),
+                        (float)(segment.WorldBoundsMax.Y - cameraWorld.Position.Y),
+                        (float)(cameraWorld.Position.Z - segment.WorldBoundsMin.Z));
+
+                    RenderCommand segmentCmd = new RenderCommand
+                    {
+                        Vertices = segment.Vertices,
+                        PrimitiveType = segment.PrimitiveType,
+                        Program = segment.Material.Program,
+                        UseTexture = false,
+                        TextureId = 0,
+                        VertexStrideFloats = segment.VertexStrideFloats,
+                        CameraPosition = Vector3.Zero,
+                        ClusterNear = (float)layerNear,
+                        ClusterFar = (float)layerFar,
+                        SceneId = segment.SceneId,
+                        ObjectId = "",
+                        CameraWorldPosition = cameraWorld.Position,
+                        RenderSpace = RenderSpace.Camera,
+                        Model = Matrix4x4.Identity,
+                        View = view,
+                        Projection = projection,
+                        QueueType = RenderQueueType.Opaque,
+                        UsePremultipliedTransparentBlend = false,
+                        SortDepth = 0f,
+                        SubmissionIndex = _submissionCounter++,
+                        Pass = RenderPass.Scene,
+                        BatchId = batchId,
+                        BatchSubmissionOrder = cameraItem.SubmissionOrder,
+                        ViewportX = viewport.X,
+                        ViewportY = viewport.Y,
+                        UseReverseZ = useReverseZ,
+                        ViewportWidth = viewport.Width,
+                        ViewportHeight = viewport.Height,
+                        Material = segment.Material,
+                        Skybox = null,
+                        ForceWhiteVertexColor = true,
+                        IsSkybox = false,
+                        CullMode = segment.CullMode,
+                        MeshId = segment.MeshKey,
+                        MeshSurfaceId = segment.SurfaceId,
+                        CameraObjectId = cameraItem.ObjectId,
+                        MeshVertexColorsAreWhite = true,
+                        HasBoundingBox = true,
+                        BoundingLocalMin = segmentRelMin,
+                        BoundingLocalMax = segmentRelMax,
+                        DepthLayerIndex = layerIdx,
+                        DepthLayerCount = layerCount,
+                        IsInstanceBatch = true,
+                        InstanceFirst = 0,
+                        InstanceCount = segment.AnchorMatrixCount,
+                        InstanceUploadFirst = 0,
+                        InstanceSegmentIndex = segment.RegistryIndex,
+                        InstanceWorldOffset = new Vector3(
+                            (float)(segment.Anchor.X - cameraWorld.Position.X),
+                            (float)(segment.Anchor.Y - cameraWorld.Position.Y),
+                            (float)(cameraWorld.Position.Z - segment.Anchor.Z))
+                    };
+                    ApplyFogStateToRenderCommand(ref segmentCmd, fogSettings, skybox);
+                    WarmupSceneCommandResources(segmentCmd);
+                    _renderQueue.Add(segmentCmd);
+                }
 
                 for (int entryIndex = 0; entryIndex < _cameraVisibleObjectsScratch.Count; entryIndex++)
                 {
@@ -10122,6 +11371,10 @@ namespace LimitlessSquareEngine
                             };
                             ApplyFogStateToRenderCommand(ref cmd, fogSettings, skybox);
                             PrepareCloudRenderCommand(surface.Material, ref cmd);
+
+                            if (TryCollectInstanceBatchCommand(entry, ref cmd, surface.MeshVertexColorsAreWhite, false))
+                                continue;
+
                             WarmupSceneCommandResources(cmd);
                             _renderQueue.Add(cmd);
                         }
@@ -10181,9 +11434,116 @@ namespace LimitlessSquareEngine
                         };
                         ApplyFogStateToRenderCommand(ref cmd, fogSettings, skybox);
                         PrepareCloudRenderCommand(material, ref cmd);
+
+                        if (TryCollectInstanceBatchCommand(entry, ref cmd, surface.VertexColorsAreWhite, surface.IsSkinned))
+                            continue;
+
                         WarmupSceneCommandResources(cmd);
                         _renderQueue.Add(cmd);
                     }
+                }
+
+                foreach (KeyValuePair<(string MeshKey, string SurfaceId, string MaterialId), InstanceBatchBucket> bucketPair in _instanceBatchBuckets)
+                {
+                    if (bucketPair.Value.Items.Count < _instanceBatchMinCount)
+                    {
+                        for (int i = 0; i < bucketPair.Value.Items.Count; i++)
+                        {
+                            RenderCommand cmd = bucketPair.Value.Items[i].Command;
+                            WarmupSceneCommandResources(cmd);
+                            _renderQueue.Add(cmd);
+                        }
+                        continue;
+                    }
+
+                    InstanceBatchBucket bucket = bucketPair.Value;
+                    RenderCommand first = bucket.Items[0].Command;
+
+                    int instanceFirst = _frameInstanceModelFloats.Count / 16;
+                    Vector3 boundsMin = new Vector3(float.MaxValue, float.MaxValue, float.MaxValue);
+                    Vector3 boundsMax = new Vector3(float.MinValue, float.MinValue, float.MinValue);
+
+                    for (int i = 0; i < bucket.Items.Count; i++)
+                    {
+                        InstanceBatchCommandItem item = bucket.Items[i];
+
+                        _frameInstanceModelFloats.Add(item.Command.Model.M11);
+                        _frameInstanceModelFloats.Add(item.Command.Model.M12);
+                        _frameInstanceModelFloats.Add(item.Command.Model.M13);
+                        _frameInstanceModelFloats.Add(item.Command.Model.M14);
+                        _frameInstanceModelFloats.Add(item.Command.Model.M21);
+                        _frameInstanceModelFloats.Add(item.Command.Model.M22);
+                        _frameInstanceModelFloats.Add(item.Command.Model.M23);
+                        _frameInstanceModelFloats.Add(item.Command.Model.M24);
+                        _frameInstanceModelFloats.Add(item.Command.Model.M31);
+                        _frameInstanceModelFloats.Add(item.Command.Model.M32);
+                        _frameInstanceModelFloats.Add(item.Command.Model.M33);
+                        _frameInstanceModelFloats.Add(item.Command.Model.M34);
+                        _frameInstanceModelFloats.Add(item.Command.Model.M41);
+                        _frameInstanceModelFloats.Add(item.Command.Model.M42);
+                        _frameInstanceModelFloats.Add(item.Command.Model.M43);
+                        _frameInstanceModelFloats.Add(item.Command.Model.M44);
+                        _frameInstanceSceneIds.Add(item.Command.SceneId);
+                        _frameInstanceObjectIds.Add(item.Command.ObjectId);
+
+                        boundsMin = Vector3.Min(boundsMin, item.BoundsCenter - new Vector3(item.BoundsRadius));
+                        boundsMax = Vector3.Max(boundsMax, item.BoundsCenter + new Vector3(item.BoundsRadius));
+                    }
+
+                    RenderCommand batchCmd = new RenderCommand
+                    {
+                        Vertices = first.Vertices,
+                        PrimitiveType = first.PrimitiveType,
+                        Program = first.Program,
+                        UseTexture = false,
+                        TextureId = 0,
+                        VertexStrideFloats = first.VertexStrideFloats,
+                        CameraPosition = Vector3.Zero,
+                        ClusterNear = first.ClusterNear,
+                        ClusterFar = first.ClusterFar,
+                        SceneId = first.SceneId,
+                        ObjectId = "",
+                        CameraWorldPosition = first.CameraWorldPosition,
+                        RenderSpace = RenderSpace.Camera,
+                        Model = Matrix4x4.Identity,
+                        View = first.View,
+                        Projection = first.Projection,
+                        QueueType = RenderQueueType.Opaque,
+                        UsePremultipliedTransparentBlend = false,
+                        SortDepth = 0f,
+                        SubmissionIndex = first.SubmissionIndex,
+                        Pass = RenderPass.Scene,
+                        BatchId = first.BatchId,
+                        BatchSubmissionOrder = first.BatchSubmissionOrder,
+                        ViewportX = first.ViewportX,
+                        ViewportY = first.ViewportY,
+                        UseReverseZ = first.UseReverseZ,
+                        ViewportWidth = first.ViewportWidth,
+                        ViewportHeight = first.ViewportHeight,
+                        Material = first.Material,
+                        Skybox = null,
+                        ForceWhiteVertexColor = true,
+                        IsSkybox = false,
+                        CullMode = first.CullMode,
+                        MeshId = first.MeshId,
+                        MeshSurfaceId = first.MeshSurfaceId,
+                        CameraObjectId = first.CameraObjectId,
+                        MeshVertexColorsAreWhite = true,
+                        HasBoundingBox = true,
+                        BoundingLocalMin = boundsMin,
+                        BoundingLocalMax = boundsMax,
+                        DepthLayerIndex = first.DepthLayerIndex,
+                        DepthLayerCount = first.DepthLayerCount,
+                        IsInstanceBatch = true,
+                        InstanceFirst = instanceFirst,
+                        InstanceCount = bucket.Items.Count,
+                        InstanceUploadFirst = 0,
+                        InstanceSegmentIndex = -1,
+                        InstanceWorldOffset = Vector3.Zero
+                    };
+                    ApplyFogStateToRenderCommand(ref batchCmd, fogSettings, skybox);
+                    WarmupSceneCommandResources(batchCmd);
+                    _renderQueue.Add(batchCmd);
                 }
             }
         }
@@ -11728,9 +13088,13 @@ void main()
             if (sceneCommands.Count == 0)
                 return result;
 
+            UploadVisibleInstanceModelData(sceneCommands);
+            UploadDirtyInstanceSegments();
+
             EnsureMeshPickResources(windowWidth, windowHeight);
 
             Dictionary<uint, MeshPickEntry> pickMap = new Dictionary<uint, MeshPickEntry>();
+            List<MeshPickBatchRange> pickBatchRanges = new List<MeshPickBatchRange>();
             uint nextPickId = 1;
 
             uint previousProgram = _currentProgram;
@@ -11818,7 +13182,7 @@ void main()
 
                     _gl.Disable(GLEnum.ScissorTest);
 
-                    ExecuteMeshPickSortedCommands(batchCommands, first.UseReverseZ, pickMap, ref nextPickId);
+                    ExecuteMeshPickSortedCommands(batchCommands, first.UseReverseZ, pickMap, pickBatchRanges, ref nextPickId);
                 }
 
                 byte[] pixel = new byte[4];
@@ -11850,6 +13214,56 @@ void main()
                     result.ViewportY = entry.ViewportY;
                     result.ViewportWidth = entry.ViewportWidth;
                     result.ViewportHeight = entry.ViewportHeight;
+                }
+                else if (pickId != 0 && pickBatchRanges.Count > 0)
+                {
+                    int low = 0;
+                    int high = pickBatchRanges.Count - 1;
+
+                    while (low <= high)
+                    {
+                        int mid = (low + high) / 2;
+
+                        if (pickBatchRanges[mid].BaseId <= pickId)
+                            low = mid + 1;
+                        else
+                            high = mid - 1;
+                    }
+
+                    if (high >= 0)
+                    {
+                        MeshPickBatchRange range = pickBatchRanges[high];
+
+                        if (pickId < range.BaseId + (uint)range.Count)
+                        {
+                            int instanceIndex = (int)(pickId - range.BaseId);
+
+                            string batchObjectId = "";
+
+                            if (range.SegmentIndex >= 0 &&
+                                range.SegmentIndex < _instanceSegmentRegistry.Count &&
+                                _instanceSegmentRegistry[range.SegmentIndex] != null &&
+                                instanceIndex < _instanceSegmentRegistry[range.SegmentIndex]!.ObjectIds.Length)
+                            {
+                                batchObjectId = _instanceSegmentRegistry[range.SegmentIndex]!.ObjectIds[instanceIndex];
+                            }
+                            else if (range.FrameFirst + instanceIndex < _frameInstanceObjectIds.Count)
+                            {
+                                batchObjectId = _frameInstanceObjectIds[range.FrameFirst + instanceIndex];
+                            }
+
+                            result.Hit = true;
+                            result.SceneId = range.SceneId;
+                            result.ObjectId = batchObjectId;
+                            result.MeshId = range.MeshId;
+                            result.MeshSurfaceId = range.MeshSurfaceId;
+                            result.CameraObjectId = range.CameraObjectId;
+                            result.ViewportX = range.ViewportX;
+                            result.ViewportY = range.ViewportY;
+                            result.ViewportWidth = range.ViewportWidth;
+                            result.ViewportHeight = range.ViewportHeight;
+                        }
+                    }
                 }
 
                 return result;
@@ -11968,6 +13382,7 @@ void main()
             List<RenderCommand> commands,
             bool useReverseZ,
             Dictionary<uint, MeshPickEntry> pickMap,
+            List<MeshPickBatchRange> pickBatchRanges,
             ref uint nextPickId)
         {
             var opaque = commands
@@ -11990,7 +13405,7 @@ void main()
             _gl.Disable(GLEnum.Blend);
 
             foreach (RenderCommand cmd in opaque)
-                ExecuteMeshPickCommand(cmd, pickMap, ref nextPickId);
+                ExecuteMeshPickCommand(cmd, pickMap, pickBatchRanges, ref nextPickId);
 
             _gl.Enable(GLEnum.DepthTest);
             _gl.DepthFunc(transparentDepthFunc);
@@ -11998,7 +13413,7 @@ void main()
             _gl.Disable(GLEnum.Blend);
 
             foreach (RenderCommand cmd in transparent)
-                ExecuteMeshPickCommand(cmd, pickMap, ref nextPickId);
+                ExecuteMeshPickCommand(cmd, pickMap, pickBatchRanges, ref nextPickId);
 
             _gl.DepthMask(true);
             _gl.DepthFunc(GLEnum.Less);
@@ -12007,8 +13422,101 @@ void main()
         private void ExecuteMeshPickCommand(
             RenderCommand cmd,
             Dictionary<uint, MeshPickEntry> pickMap,
+            List<MeshPickBatchRange> pickBatchRanges,
             ref uint nextPickId)
         {
+            if (cmd.IsInstanceBatch)
+            {
+                if (string.IsNullOrWhiteSpace(cmd.MeshId))
+                    return;
+
+                if (string.IsNullOrWhiteSpace(cmd.MeshSurfaceId))
+                    return;
+
+                if (nextPickId == 0)
+                    return;
+
+                uint baseId = nextPickId;
+                uint instanceCount = (uint)cmd.InstanceCount;
+
+                if (instanceCount == 0 || baseId + instanceCount < baseId)
+                    return;
+
+                nextPickId += instanceCount;
+
+                pickBatchRanges.Add(new MeshPickBatchRange
+                {
+                    BaseId = baseId,
+                    Count = cmd.InstanceCount,
+                    SegmentIndex = cmd.InstanceSegmentIndex,
+                    FrameFirst = cmd.InstanceFirst,
+                    SceneId = cmd.SceneId,
+                    MeshId = cmd.MeshId,
+                    MeshSurfaceId = cmd.MeshSurfaceId,
+                    CameraObjectId = cmd.CameraObjectId,
+                    ViewportX = cmd.ViewportX,
+                    ViewportY = cmd.ViewportY,
+                    ViewportWidth = cmd.ViewportWidth,
+                    ViewportHeight = cmd.ViewportHeight
+                });
+
+                _currentProgram = _meshPickProgram;
+                _gl.UseProgram(_meshPickProgram);
+
+                _activeRenderSpace = cmd.RenderSpace;
+                _activeModelMatrix = cmd.Model;
+                _activeViewMatrix = cmd.View;
+                _activeProjectionMatrix = cmd.Projection;
+
+                BindCommandGeometry(cmd);
+                ApplyCullMode(cmd.CullMode);
+
+                if (_meshPickViewLocation != -1)
+                    SetMatrixUniform(_meshPickViewLocation, cmd.View);
+
+                if (_meshPickProjectionLocation != -1)
+                    SetMatrixUniform(_meshPickProjectionLocation, cmd.Projection);
+
+                if (_instanceModelBuffer != 0)
+                    _gl.BindBufferBase(BufferTargetARB.ShaderStorageBuffer, _instanceModelBufferBinding, _instanceModelBuffer);
+
+                if (_meshPickInstanceEnabledLocation != -1)
+                    _gl.Uniform1(_meshPickInstanceEnabledLocation, 1);
+
+                if (_meshPickInstanceBaseLocation != -1)
+                {
+                    int segmentBase = cmd.InstanceSegmentIndex >= 0 &&
+                        cmd.InstanceSegmentIndex < _instanceSegmentRegistry.Count &&
+                        _instanceSegmentRegistry[cmd.InstanceSegmentIndex] != null
+                        ? _instanceSegmentRegistry[cmd.InstanceSegmentIndex]!.GpuOffset
+                        : cmd.InstanceUploadFirst;
+                    _gl.Uniform1(_meshPickInstanceBaseLocation, segmentBase);
+                }
+
+                if (_meshPickInstanceWorldOffsetLocation != -1)
+                    _gl.Uniform3(
+                        _meshPickInstanceWorldOffsetLocation,
+                        cmd.InstanceWorldOffset.X,
+                        cmd.InstanceWorldOffset.Y,
+                        cmd.InstanceWorldOffset.Z);
+
+                if (_meshPickBaseIdLocation != -1)
+                    _gl.Uniform1(_meshPickBaseIdLocation, baseId);
+
+                _gl.DrawArraysInstanced(
+                    (GLEnum)cmd.PrimitiveType,
+                    0,
+                    (uint)(cmd.Vertices.Length / cmd.VertexStrideFloats),
+                    instanceCount);
+
+                if (_meshPickInstanceEnabledLocation != -1)
+                    _gl.Uniform1(_meshPickInstanceEnabledLocation, 0);
+
+                _gl.BindBuffer(BufferTargetARB.ArrayBuffer, 0);
+                _gl.BindVertexArray(0);
+                return;
+            }
+
             if (string.IsNullOrWhiteSpace(cmd.ObjectId))
                 return;
 
@@ -12076,6 +13584,10 @@ void main()
                 _meshPickViewLocation = _gl.GetUniformLocation(_meshPickProgram, "uView");
                 _meshPickProjectionLocation = _gl.GetUniformLocation(_meshPickProgram, "uProjection");
                 _meshPickColorLocation = _gl.GetUniformLocation(_meshPickProgram, "uPickColor");
+                _meshPickInstanceEnabledLocation = _gl.GetUniformLocation(_meshPickProgram, "uInstanceEnabled");
+                _meshPickInstanceBaseLocation = _gl.GetUniformLocation(_meshPickProgram, "uInstanceBase");
+                _meshPickInstanceWorldOffsetLocation = _gl.GetUniformLocation(_meshPickProgram, "uInstanceWorldOffset");
+                _meshPickBaseIdLocation = _gl.GetUniformLocation(_meshPickProgram, "uPickBaseId");
             }
 
             if (_meshPickFramebuffer != 0 &&
@@ -12169,21 +13681,52 @@ void main()
         uniform mat4 uModel;
         uniform mat4 uView;
         uniform mat4 uProjection;
+        uniform vec4 uPickColor;
+
+        layout(std430, binding = 5) readonly buffer InstanceModelMatrices
+        {
+            vec4 iModel[];
+        };
+
+        uniform int uInstanceEnabled;
+        uniform int uInstanceBase;
+        uniform vec3 uInstanceWorldOffset;
+        uniform uint uPickBaseId;
+
+        out vec4 vPickColor;
 
         void main()
         {
+            if (uInstanceEnabled == 1)
+            {
+                int i = (uInstanceBase + gl_InstanceID) * 4;
+                mat4 instanceModelMatrix = mat4(iModel[i], iModel[i + 1], iModel[i + 2], iModel[i + 3]);
+                vec4 worldPos4 = instanceModelMatrix * vec4(aPos, 1.0);
+                worldPos4.xyz += uInstanceWorldOffset;
+                gl_Position = uProjection * uView * worldPos4;
+
+                uint id = uPickBaseId + uint(gl_InstanceID);
+                vPickColor = vec4(
+                    float(id & 255u) / 255.0,
+                    float((id >> 8) & 255u) / 255.0,
+                    float((id >> 16) & 255u) / 255.0,
+                    float((id >> 24) & 255u) / 255.0);
+                return;
+            }
+
             gl_Position = uProjection * uView * uModel * vec4(aPos, 1.0);
+            vPickColor = uPickColor;
         }";
 
             string fragmentSource = @"
         #version 430 core
 
-        uniform vec4 uPickColor;
+        in vec4 vPickColor;
         out vec4 FragColor;
 
         void main()
         {
-            FragColor = uPickColor;
+            FragColor = vPickColor;
         }";
 
             uint vertexShader = CompileShader(ShaderType.VertexShader, vertexSource);
@@ -12370,6 +13913,8 @@ void main()
             _gl.Enable(GLEnum.Blend);
             _gl.BlendFunc(GLEnum.SrcAlpha, GLEnum.OneMinusSrcAlpha);
 
+            UploadVisibleInstanceModelData(opaque);
+
             foreach (var cmd in skyboxes)
                 ExecuteSkyboxCommand(cmd);
 
@@ -12503,7 +14048,46 @@ void main()
             {
                 ApplyBaseDepthState();
                 ApplyBaseMaterialAndState();
-                SubmitDrawArrays(cmd.PrimitiveType, 0, (uint)(cmd.Vertices.Length / cmd.VertexStrideFloats));
+
+                if (cmd.IsInstanceBatch)
+                {
+                    int instanceEnabledLoc = GetProgramLocationCache(cmd.Program).InstanceEnabled;
+                    int instanceBaseLoc = GetProgramLocationCache(cmd.Program).InstanceBase;
+                    int instanceWorldOffsetLoc = GetProgramLocationCache(cmd.Program).InstanceWorldOffset;
+
+                    if (instanceEnabledLoc != -1)
+                        _gl.Uniform1(instanceEnabledLoc, 1);
+
+                    if (instanceBaseLoc != -1)
+                    {
+                        int segmentBase = cmd.InstanceSegmentIndex >= 0 &&
+                            cmd.InstanceSegmentIndex < _instanceSegmentRegistry.Count &&
+                            _instanceSegmentRegistry[cmd.InstanceSegmentIndex] != null
+                            ? _instanceSegmentRegistry[cmd.InstanceSegmentIndex]!.GpuOffset
+                            : cmd.InstanceUploadFirst;
+                        _gl.Uniform1(instanceBaseLoc, segmentBase);
+                    }
+
+                    if (instanceWorldOffsetLoc != -1)
+                        _gl.Uniform3(
+                            instanceWorldOffsetLoc,
+                            cmd.InstanceWorldOffset.X,
+                            cmd.InstanceWorldOffset.Y,
+                            cmd.InstanceWorldOffset.Z);
+
+                    SubmitDrawArraysInstanced(
+                        cmd.PrimitiveType,
+                        0,
+                        (uint)(cmd.Vertices.Length / cmd.VertexStrideFloats),
+                        (uint)cmd.InstanceCount);
+
+                    if (instanceEnabledLoc != -1)
+                        _gl.Uniform1(instanceEnabledLoc, 0);
+                }
+                else
+                {
+                    SubmitDrawArrays(cmd.PrimitiveType, 0, (uint)(cmd.Vertices.Length / cmd.VertexStrideFloats));
+                }
             }
 
             void DrawOutlinePass()
@@ -13013,6 +14597,18 @@ void main()
                 _gl.DeleteBuffer(_directionalShadowCascadeBuffer);
                 _directionalShadowCascadeBuffer = 0;
             }
+
+            if (_instanceModelBuffer != 0)
+            {
+                _gl.DeleteBuffer(_instanceModelBuffer);
+                _instanceModelBuffer = 0;
+            }
+
+            _instanceModelBufferFloatCapacity = 0;
+            _instanceModelUploadScratch = Array.Empty<float>();
+            _instanceSegmentRegistry.Clear();
+            _instanceSegmentFreeGpu.Clear();
+            _instanceSegmentAllocatedInstances = 0;
 
 
             _cameraFogSettings.Clear();
