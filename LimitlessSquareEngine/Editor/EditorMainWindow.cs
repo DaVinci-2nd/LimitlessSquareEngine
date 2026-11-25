@@ -6845,7 +6845,7 @@ void main()
                 Friction = source.Friction,
                 Restitution = source.Restitution,
                 UseGravity = source.UseGravity,
-                EnableSpeculativeContacts = source.EnableSpeculativeContacts,
+                EnableCcd = source.EnableCcd,
                 LinearDamping = source.LinearDamping,
                 AngularDamping = source.AngularDamping
             };
@@ -14382,15 +14382,15 @@ void main()
                 }));
 
             panel.Children.Add(CreateCheckPropertyEditor(
-                "enableSpeculativeContacts",
-                () => body.EnableSpeculativeContacts,
+                "enableCcd",
+                () => body.EnableCcd,
                 value =>
                 {
-                    if (body.EnableSpeculativeContacts == value)
+                    if (body.EnableCcd == value)
                         return true;
 
                     BeginSceneParameterChange();
-                    body.EnableSpeculativeContacts = value;
+                    body.EnableCcd = value;
                     return PersistSceneObjectChanges(obj, false);
                 }));
 

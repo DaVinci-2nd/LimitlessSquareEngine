@@ -3465,11 +3465,12 @@ namespace LimitlessSquareEngine
                         }
                         break;
 
+                    case "enableCcd":
                     case "enableSpeculativeContacts":
                         if (prop.Value.ValueKind != JsonValueKind.True &&
                             prop.Value.ValueKind != JsonValueKind.False)
                         {
-                            reason = $"Object '{objectId}' physics.enableSpeculativeContacts must be true or false.";
+                            reason = $"Object '{objectId}' physics.enableCcd must be true or false.";
                             return false;
                         }
                         break;

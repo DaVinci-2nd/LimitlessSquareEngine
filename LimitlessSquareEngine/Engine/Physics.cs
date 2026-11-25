@@ -49,8 +49,6 @@ namespace LimitlessSquareEngine.Engine
             public Dictionary<string, AvatarPhysicsRuntime> Avatars { get; } = new(StringComparer.Ordinal);
             public Dictionary<string, CharacterControllerRuntime> Characters { get; } = new(StringComparer.Ordinal);
             public Dictionary<string, List<string>> ColliderIgnores { get; } = new(StringComparer.Ordinal);
-            public Dictionary<string, int> LockedAxes { get; } = new(StringComparer.Ordinal);
-            public Dictionary<string, JVector> LockedPositions { get; } = new(StringComparer.Ordinal);
             public Dictionary<string, Double3> RootMotionDeltas { get; } = new(StringComparer.Ordinal);
             public Dictionary<string, RigidBody> VoxelBodies { get; } = new(StringComparer.Ordinal);
 
@@ -103,14 +101,6 @@ namespace LimitlessSquareEngine.Engine
 
                 if (config.IgnoreColliders != null && config.IgnoreColliders.Count > 0)
                     physics.ColliderIgnores[node.Source.Id] = config.IgnoreColliders;
-
-                int lockedAxes = ResolveLockedAxes(config);
-
-                if ((lockedAxes & FreezePosition) != 0)
-                {
-                    physics.LockedAxes[node.Source.Id] = lockedAxes & FreezePosition;
-                    physics.LockedPositions[node.Source.Id] = ToJVector(ResolveWorld(node).Position);
-                }
             }
 
             _sceneWorlds[sceneId] = physics;
@@ -211,7 +201,6 @@ namespace LimitlessSquareEngine.Engine
                         StepAvatarPhysics(physics, fixedDeltaTime);
                     ApplyRootMotionBoost(physics, fixedDeltaTime);
                     physics.World.Step(fixedDeltaTime, false);
-                    RestoreLockedPositions(physics);
                     CollectAvatarContacts(physics);
                     PullPhysicsTransformsToScene(physics);
 
@@ -256,61 +245,41 @@ namespace LimitlessSquareEngine.Engine
             return axes;
         }
 
-        private static JMatrix BuildPartialInverseInertia(RigidBody body, int lockedAxes)
+        private static MotionAxes ResolveAllowedMotion(int lockedAxes)
         {
-            JMatrix inverseInertia = body.InverseInertia;
+            MotionAxes allowed = MotionAxes.All;
 
-            JVector column0 = inverseInertia.GetColumn(0);
-            JVector column1 = inverseInertia.GetColumn(1);
-            JVector column2 = inverseInertia.GetColumn(2);
-
-            return JMatrix.CreateScale(
-                (lockedAxes & FreezeRotationX) != 0 ? 0.0 : column0.X,
-                (lockedAxes & FreezeRotationY) != 0 ? 0.0 : column1.Y,
-                (lockedAxes & FreezeRotationZ) != 0 ? 0.0 : column2.Z);
-        }
-
-        private static void RestoreLockedPositions(ScenePhysicsRuntime physics)
-        {
-            if (physics.LockedAxes.Count == 0)
-                return;
-
-            foreach (var pair in physics.LockedAxes)
+            if ((lockedAxes & FreezePositionX) != 0)
             {
-                if (!physics.Bodies.TryGetValue(pair.Key, out RigidBody? body))
-                    continue;
-
-                if (body.MotionType != MotionType.Dynamic)
-                    continue;
-
-                if (!physics.LockedPositions.TryGetValue(pair.Key, out JVector locked))
-                    continue;
-
-                int axes = pair.Value;
-                JVector position = body.Position;
-                JVector velocity = body.Velocity;
-
-                if ((axes & FreezePositionX) != 0)
-                {
-                    position.X = locked.X;
-                    velocity.X = 0.0;
-                }
-
-                if ((axes & FreezePositionY) != 0)
-                {
-                    position.Y = locked.Y;
-                    velocity.Y = 0.0;
-                }
-
-                if ((axes & FreezePositionZ) != 0)
-                {
-                    position.Z = locked.Z;
-                    velocity.Z = 0.0;
-                }
-
-                body.Position = position;
-                body.Velocity = velocity;
+                allowed &= ~MotionAxes.LinearX;
             }
+
+            if ((lockedAxes & FreezePositionY) != 0)
+            {
+                allowed &= ~MotionAxes.LinearY;
+            }
+
+            if ((lockedAxes & FreezePositionZ) != 0)
+            {
+                allowed &= ~MotionAxes.LinearZ;
+            }
+
+            if ((lockedAxes & FreezeRotationX) != 0)
+            {
+                allowed &= ~MotionAxes.AngularX;
+            }
+
+            if ((lockedAxes & FreezeRotationY) != 0)
+            {
+                allowed &= ~MotionAxes.AngularY;
+            }
+
+            if ((lockedAxes & FreezeRotationZ) != 0)
+            {
+                allowed &= ~MotionAxes.AngularZ;
+            }
+
+            return allowed;
         }
 
         private static RigidBody CreateRigidBody(World world, Scene.SceneRuntimeNode node, PhysicsBody config)
@@ -338,18 +307,11 @@ namespace LimitlessSquareEngine.Engine
 
             int lockedAxes = ResolveLockedAxes(config);
 
-            if ((lockedAxes & FreezeRotation) != 0)
-            {
-                JMatrix inverseInertia = (lockedAxes & FreezeRotation) == FreezeRotation
-                    ? JMatrix.Zero
-                    : BuildPartialInverseInertia(body, lockedAxes);
-
-                body.SetMassInertia(inverseInertia, 1.0 / config.Mass, true);
-            }
+            body.AllowedMotion = ResolveAllowedMotion(lockedAxes);
 
             body.Friction = config.Friction;
             body.Restitution = config.Restitution;
-            body.EnableSpeculativeContacts = config.EnableSpeculativeContacts;
+            body.EnableCcd = config.EnableCcd;
             body.Damping = (config.LinearDamping, config.AngularDamping);
 
             switch (motionType)

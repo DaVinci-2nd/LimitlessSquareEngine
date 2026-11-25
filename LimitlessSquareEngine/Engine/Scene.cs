@@ -322,7 +322,7 @@ namespace LimitlessSquareEngine.Engine
         public double Restitution { get; set; } = 0.0;
 
         public bool UseGravity { get; set; } = true;
-        public bool EnableSpeculativeContacts { get; set; } = false;
+        public bool EnableCcd { get; set; } = false;
 
         public double LinearDamping { get; set; } = 0.002;
         public double AngularDamping { get; set; } = 0.005;
