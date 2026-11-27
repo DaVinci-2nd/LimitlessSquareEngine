@@ -201,6 +201,8 @@ namespace LimitlessSquareEngine
         private static MethodInfo? _editorStopMethod;
         private static bool _editorStarted = false;
         static ConcurrentQueue<Action> _editorHostActionQueue = new ConcurrentQueue<Action>();
+        static ConcurrentQueue<EditorHostBridge.AssetPreviewRequest> _editorAssetPreviewRequestQueue = new ConcurrentQueue<EditorHostBridge.AssetPreviewRequest>();
+        static ConcurrentQueue<EditorHostBridge.AssetPreviewResult> _editorAssetPreviewResultQueue = new ConcurrentQueue<EditorHostBridge.AssetPreviewResult>();
         private static readonly object _editorFrameSync = new object();
         private static byte[]? _editorLatestFramePixels;
         private static int _editorLatestFrameWidth;
@@ -1689,7 +1691,17 @@ namespace LimitlessSquareEngine
                 },
                 (scene, rootObjectId, prefabId, name) => Prefab.ExtractPrefabData(scene, rootObjectId, prefabId, name),
                 objects => Prefab.CollectPrefabObjects(objects),
-                (prefab, targetScene, parentId, nameOverride) => Prefab.Instantiate(prefab, targetScene, parentId, nameOverride, out _));
+                (prefab, targetScene, parentId, nameOverride) => Prefab.Instantiate(prefab, targetScene, parentId, nameOverride, out _),
+                request => _editorAssetPreviewRequestQueue.Enqueue(request),
+                () =>
+                {
+                    List<EditorHostBridge.AssetPreviewResult> results = new List<EditorHostBridge.AssetPreviewResult>();
+
+                    while (_editorAssetPreviewResultQueue.TryDequeue(out EditorHostBridge.AssetPreviewResult? result))
+                        results.Add(result);
+
+                    return results;
+                });
         }
 
         static void UnbindEditorHostBridge()
@@ -2472,6 +2484,7 @@ namespace LimitlessSquareEngine
             if (_isEditorMode)
             {
                 CaptureEditorFrameCore();
+                _graphics?.ProcessAssetPreviewQueue(_editorAssetPreviewRequestQueue, _editorAssetPreviewResultQueue);
             }
             else
             {

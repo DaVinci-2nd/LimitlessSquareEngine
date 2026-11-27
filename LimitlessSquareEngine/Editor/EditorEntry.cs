@@ -92,6 +92,7 @@ namespace LimitlessSquareEngine.Editor
                 window.TickSceneHostNavigation();
                 EditorHostBridge.RunRenderFrame();
                 window.PresentLatestFrame();
+                window.PresentAssetPreviews();
             };
 
             window.Closed += (_, _) =>

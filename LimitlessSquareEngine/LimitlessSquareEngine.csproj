@@ -79,6 +79,7 @@
     <Compile Include="Editor\EditorMainWindow.Distribution.cs" />
     <Compile Include="Editor\EditorMainWindow.LuaVisualEditor.cs" />
     <Compile Include="Editor\EditorMainWindow.Prefab.cs" />
+    <Compile Include="Editor\EditorMainWindow.Preview.cs" />
     <Compile Include="Editor\EditorRuntimeState.cs" />
     <Compile Include="Editor\EmbeddedGameHost.cs" />
   </ItemGroup>

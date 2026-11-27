@@ -55,6 +55,8 @@ namespace LimitlessSquareEngine
         private static Func<SceneData, string, string, string, PrefabData?>? _extractPrefabData;
         private static Func<List<SceneObject>, List<SceneObject>>? _collectPrefabObjects;
         private static Func<PrefabData, SceneData, string?, string?, string?>? _instantiatePrefab;
+        private static Action<AssetPreviewRequest>? _queueAssetPreview;
+        private static Func<List<AssetPreviewResult>>? _consumeAssetPreviewResults;
 
         internal static void Bind(
             Func<EditorHostBootstrapInfo> bootstrapInfoProvider,
@@ -101,7 +103,9 @@ namespace LimitlessSquareEngine
             Func<string, string?> validatePrefabFile,
             Func<SceneData, string, string, string, PrefabData?> extractPrefabData,
             Func<List<SceneObject>, List<SceneObject>> collectPrefabObjects,
-            Func<PrefabData, SceneData, string?, string?, string?> instantiatePrefab)
+            Func<PrefabData, SceneData, string?, string?, string?> instantiatePrefab,
+            Action<AssetPreviewRequest> queueAssetPreview,
+            Func<List<AssetPreviewResult>> consumeAssetPreviewResults)
         {
             _bootstrapInfoProvider = bootstrapInfoProvider;
             _setRenderWindowVisible = setRenderWindowVisible;
@@ -148,6 +152,8 @@ namespace LimitlessSquareEngine
             _extractPrefabData = extractPrefabData;
             _collectPrefabObjects = collectPrefabObjects;
             _instantiatePrefab = instantiatePrefab;
+            _queueAssetPreview = queueAssetPreview;
+            _consumeAssetPreviewResults = consumeAssetPreviewResults;
         }
 
         internal static void Unbind()
@@ -197,6 +203,8 @@ namespace LimitlessSquareEngine
             _extractPrefabData = null;
             _collectPrefabObjects = null;
             _instantiatePrefab = null;
+            _queueAssetPreview = null;
+            _consumeAssetPreviewResults = null;
         }
 
         public static void SetSceneObjectLocalPosition(string sceneId, string objectId, Double3 value)
@@ -581,6 +589,28 @@ namespace LimitlessSquareEngine
             return _instantiatePrefab(prefab, targetScene, parentId, nameOverride);
         }
 
+        public static void QueueAssetPreview(AssetPreviewRequest request)
+        {
+            if (request == null)
+                throw new ArgumentNullException(nameof(request));
+
+            if (string.IsNullOrWhiteSpace(request.RequestKey))
+                throw new ArgumentException("[X] Asset preview request key cannot be null or empty.", nameof(request));
+
+            if (_queueAssetPreview == null)
+                throw new InvalidOperationException("[X] Editor host bridge is not bound.");
+
+            _queueAssetPreview(request);
+        }
+
+        public static List<AssetPreviewResult> ConsumeAssetPreviewResults()
+        {
+            if (_consumeAssetPreviewResults == null)
+                return new List<AssetPreviewResult>();
+
+            return _consumeAssetPreviewResults();
+        }
+
         public static AnimationClipData? LoadAnimationClip(string filePath)
         {
             if (string.IsNullOrWhiteSpace(filePath))
@@ -709,6 +739,31 @@ namespace LimitlessSquareEngine
             public int Column { get; init; }
             public string Message { get; init; }
             public bool IsPrematureStreamTermination { get; init; }
+        }
+
+        public enum AssetPreviewKind
+        {
+            Material = 0,
+            Prefab = 1,
+            Avatar = 2,
+            AnimationClip = 3
+        }
+
+        public sealed class AssetPreviewRequest
+        {
+            public string RequestKey { get; init; } = "";
+            public AssetPreviewKind Kind { get; init; }
+            public string MaterialKey { get; init; } = "";
+            public string AssetFilePath { get; init; } = "";
+            public string AvatarMeshKey { get; init; } = "";
+            public int Width { get; init; } = 128;
+            public int Height { get; init; } = 128;
+        }
+
+        public sealed class AssetPreviewResult
+        {
+            public string RequestKey { get; init; } = "";
+            public EditorRenderedFrame? Frame { get; init; }
         }
     }
 }

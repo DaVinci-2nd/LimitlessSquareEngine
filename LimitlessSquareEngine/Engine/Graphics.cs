@@ -3427,6 +3427,9 @@ namespace LimitlessSquareEngine
 
         private ViewportRect GetSceneViewportRect()
         {
+            if (_assetPreviewViewportWidth > 0 && _assetPreviewViewportHeight > 0)
+                return new ViewportRect(0, 0, _assetPreviewViewportWidth, _assetPreviewViewportHeight);
+
             int windowWidth = _window.Size.X;
             int windowHeight = _window.Size.Y;
 
@@ -10685,7 +10688,7 @@ namespace LimitlessSquareEngine
         }
 
         [MoonSharpHidden]
-        public void QueueLoadedSceneRender()
+        public void QueueLoadedSceneRender(string? onlySceneId = null)
         {
             if (!_isInitialized)
                 Initialize();
@@ -10701,6 +10704,9 @@ namespace LimitlessSquareEngine
             foreach (var pair in _sceneCameraCache)
             {
                 string sceneId = pair.Key;
+
+                if (onlySceneId != null && !string.Equals(sceneId, onlySceneId, StringComparison.Ordinal))
+                    continue;
 
                 if (!_sceneObjectCache.TryGetValue(sceneId, out var objectMap))
                     continue;
@@ -12121,7 +12127,7 @@ namespace LimitlessSquareEngine
                 }
                 else
                 {
-                    _gl.BindFramebuffer(FramebufferTarget.Framebuffer, 0);
+                    _gl.BindFramebuffer(FramebufferTarget.Framebuffer, _scenePassTargetFramebuffer);
                     _gl.Viewport(
                         first.ViewportX,
                         first.ViewportY,

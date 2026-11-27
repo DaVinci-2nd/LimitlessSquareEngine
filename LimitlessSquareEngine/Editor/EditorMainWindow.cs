@@ -270,6 +270,7 @@ namespace LimitlessSquareEngine.Editor
             {
                 StopPlayback();
                 ResetSceneHostNavigationState();
+                DisposeAssetPreviewCache();
             };
 
             LeftDockSlot.Content = CreatePlaceholder("未加载场景或画布");
@@ -291,14 +292,16 @@ namespace LimitlessSquareEngine.Editor
             public bool IsDirectory { get; }
             public bool IsPointerOver { get; set; }
             public bool IsPressed { get; set; }
+            public ResourceGlyphIcon Icon { get; }
             public TextBlock NameTextBlock { get; }
             public TextBox NameTextBox { get; }
 
-            public ResourceItemState(Border item, string path, bool isDirectory, TextBlock nameTextBlock, TextBox nameTextBox)
+            public ResourceItemState(Border item, string path, bool isDirectory, ResourceGlyphIcon icon, TextBlock nameTextBlock, TextBox nameTextBox)
             {
                 Item = item;
                 Path = path;
                 IsDirectory = isDirectory;
+                Icon = icon;
                 NameTextBlock = nameTextBlock;
                 NameTextBox = nameTextBox;
             }
@@ -378,6 +381,7 @@ namespace LimitlessSquareEngine.Editor
             AnimatorControllerJsonFile,
             PrefabJsonFile,
             VrmaFile,
+            VrmFile,
             ImageFile,
             FragFile,
             VertFile,
@@ -1926,11 +1930,31 @@ namespace LimitlessSquareEngine.Editor
                 set => SetValue(KindProperty, value);
             }
 
+            private WriteableBitmap? _previewImage;
+
+            public string PreviewRequestKey { get; set; } = "";
+
+            public WriteableBitmap? PreviewImage
+            {
+                get => _previewImage;
+                set
+                {
+                    _previewImage = value;
+                    InvalidateVisual();
+                }
+            }
+
             private const double ResourceGlyphReferenceSize = 52.0;
 
             private static double ScaleFromBoundsY(Rect bounds, double absoluteAt52)
             {
                 return bounds.Height * (absoluteAt52 / ResourceGlyphReferenceSize);
+            }
+
+            private static Rect BuildAssetPreviewEmbedRect(Rect bounds, double ratio)
+            {
+                double edge = Math.Min(bounds.Width, bounds.Height) * ratio;
+                return new Rect(bounds.Center.X - edge * 0.5, bounds.Center.Y - edge * 0.5, edge, edge);
             }
 
             private static readonly IBrush WhiteBrush = Brushes.White;
@@ -2022,12 +2046,18 @@ namespace LimitlessSquareEngine.Editor
 
                     case ResourceIconKind.MaterialJsonFile:
                         DrawFileBase(context, bounds, MaterialBrush, true);
-                        DrawMaterialSphere(context, bounds);
+                        if (_previewImage != null)
+                            context.DrawImage(_previewImage, BuildAssetPreviewEmbedRect(bounds, 0.80));
+                        else
+                            DrawMaterialSphere(context, bounds);
                         break;
 
                     case ResourceIconKind.AnimationClipJsonFile:
                         DrawFileBase(context, bounds, AnimationClipBrush, true);
-                        DrawAnimationClipBars(context, bounds);
+                        if (_previewImage != null)
+                            context.DrawImage(_previewImage, BuildAssetPreviewEmbedRect(bounds, 0.78));
+                        else
+                            DrawAnimationClipBars(context, bounds);
                         break;
 
                     case ResourceIconKind.AnimatorControllerJsonFile:
@@ -2037,12 +2067,26 @@ namespace LimitlessSquareEngine.Editor
 
                     case ResourceIconKind.PrefabJsonFile:
                         DrawFileBase(context, bounds, PrefabBrush, true);
-                        DrawCenteredLabel(context, bounds, "Pre", ScaleFromBoundsY(bounds, 14.0), FontWeight.Bold);
+                        if (_previewImage != null)
+                            context.DrawImage(_previewImage, BuildAssetPreviewEmbedRect(bounds, 0.72));
+                        else
+                            DrawCenteredLabel(context, bounds, "Pre", ScaleFromBoundsY(bounds, 14.0), FontWeight.Bold);
                         break;
 
                     case ResourceIconKind.VrmaFile:
                         DrawFileBase(context, bounds, VrmaBrush, true);
-                        DrawVrmaBones(context, bounds);
+                        if (_previewImage != null)
+                            context.DrawImage(_previewImage, BuildAssetPreviewEmbedRect(bounds, 0.78));
+                        else
+                            DrawVrmaBones(context, bounds);
+                        break;
+
+                    case ResourceIconKind.VrmFile:
+                        DrawFileBase(context, bounds, VrmaBrush, true);
+                        if (_previewImage != null)
+                            context.DrawImage(_previewImage, BuildAssetPreviewEmbedRect(bounds, 0.78));
+                        else
+                            DrawVrmaBones(context, bounds);
                         break;
 
                     case ResourceIconKind.ImageFile:
@@ -5024,6 +5068,33 @@ namespace LimitlessSquareEngine.Editor
                 IsVisible = false
             };
 
+            ResourceGlyphIcon icon = new ResourceGlyphIcon
+            {
+                Kind = iconKind,
+                Width = 80,
+                Height = 80,
+                Margin = new Thickness(0, 0, 0, 2),
+                HorizontalAlignment = HorizontalAlignment.Center
+            };
+
+            if (iconKind == ResourceIconKind.MaterialJsonFile ||
+                iconKind == ResourceIconKind.PrefabJsonFile ||
+                iconKind == ResourceIconKind.AnimationClipJsonFile ||
+                iconKind == ResourceIconKind.VrmaFile ||
+                iconKind == ResourceIconKind.VrmFile)
+            {
+                EditorHostBridge.AssetPreviewKind previewKind = iconKind switch
+                {
+                    ResourceIconKind.MaterialJsonFile => EditorHostBridge.AssetPreviewKind.Material,
+                    ResourceIconKind.PrefabJsonFile => EditorHostBridge.AssetPreviewKind.Prefab,
+                    ResourceIconKind.VrmFile => EditorHostBridge.AssetPreviewKind.Avatar,
+                    _ => EditorHostBridge.AssetPreviewKind.AnimationClip
+                };
+
+                icon.PreviewRequestKey = EnqueueAssetPreview(path, previewKind, AssetPreviewIconSize, out WriteableBitmap? cachedPreview);
+                icon.PreviewImage = cachedPreview;
+            }
+
             Border item = new Border
             {
                 Width = 110,
@@ -5039,21 +5110,14 @@ namespace LimitlessSquareEngine.Editor
                     HorizontalAlignment = HorizontalAlignment.Center,
                     Children =
             {
-                new ResourceGlyphIcon
-                {
-                    Kind = iconKind,
-                    Width = 80,
-                    Height = 80,
-                    Margin = new Thickness(0, 0, 0, 2),
-                    HorizontalAlignment = HorizontalAlignment.Center
-                },
+                icon,
                 nameTextBlock,
                 nameTextBox
             }
                 }
             };
 
-            ResourceItemState state = new ResourceItemState(item, path, isDirectory, nameTextBlock, nameTextBox);
+            ResourceItemState state = new ResourceItemState(item, path, isDirectory, icon, nameTextBlock, nameTextBox);
             item.Tag = state;
             nameTextBlock.Tag = state;
             nameTextBox.Tag = state;
@@ -6163,6 +6227,9 @@ void main()
 
                 case ".vrma":
                     return ResourceIconKind.VrmaFile;
+
+                case ".vrm":
+                    return ResourceIconKind.VrmFile;
 
                 default:
                     return ResourceIconKind.GenericFile;
